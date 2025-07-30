@@ -1,0 +1,13 @@
+# Node / Frontend
+frontend/node_modules
+frontend/.next
+frontend/.env*
+
+# Python / Backend
+backend/__pycache__/
+backend/.env
+backend/.venv
+*.pyc
+
+# macOS system files
+.DS_Store
