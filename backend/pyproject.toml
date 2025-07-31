@@ -6,12 +6,15 @@ authors = [
     {name = "Rene Nuñez",email = "renenunezgalaviz@gmail.com"}
 ]
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<4.0"
 dependencies = [
+    "supabase (>=2.17.0,<3.0.0)",
+    "python-dotenv (>=1.1.1,<2.0.0)",
+    "nfl-data-py (>=0.3.3,<0.4.0)"
 ]
 
 [tool.poetry]
-packages = [{include = "backend", from = "src"}]
+package-mode = false
 
 
 [build-system]
