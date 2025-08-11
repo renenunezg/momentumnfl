@@ -11,3 +11,7 @@ backend/.venv
 
 # macOS system files
 .DS_Store
+
+.cursor/
+
+.vscode/
