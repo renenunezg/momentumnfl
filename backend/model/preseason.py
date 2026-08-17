@@ -22,9 +22,9 @@ from backend.model.outputs import TeamRating
 
 MODEL_VERSION = "nfl_preseason_v1"
 
-# Starting values; calibration owns the final ones.
+# Selected by the calibrate walk-forward on weeks 1-4 of dev seasons.
 CARRYOVER = 0.60
-WIN_TOTAL_BLEND = 0.35  # weight q on the win-total implied rating
+WIN_TOTAL_BLEND = 0.50  # weight q on the win-total implied rating
 ENVIRONMENT_CARRYOVER = 0.40
 PACE_CARRYOVER = 0.35
 BASE_OFFSEASON_SD = 4.5

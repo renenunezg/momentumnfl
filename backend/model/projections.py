@@ -7,21 +7,23 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 
-from backend.model import qb_adjustment as qb_layer
 from backend.model.joint_scoring import MODEL_VERSION, JointScoringFit
 from backend.model.market_blend import blend_margin
 from backend.model.outputs import GameProjection
 
-REST_POINTS_PER_DAY = 0.06
+# Selected by the calibrate walk-forward (dev 2016-2021): the rest signal is
+# already priced into the market line at this blend weight, so its own
+# coefficient tuned to zero; the market weight tuned to the 0.5 cap.
+REST_POINTS_PER_DAY = 0.0
 REST_CLIP_DAYS = 7.0
-DEFAULT_MARKET_WEIGHT = 0.25
+DEFAULT_MARKET_WEIGHT = 0.5
 
 
 @dataclass(frozen=True, slots=True)
 class LayerConfig:
     market_weight: float = DEFAULT_MARKET_WEIGHT
     rest_points_per_day: float = REST_POINTS_PER_DAY
-    qb_span_dropbacks: float = qb_layer.DEFAULT_SPAN_DROPBACKS
+    qb_span_dropbacks: float = 250.0
 
 
 def rest_adjustment(

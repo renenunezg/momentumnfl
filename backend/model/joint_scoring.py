@@ -48,8 +48,15 @@ class JointScoringConfig:
             raise ValueError("score_covariance_scale must be positive")
 
 
-# Pre-calibration starting values; the calibrate command owns the final ones.
-DEFAULT_CONFIG = JointScoringConfig()
+# Selected by the calibrate walk-forward on development seasons 2016-2021
+# (margin log loss); holdout 2022-2025 untouched. See calibration.py.
+DEFAULT_CONFIG = JointScoringConfig(
+    rating_half_life_weeks=12.0,
+    strength_prior_sd_ppd=0.25,
+    covariance_shrinkage=0.1,
+    student_t_degrees_of_freedom=7.0,
+    score_covariance_scale=0.85,
+)
 
 
 def _solve_ridge(
