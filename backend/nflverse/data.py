@@ -4,7 +4,9 @@ import pandas as pd
 import nflreadpy
 
 # Historical to current franchise codes so 32 teams are continuous 2015+.
-TEAM_NORMALIZATION = {"OAK": "LV", "SD": "LAC", "STL": "LA"}
+# LAR is the Rams code some nflverse datasets (teams, NGS, PFR) use where
+# pbp and schedules use LA.
+TEAM_NORMALIZATION = {"OAK": "LV", "SD": "LAC", "STL": "LA", "LAR": "LA"}
 TEAM_COLUMNS = (
     "home_team",
     "away_team",
