@@ -147,19 +147,15 @@ def compute_qb_adjustments(
     return adjustments
 
 
-def load_preseason_prior_means(
-    season: int,
-) -> dict[str, tuple[float, float]] | None:
+def build_prior_means(season: int) -> dict[str, tuple[float, float]] | None:
+    """Preseason prior means built fresh from the previous season, so runs
+    on a clean checkout carry the offseason prior without stored state."""
+    from backend.model.preseason import build_preseason_prior
+
     try:
-        frame = store.read_processed(
-            "preseason", f"{season}_prior_means.parquet"
-        )
+        return build_preseason_prior(season).strength_prior_means()
     except FileNotFoundError:
         return None
-    return {
-        str(row.team_abbr): (float(row.offense_ppd), float(row.defense_ppd))
-        for row in frame.itertuples()
-    }
 
 
 def fit_and_project(
@@ -175,7 +171,7 @@ def fit_and_project(
 ) -> tuple[JointScoringFit, list[TeamRating], list[GameProjection]]:
     as_of = as_of or datetime.now(timezone.utc)
     if strength_prior_means is None and use_preseason_prior:
-        strength_prior_means = load_preseason_prior_means(season)
+        strength_prior_means = build_prior_means(season)
     games = load_season_games(season)
     if slate is None:
         schedules = store.read_raw("schedules.parquet")

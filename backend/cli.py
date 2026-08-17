@@ -175,17 +175,6 @@ def run_preseason(args) -> None:
     )
     store.write_processed(ratings_df, "ratings", f"{args.season}_01.parquet")
 
-    means = prior.strength_prior_means()
-    means_df = pd.DataFrame(
-        [
-            {"team_abbr": team, "offense_ppd": off, "defense_ppd": deff}
-            for team, (off, deff) in means.items()
-        ]
-    )
-    store.write_processed(
-        means_df, "preseason", f"{args.season}_prior_means.parquet"
-    )
-
     schedules = store.read_raw("schedules.parquet")
     slate = schedules[
         schedules["season"].eq(args.season) & schedules["week"].eq(1)

@@ -21,10 +21,10 @@ jobs:
         run: pipx install poetry
       - name: Install dependencies
         run: poetry install --no-interaction
-      - name: Ingest current season
-        run: poetry run python -m backend ingest --seasons $(date +%Y)
+      - name: Ingest
+        run: poetry run python -m backend ingest --seasons $(seq 2015 $(date +%Y))
       - name: Build features
-        run: poetry run python -m backend features --seasons $(date +%Y)
+        run: poetry run python -m backend features --seasons $(seq 2015 $(date +%Y))
       - name: Fit and project
         run: poetry run python -m backend fit
       - name: Odds snapshot
