@@ -1,0 +1,32 @@
+"""Season pulls into backend/data/raw parquet. All writes are atomic."""
+
+from backend.config import RAW_DIR
+from backend.etl.store import write_parquet
+from backend.nflverse import data
+
+
+def ingest_season(season: int) -> None:
+    write_parquet(
+        data.load_pbp([season]), RAW_DIR / "pbp" / f"{season}.parquet"
+    )
+    write_parquet(
+        data.load_depth_charts([season]),
+        RAW_DIR / "depth_charts" / f"{season}.parquet",
+    )
+    write_parquet(
+        data.load_injuries([season]),
+        RAW_DIR / "injuries" / f"{season}.parquet",
+    )
+    if season >= 2018:
+        write_parquet(
+            data.load_pfr_advstats([season], "pass"),
+            RAW_DIR / "pfr_pass" / f"{season}.parquet",
+        )
+
+
+def ingest_shared(seasons: list[int]) -> None:
+    write_parquet(data.load_schedules(seasons), RAW_DIR / "schedules.parquet")
+    write_parquet(data.load_teams(), RAW_DIR / "teams.parquet")
+    write_parquet(
+        data.load_nextgen_stats("passing"), RAW_DIR / "ngs_passing.parquet"
+    )
