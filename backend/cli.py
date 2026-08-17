@@ -20,12 +20,20 @@ def main() -> None:
     )
     features_parser.add_argument("--seasons", nargs="+", type=int, default=SEASONS)
 
+    fit_parser = subparsers.add_parser(
+        "fit", help="fit in-season ratings and project a week"
+    )
+    fit_parser.add_argument("--season", type=int, required=True)
+    fit_parser.add_argument("--week", type=int, required=True)
+
     args = parser.parse_args()
 
     if args.command == "ingest":
         run_ingest(args)
     elif args.command == "features":
         run_features(args)
+    elif args.command == "fit":
+        run_fit(args)
 
 
 def run_ingest(args) -> None:
@@ -45,6 +53,32 @@ def run_ingest(args) -> None:
         print(f"PROBLEM: {problem}")
     if problems:
         raise SystemExit(1)
+
+
+def run_fit(args) -> None:
+    import pandas as pd
+
+    from backend.etl import store
+    from backend.model.fit_week import fit_and_project
+
+    fit, ratings, projections = fit_and_project(args.season, args.week)
+    ratings_df = pd.DataFrame([rating.to_record() for rating in ratings])
+    projections_df = pd.DataFrame(
+        [projection.to_record() for projection in projections]
+    )
+    store.write_processed(
+        ratings_df, "ratings", f"{args.season}_{args.week:02d}.parquet"
+    )
+    store.write_processed(
+        projections_df, "projections", f"{args.season}_{args.week:02d}.parquet"
+    )
+    print(
+        f"fit {args.season} week {args.week}: {len(ratings_df)} ratings, "
+        f"{len(projections_df)} projections, "
+        f"hfa {fit.hfa_points:.2f} pts, base drives {fit.base_drives:.1f}"
+    )
+    top = ratings_df.head(5)[["team_abbr", "power_rating"]]
+    print(top.to_string(index=False))
 
 
 def run_features(args) -> None:

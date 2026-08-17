@@ -61,17 +61,18 @@ def expected_starters(
     prior_starts = prior[prior["started"]].sort_values(["season", "model_week"])
     result = prior_starts.groupby("team")["passer_player_id"].last()
 
-    charts = depth_charts[
-        depth_charts["season"].eq(season)
-        & depth_charts["week"].eq(week)
-        & depth_charts["position"].eq("QB")
+    charts = depth_charts.rename(columns={"club_code": "team"})
+    charts = charts[
+        charts["season"].eq(season)
+        & charts["week"].eq(week)
+        & charts["position"].eq("QB")
     ]
-    if not charts.empty:
-        rank_column = (
-            "depth_team" if "depth_team" in charts.columns else "depth_position"
-        )
+    if "formation" in charts.columns:
+        charts = charts[charts["formation"].eq("Offense")]
+    if not charts.empty and "depth_team" in charts.columns:
         qb1 = (
-            charts.sort_values(rank_column)
+            charts.assign(rank=pd.to_numeric(charts["depth_team"], errors="coerce"))
+            .sort_values("rank")
             .groupby("team")["gsis_id"]
             .first()
             .dropna()
