@@ -5,6 +5,7 @@ CLAUDE.md
 # Secrets and local configuration
 .env
 .env.*
+!.env.example
 .claude/
 .cursor/
 .vscode/

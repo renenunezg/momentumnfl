@@ -1,0 +1,30 @@
+[tool.poetry]
+name = "momentumnfl"
+version = "0.1.0"
+description = "NFL power ratings"
+authors = ["Rene Nunez <renenunezgalaviz@gmail.com>"]
+package-mode = false
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.13"
+pandas = "^2.3"
+numpy = "^2.4"
+pyarrow = "^17.0"
+requests = "^2.32"
+python-dotenv = "^1.1"
+scipy = "^1.17"
+sqlalchemy = "^2.0.52"
+psycopg2-binary = "^2.9.12"
+nflreadpy = "^0.1.5"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = ["slow: long model fits"]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
