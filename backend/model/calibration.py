@@ -470,4 +470,23 @@ def run_calibration(verbose: bool = True) -> dict:
     )
     combined = pd.concat([dev_final, holdout], ignore_index=True)
     store.write_processed(combined, "calibration", "predictions.parquet")
+
+    # Freeze the discrete margin residual distribution as a small committed
+    # artifact so cover/push pricing works on clean checkouts (CI) without
+    # the full calibration output.
+    from backend.config import STATIC_DIR
+    from backend.model.market_blend import (
+        RESIDUAL_RANGE,
+        fit_margin_residual_distribution,
+    )
+
+    distribution = fit_margin_residual_distribution(
+        (combined["actual_margin"] - combined["model_margin"]).to_numpy()
+    )
+    pd.DataFrame(
+        {
+            "margin_offset": np.arange(-RESIDUAL_RANGE, RESIDUAL_RANGE + 1),
+            "probability": distribution,
+        }
+    ).to_csv(STATIC_DIR / "margin_distribution.csv", index=False)
     return summary

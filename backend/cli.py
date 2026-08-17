@@ -252,7 +252,6 @@ def run_odds(args) -> None:
 
     from backend.etl import store
     from backend.features.drives import _kickoff_utc
-    from backend.model.market_blend import fit_margin_residual_distribution
     from backend.odds.client import OddsAPIClient
     from backend.odds.markets import compare_priced_offers, flatten_offers
 
@@ -292,10 +291,11 @@ def run_odds(args) -> None:
     store.write_processed(
         offers, "market_offers", f"{season}_{week:02d}.parquet"
     )
-    backtest = store.read_processed("calibration", "predictions.parquet")
-    distribution = fit_margin_residual_distribution(
-        (backtest["actual_margin"] - backtest["model_margin"]).to_numpy()
-    )
+    from backend.config import STATIC_DIR
+
+    distribution = pd.read_csv(STATIC_DIR / "margin_distribution.csv")[
+        "probability"
+    ].to_numpy()
     comparisons = compare_priced_offers(projections, offers, distribution)
     store.write_processed(
         comparisons, "market_comparisons", f"{season}_{week:02d}.parquet"
