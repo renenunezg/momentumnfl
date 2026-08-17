@@ -52,6 +52,19 @@ def recency_by_game(
     }
 
 
+def load_game_index(seasons: list[int]) -> pd.DataFrame:
+    """game_id, season, model_week, start_date across seasons with features."""
+    available = set(store.processed_names("team_games"))
+    frames = [
+        store.read_processed("team_games", f"{season}.parquet")[
+            ["game_id", "season", "model_week", "start_date"]
+        ]
+        for season in seasons
+        if str(season) in available
+    ]
+    return pd.concat(frames, ignore_index=True)
+
+
 def compute_qb_adjustments(
     season: int,
     week: int,
@@ -62,10 +75,23 @@ def compute_qb_adjustments(
     config: JointScoringConfig,
     layer_config: LayerConfig,
     actual_starters: bool = False,
+    game_index: pd.DataFrame | None = None,
 ) -> dict[str, tuple[float, float]]:
     """game_id -> (home_adj, away_adj). With actual_starters (backtest), the
-    starter is who actually started; otherwise the expected starter."""
-    all_games = games[["game_id", "season", "model_week", "start_date"]]
+    starter is who actually started; otherwise the expected starter.
+
+    QB values use career history across seasons (game_index); baselines use
+    only the current season's training window, matching the rating fit."""
+    if game_index is None:
+        game_index = load_game_index(list(range(2015, season + 1)))
+    eligible = game_index[
+        (game_index["season"] < season)
+        | (
+            game_index["season"].eq(season)
+            & (game_index["model_week"] < week)
+        )
+    ]
+    all_games = eligible[["game_id", "season", "model_week", "start_date"]]
     played_ids = games.loc[games["model_week"] < week, "game_id"]
     qb_history = qb_games[qb_games["game_id"].isin(set(all_games["game_id"]))]
     values = qb_layer.qb_values(
@@ -76,16 +102,16 @@ def compute_qb_adjustments(
         values, qb_history, played_ids, weights
     )
 
+    history_for_value = qb_history
     if actual_starters:
-        slate_qb = qb_history[
-            qb_history["game_id"].isin(set(slate["game_id"].astype(str)))
-            & qb_history["started"]
+        slate_qb = qb_games[
+            qb_games["game_id"].isin(set(slate["game_id"].astype(str)))
+            & qb_games["started"]
         ]
         starter_of = {
             (row.game_id, row.team): row.passer_player_id
             for row in slate_qb.itertuples()
         }
-        history_for_value = qb_history[qb_history["game_id"].isin(set(played_ids))]
 
         def starter(game_id: str, team: str) -> str | None:
             return starter_of.get((game_id, team))
@@ -94,7 +120,6 @@ def compute_qb_adjustments(
         expected = qb_features.expected_starters(
             qb_history, all_games, depth_charts, season, week
         )
-        history_for_value = qb_history[qb_history["game_id"].isin(set(played_ids))]
 
         def starter(game_id: str, team: str) -> str | None:
             return expected.get(team)
@@ -123,6 +148,21 @@ def compute_qb_adjustments(
     return adjustments
 
 
+def load_preseason_prior_means(
+    season: int,
+) -> dict[str, tuple[float, float]] | None:
+    try:
+        frame = store.read_processed(
+            "preseason", f"{season}_prior_means.parquet"
+        )
+    except FileNotFoundError:
+        return None
+    return {
+        str(row.team_abbr): (float(row.offense_ppd), float(row.defense_ppd))
+        for row in frame.itertuples()
+    }
+
+
 def fit_and_project(
     season: int,
     week: int,
@@ -132,8 +172,11 @@ def fit_and_project(
     actual_starters: bool = False,
     strength_prior_means: dict[str, tuple[float, float]] | None = None,
     slate: pd.DataFrame | None = None,
+    use_preseason_prior: bool = True,
 ) -> tuple[JointScoringFit, list[TeamRating], list[GameProjection]]:
     as_of = as_of or datetime.now(timezone.utc)
+    if strength_prior_means is None and use_preseason_prior:
+        strength_prior_means = load_preseason_prior_means(season)
     games = load_season_games(season)
     if slate is None:
         schedules = store.read_raw("schedules.parquet")

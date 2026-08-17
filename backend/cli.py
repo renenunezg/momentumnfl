@@ -26,6 +26,11 @@ def main() -> None:
     fit_parser.add_argument("--season", type=int, required=True)
     fit_parser.add_argument("--week", type=int, required=True)
 
+    preseason_parser = subparsers.add_parser(
+        "preseason", help="build the week-1 prior, ratings, and projections"
+    )
+    preseason_parser.add_argument("--season", type=int, required=True)
+
     args = parser.parse_args()
 
     if args.command == "ingest":
@@ -34,6 +39,8 @@ def main() -> None:
         run_features(args)
     elif args.command == "fit":
         run_fit(args)
+    elif args.command == "preseason":
+        run_preseason(args)
 
 
 def run_ingest(args) -> None:
@@ -79,6 +86,92 @@ def run_fit(args) -> None:
     )
     top = ratings_df.head(5)[["team_abbr", "power_rating"]]
     print(top.to_string(index=False))
+
+
+def run_preseason(args) -> None:
+    import pandas as pd
+
+    from backend.etl import store
+    from backend.features.drives import _kickoff_utc
+    from backend.model.fit_week import (
+        compute_qb_adjustments,
+        load_qb_games,
+        load_team_names,
+    )
+    from backend.model.preseason import MODEL_VERSION, build_preseason_prior
+    from backend.model.projections import LayerConfig, assemble_projections
+
+    prior = build_preseason_prior(args.season)
+    team_names = load_team_names()
+    ratings = prior.ratings(team_names)
+    ratings_df = pd.DataFrame([rating.to_record() for rating in ratings])
+    ratings_df["model_version"] = MODEL_VERSION
+    ratings_df["missing_input_count"] = ratings_df["team_abbr"].map(
+        prior.ratings_frame.set_index("team_abbr")["missing_input_count"]
+    )
+    store.write_processed(ratings_df, "ratings", f"{args.season}_01.parquet")
+
+    means = prior.strength_prior_means()
+    means_df = pd.DataFrame(
+        [
+            {"team_abbr": team, "offense_ppd": off, "defense_ppd": deff}
+            for team, (off, deff) in means.items()
+        ]
+    )
+    store.write_processed(
+        means_df, "preseason", f"{args.season}_prior_means.parquet"
+    )
+
+    schedules = store.read_raw("schedules.parquet")
+    slate = schedules[
+        schedules["season"].eq(args.season) & schedules["week"].eq(1)
+    ].copy()
+    if slate.empty:
+        print(f"preseason {args.season}: no week-1 schedule yet; ratings only")
+        return
+    slate["neutral_site"] = slate["location"].eq("Neutral")
+    slate["start_date"] = _kickoff_utc(slate)
+    week1_fit = prior.week1_fit()
+    qb_games = load_qb_games(list(range(2015, args.season)))
+    try:
+        depth_charts = store.read_raw(
+            "depth_charts", f"{args.season}.parquet"
+        )
+    except FileNotFoundError:
+        depth_charts = pd.DataFrame(
+            columns=["season", "week", "position", "team", "gsis_id"]
+        )
+    previous_games = store.read_processed(
+        "team_games", f"{args.season - 1}.parquet"
+    )
+    qb_adjustments = compute_qb_adjustments(
+        args.season, 1, slate,
+        previous_games.assign(model_week=0), qb_games, depth_charts,
+        week1_fit.config, LayerConfig(),
+    )
+    market = {
+        str(row.game_id): -float(row.spread_line)
+        for row in slate.itertuples()
+        if pd.notna(getattr(row, "spread_line", None))
+    }
+    projections = assemble_projections(
+        week1_fit, slate, prior.as_of, team_names, qb_adjustments, market
+    )
+    projections_df = pd.DataFrame(
+        [projection.to_record() for projection in projections]
+    )
+    projections_df["model_version"] = MODEL_VERSION
+    store.write_processed(
+        projections_df, "projections", f"{args.season}_01.parquet"
+    )
+    print(
+        f"preseason {args.season}: {len(ratings_df)} ratings, "
+        f"{len(projections_df)} week-1 projections, "
+        f"points/win slope {prior.slope:.2f}"
+    )
+    print(
+        ratings_df.head(5)[["team_abbr", "power_rating"]].to_string(index=False)
+    )
 
 
 def run_features(args) -> None:
