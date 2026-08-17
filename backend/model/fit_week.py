@@ -135,7 +135,6 @@ def compute_qb_adjustments(
                 side_adjustments.append(0.0)
                 continue
             value = qb_layer.latest_qb_value(
-                values,
                 history_for_value,
                 all_games,
                 passer,

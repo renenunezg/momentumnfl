@@ -31,6 +31,10 @@ def main() -> None:
     )
     preseason_parser.add_argument("--season", type=int, required=True)
 
+    subparsers.add_parser(
+        "calibrate", help="walk-forward hyperparameter search"
+    )
+
     args = parser.parse_args()
 
     if args.command == "ingest":
@@ -41,6 +45,8 @@ def main() -> None:
         run_fit(args)
     elif args.command == "preseason":
         run_preseason(args)
+    elif args.command == "calibrate":
+        run_calibrate(args)
 
 
 def run_ingest(args) -> None:
@@ -79,9 +85,26 @@ def run_fit(args) -> None:
     store.write_processed(
         projections_df, "projections", f"{args.season}_{args.week:02d}.parquet"
     )
+    from backend.model.fit_week import load_season_games, load_team_names
+    from backend.model.fit_week import recency_by_game as recency_map
+    from backend.model.unit_ratings import fit_unit_ratings
+
+    games = load_season_games(args.season)
+    unit_games = store.read_processed("unit_games", f"{args.season}.parquet")
+    units = fit_unit_ratings(
+        unit_games,
+        games,
+        args.week,
+        fit.as_of,
+        recency_map(games, args.week, fit.config),
+    )
+    units_df = pd.DataFrame(units.to_records(load_team_names()))
+    store.write_processed(
+        units_df, "unit_ratings", f"{args.season}_{args.week:02d}.parquet"
+    )
     print(
         f"fit {args.season} week {args.week}: {len(ratings_df)} ratings, "
-        f"{len(projections_df)} projections, "
+        f"{len(projections_df)} projections, {len(units_df)} unit ratings, "
         f"hfa {fit.hfa_points:.2f} pts, base drives {fit.base_drives:.1f}"
     )
     top = ratings_df.head(5)[["team_abbr", "power_rating"]]
@@ -174,6 +197,24 @@ def run_preseason(args) -> None:
     )
 
 
+def run_calibrate(args) -> None:
+    from backend.model.calibration import run_calibration
+
+    summary = run_calibration()
+    print("\n=== selected configuration ===")
+    print(summary["engine_config"])
+    print(summary["layer_params"])
+    print(summary["preseason_config"])
+    print(f"use_prior_means: {summary['use_prior_means']}")
+    print(f"dev margin log loss: {summary['dev_margin_log_loss']:.4f}")
+    print(f"holdout margin log loss: {summary['holdout_margin_log_loss']:.4f}")
+    print(f"holdout coverage: {summary['holdout_coverage']}")
+    print("\n=== honesty report (dev) ===")
+    print(summary["dev_honesty"].to_string())
+    print("\n=== honesty report (holdout, untouched) ===")
+    print(summary["holdout_honesty"].to_string())
+
+
 def run_features(args) -> None:
     import pandas as pd
 
@@ -181,9 +222,14 @@ def run_features(args) -> None:
     from backend.features.drives import build_team_games
     from backend.features.qb import build_qb_games
     from backend.features.scoring import build_model_games
+    from backend.features.units import build_unit_games
 
     problems: list[str] = []
     schedules = store.read_raw("schedules.parquet")
+    try:
+        ngs_passing = store.read_raw("ngs_passing.parquet")
+    except FileNotFoundError:
+        ngs_passing = None
     for season in sorted(args.seasons):
         try:
             pbp = store.read_raw("pbp", f"{season}.parquet")
@@ -193,6 +239,15 @@ def run_features(args) -> None:
             store.write_processed(model_games, "team_games", f"{season}.parquet")
             store.write_processed(
                 build_qb_games(pbp), "qb_games", f"{season}.parquet"
+            )
+            try:
+                pfr_pass = store.read_raw("pfr_pass", f"{season}.parquet")
+            except FileNotFoundError:
+                pfr_pass = None
+            store.write_processed(
+                build_unit_games(pbp, pfr_pass, ngs_passing),
+                "unit_games",
+                f"{season}.parquet",
             )
             print(f"features {season}: {len(model_games)} games")
         except Exception as error:  # noqa: BLE001 - report and continue

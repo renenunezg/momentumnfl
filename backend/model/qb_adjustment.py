@@ -56,7 +56,6 @@ def qb_values(
 
 
 def latest_qb_value(
-    values: pd.DataFrame,
     qb_games: pd.DataFrame,
     game_order: pd.DataFrame,
     passer_player_id: str,

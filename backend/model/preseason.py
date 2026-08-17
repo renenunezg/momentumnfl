@@ -47,7 +47,10 @@ def load_win_totals(season: int) -> pd.Series:
     return totals.set_index("team_abbr")["win_total"]
 
 
-def points_per_win(previous_seasons: list[int]) -> float:
+def points_per_win(
+    previous_seasons: list[int],
+    engine_config: JointScoringConfig = DEFAULT_CONFIG,
+) -> float:
     """OLS slope of centered win totals onto same-season final power ratings,
     fit on history. Falls back to a fixed constant when degenerate."""
     xs, ys = [], []
@@ -64,7 +67,7 @@ def points_per_win(previous_seasons: list[int]) -> float:
             games,
             final_week,
             datetime.now(timezone.utc),
-            DEFAULT_CONFIG,
+            engine_config,
         )
         power = {
             team: float(
@@ -178,13 +181,18 @@ def build_preseason_prior(
     as_of: datetime | None = None,
     config: PreseasonConfig = PreseasonConfig(),
     engine_config: JointScoringConfig = DEFAULT_CONFIG,
+    previous_fit: JointScoringFit | None = None,
+    slope: float | None = None,
 ) -> PreseasonPrior:
+    """previous_fit and slope may be supplied by callers that already have
+    them (the calibration loop) to avoid refitting."""
     as_of = as_of or datetime.now(timezone.utc)
-    previous_games = load_season_games(season - 1)
-    final_week = int(previous_games["model_week"].max()) + 1
-    previous_fit = fit_joint_scoring(
-        previous_games, final_week, as_of, engine_config
-    )
+    if previous_fit is None:
+        previous_games = load_season_games(season - 1)
+        final_week = int(previous_games["model_week"].max()) + 1
+        previous_fit = fit_joint_scoring(
+            previous_games, final_week, as_of, engine_config
+        )
     index = previous_fit.team_index
     base = previous_fit.base_drives
 
@@ -193,7 +201,8 @@ def build_preseason_prior(
     except (FileNotFoundError, KeyError):
         win_totals = pd.Series(dtype=float)
     win_total_missing = win_totals.empty
-    slope = points_per_win(list(range(2015, season)))
+    if slope is None:
+        slope = points_per_win(list(range(2015, season)))
 
     rows = []
     centered_totals = win_totals - win_totals.mean() if not win_total_missing else win_totals
