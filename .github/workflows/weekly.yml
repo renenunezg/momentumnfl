@@ -1,0 +1,37 @@
+# Tuesday full production run. Cron is UTC and does not track DST, so the
+# window drifts an hour across the Nov/Mar changes; 16:00 UTC keeps a wide
+# margin behind the overnight nflverse pbp update after MNF either way.
+name: weekly
+on:
+  schedule:
+    - cron: "0 16 * * 2"
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install poetry
+        run: pipx install poetry
+      - name: Install dependencies
+        run: poetry install --no-interaction
+      - name: Ingest current season
+        run: poetry run python -m backend ingest --seasons $(date +%Y)
+      - name: Build features
+        run: poetry run python -m backend features --seasons $(date +%Y)
+      - name: Fit and project
+        run: poetry run python -m backend fit
+      - name: Odds snapshot
+        run: poetry run python -m backend odds
+        continue-on-error: true
+      - name: Publish
+        run: poetry run python -m backend publish --skip-backtest
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    env:
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}

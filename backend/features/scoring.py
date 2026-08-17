@@ -13,10 +13,14 @@ def build_model_games(
     team_games: pd.DataFrame, schedules: pd.DataFrame
 ) -> pd.DataFrame:
     games = team_games.copy()
-    regular_max = max_regular_week(schedules)
-    offset = games["season"].map(regular_max)
-    games["model_week"] = games["week"].where(
-        games["season_type"].eq("REG"), games["week"] + offset
+    # nflverse playoff weeks continue past the regular season (19-22 in the
+    # 17-game era), so week is already a chronological index; the offset
+    # only applies if a source ever restarts postseason weeks at 1.
+    regular_max = games["season"].map(max_regular_week(schedules))
+    postseason = ~games["season_type"].eq("REG")
+    needs_offset = postseason & games["week"].le(regular_max)
+    games["model_week"] = (
+        games["week"] + needs_offset.astype(int) * regular_max
     ).astype(int)
     # nflverse spread_line is positive when the home team is favored (an
     # expected home margin); sportsbook home-line notation flips the sign.

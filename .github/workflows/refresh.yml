@@ -1,0 +1,38 @@
+# Sunday and Thursday projections refresh: re-pull schedules and depth
+# charts, re-run starter detection and the odds snapshot, republish only
+# game_projections and market_comparisons so late-week QB news and line
+# moves reach the site without touching ratings.
+name: refresh
+on:
+  schedule:
+    - cron: "0 15 * * 0,4"
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install poetry
+        run: pipx install poetry
+      - name: Install dependencies
+        run: poetry install --no-interaction
+      - name: Ingest current season
+        run: poetry run python -m backend ingest --seasons $(date +%Y)
+      - name: Build features
+        run: poetry run python -m backend features --seasons $(date +%Y)
+      - name: Fit and project
+        run: poetry run python -m backend fit
+      - name: Odds snapshot
+        run: poetry run python -m backend odds
+        continue-on-error: true
+      - name: Publish projections only
+        run: poetry run python -m backend publish --projections-only
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    env:
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}

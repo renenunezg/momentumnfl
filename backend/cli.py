@@ -23,8 +23,8 @@ def main() -> None:
     fit_parser = subparsers.add_parser(
         "fit", help="fit in-season ratings and project a week"
     )
-    fit_parser.add_argument("--season", type=int, required=True)
-    fit_parser.add_argument("--week", type=int, required=True)
+    fit_parser.add_argument("--season", type=int)
+    fit_parser.add_argument("--week", type=int)
 
     preseason_parser = subparsers.add_parser(
         "preseason", help="build the week-1 prior, ratings, and projections"
@@ -34,6 +34,23 @@ def main() -> None:
     subparsers.add_parser(
         "calibrate", help="walk-forward hyperparameter search"
     )
+
+    odds_parser = subparsers.add_parser(
+        "odds", help="snapshot Odds API offers for a week"
+    )
+    odds_parser.add_argument("--season", type=int)
+    odds_parser.add_argument("--week", type=int)
+
+    publish_parser = subparsers.add_parser(
+        "publish", help="publish a week to the nfl schema"
+    )
+    publish_parser.add_argument("--season", type=int)
+    publish_parser.add_argument("--week", type=int)
+    publish_parser.add_argument(
+        "--source", choices=("fit", "preseason"), default="fit"
+    )
+    publish_parser.add_argument("--skip-backtest", action="store_true")
+    publish_parser.add_argument("--projections-only", action="store_true")
 
     args = parser.parse_args()
 
@@ -47,6 +64,10 @@ def main() -> None:
         run_preseason(args)
     elif args.command == "calibrate":
         run_calibrate(args)
+    elif args.command == "odds":
+        run_odds(args)
+    elif args.command == "publish":
+        run_publish(args)
 
 
 def run_ingest(args) -> None:
@@ -68,11 +89,29 @@ def run_ingest(args) -> None:
         raise SystemExit(1)
 
 
+def resolve_week(args) -> tuple[int, int]:
+    """(season, week) from flags, or the first week with unplayed games."""
+    if args.season is not None and args.week is not None:
+        return args.season, args.week
+    from backend.etl import store
+
+    schedules = store.read_raw("schedules.parquet")
+    unplayed = schedules[schedules["home_score"].isna()]
+    if unplayed.empty:
+        raise SystemExit("PROBLEM: no unplayed games to infer a week from")
+    first = unplayed.sort_values(["season", "week"]).iloc[0]
+    season = args.season if args.season is not None else int(first["season"])
+    week = args.week if args.week is not None else int(first["week"])
+    return season, week
+
+
 def run_fit(args) -> None:
     import pandas as pd
 
     from backend.etl import store
     from backend.model.fit_week import fit_and_project
+
+    args.season, args.week = resolve_week(args)
 
     fit, ratings, projections = fit_and_project(args.season, args.week)
     ratings_df = pd.DataFrame([rating.to_record() for rating in ratings])
@@ -213,6 +252,114 @@ def run_calibrate(args) -> None:
     print(summary["dev_honesty"].to_string())
     print("\n=== honesty report (holdout, untouched) ===")
     print(summary["holdout_honesty"].to_string())
+
+
+def run_odds(args) -> None:
+    from datetime import timedelta
+
+    import pandas as pd
+
+    from backend.etl import store
+    from backend.features.drives import _kickoff_utc
+    from backend.model.market_blend import fit_margin_residual_distribution
+    from backend.odds.client import OddsAPIClient
+    from backend.odds.markets import compare_priced_offers, flatten_offers
+
+    season, week = resolve_week(args)
+    projections = store.read_processed(
+        "projections", f"{season}_{week:02d}.parquet"
+    )
+    schedules = store.read_raw("schedules.parquet")
+    slate = schedules[
+        schedules["season"].eq(season) & schedules["week"].eq(week)
+    ].copy()
+    slate["start_date"] = _kickoff_utc(slate)
+    # Odds API events carry full team names; map abbrs for matching.
+    from backend.model.fit_week import load_team_names
+
+    names = load_team_names()
+    match_frame = pd.DataFrame(
+        {
+            "game_id": slate["game_id"],
+            "start_date": slate["start_date"],
+            "home_team": slate["home_team"].map(names),
+            "away_team": slate["away_team"].map(names),
+        }
+    )
+    client = OddsAPIClient()
+    window_from = pd.to_datetime(slate["start_date"]).min().to_pydatetime()
+    window_to = pd.to_datetime(
+        slate["start_date"]
+    ).max().to_pydatetime() + timedelta(hours=6)
+    snapshot = client.get_nfl_odds(window_from, window_to)
+    offers = flatten_offers(
+        snapshot.events,
+        match_frame,
+        snapshot.fetched_at,
+        bool(snapshot.configured_bookmakers),
+    )
+    store.write_processed(
+        offers, "market_offers", f"{season}_{week:02d}.parquet"
+    )
+    backtest = store.read_processed("calibration", "predictions.parquet")
+    distribution = fit_margin_residual_distribution(
+        (backtest["actual_margin"] - backtest["model_margin"]).to_numpy()
+    )
+    comparisons = compare_priced_offers(projections, offers, distribution)
+    store.write_processed(
+        comparisons, "market_comparisons", f"{season}_{week:02d}.parquet"
+    )
+    print(
+        f"odds {season} week {week}: {len(offers)} offers, "
+        f"{len(comparisons)} comparisons, "
+        f"requests remaining {snapshot.requests_remaining}"
+    )
+
+
+def run_publish(args) -> None:
+    from backend import db, publish
+    from backend.config import BACKTEST_PUBLISH_FLOOR
+    from backend.etl import store
+
+    season, week = resolve_week(args)
+    stem = f"{season}_{week:02d}.parquet"
+    projections = store.read_processed("projections", stem)
+    try:
+        market = store.read_processed("market_comparisons", stem)
+    except FileNotFoundError:
+        market = publish.fallback_market_comparisons(projections)
+        print("no odds snapshot; publishing nflverse-line market comparisons")
+
+    if args.projections_only:
+        counts = publish.publish_week(
+            db.engine, season, week,
+            ratings=None,
+            unit_ratings=None,
+            projections=projections,
+            market_comparisons=market,
+            backtest=None,
+        )
+    else:
+        ratings = store.read_processed("ratings", stem)
+        try:
+            unit_ratings = store.read_processed("unit_ratings", stem)
+        except FileNotFoundError:
+            unit_ratings = None
+        backtest = (
+            None
+            if args.skip_backtest
+            else publish.build_backtest_frame(BACKTEST_PUBLISH_FLOOR)
+        )
+        counts = publish.publish_week(
+            db.engine, season, week,
+            ratings=ratings,
+            unit_ratings=unit_ratings,
+            projections=projections,
+            market_comparisons=market,
+            backtest=backtest,
+        )
+    for table, count in counts.items():
+        print(f"{table}: {count} rows")
 
 
 def run_features(args) -> None:
