@@ -1,17 +1,30 @@
-# Node / Frontend
-frontend/node_modules
-frontend/.next
-frontend/.env*
+# Local guidance
+AGENTS.md
+CLAUDE.md
 
-# Python / Backend
-backend/__pycache__/
-backend/.env
-backend/.venv
-*.pyc
-
-# macOS system files
-.DS_Store
-
+# Secrets and local configuration
+.env
+.env.*
+.claude/
 .cursor/
-
 .vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+poetry.lock
+venv/
+env/
+
+# Node
+node_modules/
+.next/
+*.log
+*.tsbuildinfo
+
+# Model data and generated artifacts
+backend/data/
+
+# OS
+.DS_Store
