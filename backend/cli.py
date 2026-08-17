@@ -78,11 +78,8 @@ def run_ingest(args) -> None:
     ingest.ingest_shared(seasons)
     print(f"ingested shared (schedules, teams, ngs) for {seasons[0]}-{seasons[-1]}")
     for season in seasons:
-        try:
-            ingest.ingest_season(season)
-            print(f"ingested {season}")
-        except Exception as error:  # noqa: BLE001 - report and continue
-            problems.append(f"{season}: {error}")
+        problems.extend(ingest.ingest_season(season))
+        print(f"ingested {season}")
     for problem in problems:
         print(f"PROBLEM: {problem}")
     if problems:

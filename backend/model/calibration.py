@@ -42,8 +42,6 @@ class LayerParams:
     rest_points_per_day: float = 0.06
     playoff_multiplier: float = 1.0
     qb_span: float = 250.0
-    carryover: float = 0.60
-    win_total_blend: float = 0.35
 
 
 class WalkForwardData:

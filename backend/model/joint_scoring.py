@@ -51,7 +51,7 @@ class JointScoringConfig:
 # Selected by the calibrate walk-forward on development seasons 2016-2021
 # (margin log loss); holdout 2022-2025 untouched. See calibration.py.
 DEFAULT_CONFIG = JointScoringConfig(
-    rating_half_life_weeks=12.0,
+    rating_half_life_weeks=6.0,
     strength_prior_sd_ppd=0.25,
     covariance_shrinkage=0.1,
     student_t_degrees_of_freedom=7.0,

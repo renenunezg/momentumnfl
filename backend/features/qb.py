@@ -39,6 +39,46 @@ def _overrides() -> pd.DataFrame:
     return pd.read_csv(path)
 
 
+def _depth_chart_qb1(
+    depth_charts: pd.DataFrame, season: int, week: int
+) -> pd.Series | None:
+    """team -> depth-chart QB1 gsis_id, handling both nflverse formats:
+    the weekly format (through 2024: season/week/position/depth_team) and
+    the snapshot format (2025+: dt/pos_abb/pos_rank)."""
+    if "pos_abb" in depth_charts.columns:
+        charts = depth_charts[
+            depth_charts["pos_abb"].eq("QB") & depth_charts["gsis_id"].notna()
+        ]
+        if charts.empty:
+            return None
+        latest = charts[charts["dt"].eq(charts["dt"].max())]
+        return (
+            latest.sort_values("pos_rank")
+            .groupby("team")["gsis_id"]
+            .first()
+            .dropna()
+        )
+    if "season" not in depth_charts.columns:
+        return None
+    charts = depth_charts.rename(columns={"club_code": "team"})
+    charts = charts[
+        charts["season"].eq(season)
+        & charts["week"].eq(week)
+        & charts["position"].eq("QB")
+    ]
+    if "formation" in charts.columns:
+        charts = charts[charts["formation"].eq("Offense")]
+    if charts.empty or "depth_team" not in charts.columns:
+        return None
+    return (
+        charts.assign(rank=pd.to_numeric(charts["depth_team"], errors="coerce"))
+        .sort_values("rank")
+        .groupby("team")["gsis_id"]
+        .first()
+        .dropna()
+    )
+
+
 def expected_starters(
     qb_games: pd.DataFrame,
     game_index: pd.DataFrame,
@@ -58,25 +98,23 @@ def expected_starters(
         (qb_meta["season"] < season)
         | ((qb_meta["season"] == season) & (qb_meta["model_week"] < week))
     ]
+    # Dropback-weighted majority starter over each team's last 8 games, so a
+    # backup starting a meaningless late-season rest game is not mistaken for
+    # the incumbent.
     prior_starts = prior[prior["started"]].sort_values(["season", "model_week"])
-    result = prior_starts.groupby("team")["passer_player_id"].last()
+    recent = prior_starts.groupby("team").tail(8)
+    result = (
+        recent.groupby(["team", "passer_player_id"])["dropbacks"]
+        .sum()
+        .sort_values()
+        .groupby("team")
+        .tail(1)
+        .reset_index()
+        .set_index("team")["passer_player_id"]
+    )
 
-    charts = depth_charts.rename(columns={"club_code": "team"})
-    charts = charts[
-        charts["season"].eq(season)
-        & charts["week"].eq(week)
-        & charts["position"].eq("QB")
-    ]
-    if "formation" in charts.columns:
-        charts = charts[charts["formation"].eq("Offense")]
-    if not charts.empty and "depth_team" in charts.columns:
-        qb1 = (
-            charts.assign(rank=pd.to_numeric(charts["depth_team"], errors="coerce"))
-            .sort_values("rank")
-            .groupby("team")["gsis_id"]
-            .first()
-            .dropna()
-        )
+    qb1 = _depth_chart_qb1(depth_charts, season, week)
+    if qb1 is not None and not qb1.empty:
         known = set(qb_games["passer_player_id"])
         qb1 = qb1[qb1.isin(known) | ~qb1.index.isin(result.index)]
         result.update(qb1)
