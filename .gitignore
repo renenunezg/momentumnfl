@@ -28,3 +28,6 @@ backend/data/
 
 # OS
 .DS_Store
+
+# Local planning docs (specs/plans stay untracked)
+docs/superpowers/
