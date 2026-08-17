@@ -34,7 +34,12 @@ def ingest_season(season: int) -> list[str]:
         try:
             write_parquet(loader(), directory / f"{season}.parquet")
         except Exception as error:  # noqa: BLE001 - report and continue
-            problems.append(f"{season} {name}: {error}")
+            # nflreadpy rejects seasons it has not published yet; before the
+            # season starts that is expected, not a pipeline failure.
+            if "must be between" in str(error):
+                print(f"note: {season} {name} not yet published upstream")
+            else:
+                problems.append(f"{season} {name}: {error}")
     return problems
 
 

@@ -46,9 +46,6 @@ def main() -> None:
     )
     publish_parser.add_argument("--season", type=int)
     publish_parser.add_argument("--week", type=int)
-    publish_parser.add_argument(
-        "--source", choices=("fit", "preseason"), default="fit"
-    )
     publish_parser.add_argument("--skip-backtest", action="store_true")
     publish_parser.add_argument("--projections-only", action="store_true")
 
@@ -109,6 +106,14 @@ def run_fit(args) -> None:
     from backend.model.fit_week import fit_and_project
 
     args.season, args.week = resolve_week(args)
+    # Before any current-season game has been played there is nothing to fit;
+    # the preseason prior is the correct producer for that window, so the
+    # weekly cron stays valid across the season boundary.
+    played = str(args.season) in store.processed_names("team_games")
+    if not played:
+        print(f"fit: no played {args.season} games yet, running preseason")
+        run_preseason(args)
+        return
 
     fit, ratings, projections = fit_and_project(args.season, args.week)
     ratings_df = pd.DataFrame([rating.to_record() for rating in ratings])
@@ -376,7 +381,11 @@ def run_features(args) -> None:
         ngs_passing = None
     for season in sorted(args.seasons):
         try:
-            pbp = store.read_raw("pbp", f"{season}.parquet")
+            try:
+                pbp = store.read_raw("pbp", f"{season}.parquet")
+            except FileNotFoundError:
+                print(f"features {season}: no pbp yet, skipping")
+                continue
             season_schedules = schedules[schedules["season"].eq(season)]
             team_games = build_team_games(pbp, season_schedules)
             model_games = build_model_games(team_games, season_schedules)
