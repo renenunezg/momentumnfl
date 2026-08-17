@@ -31,7 +31,10 @@ python -m backend fit       --season <Y> --week <W>    # `preseason` for week 1
 python -m backend publish   --season <Y> --week <W> --source fit
 ```
 
-Publishing refuses to touch production unless `MOMENTUMNFL_DB_WRITES=1` is set.
+Publishing refuses to touch production unless `MOMENTUMNFL_DB_WRITES=1` is set
+(GitHub Actions runs opt in automatically). In-season, two Actions crons drive
+production: a Tuesday full run and a Sunday projections refresh; the CLI stays
+runnable by hand.
 
 ## Environment
 
