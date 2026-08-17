@@ -44,7 +44,10 @@ no key.
 
 ## Design
 
-The design of record is
-[docs/superpowers/specs/2026-08-17-nfl-model-design.md](docs/superpowers/specs/2026-08-17-nfl-model-design.md):
-engine math, nfelo idea adoption audit, unit ratings, schema DDL, publish
-contract, and frontend plan.
+Ratings come from a conjugate-Gaussian ridge fit weekly (offense/defense points
+per drive fused with EPA, pace, and a fitted home-field parameter), with QB and
+rest adjustments, an offseason prior from mean reversion plus the win-total
+market, and a capped market blend on published spreads. Opponent-adjusted unit
+ratings (rush/pass offense and defense, pass block, run block, special teams)
+are published as descriptive companions. The full methodology is documented at
+renenunez.dev/nfl/methodology.
