@@ -47,5 +47,23 @@ def ingest_shared(seasons: list[int]) -> None:
     write_parquet(data.load_schedules(seasons), RAW_DIR / "schedules.parquet")
     write_parquet(data.load_teams(), RAW_DIR / "teams.parquet")
     write_parquet(
-        data.load_nextgen_stats("passing"), RAW_DIR / "ngs_passing.parquet"
+        data.load_nextgen_stats(seasons, "passing"),
+        RAW_DIR / "ngs_passing.parquet",
     )
+
+
+def ingest_projection_inputs(season: int) -> list[str]:
+    """Refresh only inputs that can change an unplayed game's projection."""
+    write_parquet(data.load_schedules([season]), RAW_DIR / "schedules.parquet")
+    write_parquet(data.load_teams(), RAW_DIR / "teams.parquet")
+    try:
+        write_parquet(
+            data.load_depth_charts([season]),
+            RAW_DIR / "depth_charts" / f"{season}.parquet",
+        )
+    except Exception as error:  # noqa: BLE001 - caller reports all sources
+        if "must be between" in str(error):
+            print(f"note: {season} depth_charts not yet published upstream")
+            return []
+        return [f"{season} depth_charts: {error}"]
+    return []

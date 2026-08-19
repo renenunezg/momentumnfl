@@ -1,11 +1,20 @@
-# Tuesday full production run. Cron is UTC and does not track DST, so the
-# window drifts an hour across the Nov/Mar changes; 16:00 UTC keeps a wide
-# margin behind the overnight nflverse pbp update after MNF either way.
+# Tuesday production run after MNF. Normal runs restore historical core
+# features from a small cache, then download the active-season sources and
+# rebuild only the two most recently completed weeks plus any missing games.
+# A cold cache bootstraps old team/QB summaries one season at a time without
+# saving historical raw play-by-play.
 name: weekly
 on:
   schedule:
     - cron: "0 16 * * 2"
   workflow_dispatch: {}
+
+concurrency:
+  group: nfl-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   run:
@@ -13,27 +22,101 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+      - name: Resolve NFL season
+        id: context
+        shell: bash
+        run: |
+          year=$(date -u +%Y)
+          month=$(date -u +%m)
+          if [ "$month" -le 2 ]; then
+            season=$((year - 1))
+            active=true
+          elif [ "$month" -ge 8 ]; then
+            season=$year
+            active=true
+          else
+            season=$year
+            active=false
+          fi
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            active=true
+          fi
+          echo "season=$season" >> "$GITHUB_OUTPUT"
+          echo "active=$active" >> "$GITHUB_OUTPUT"
+      - name: Restore core data cache
+        id: core-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            backend/data/processed/team_games
+            backend/data/processed/qb_games
+          key: nfl-core-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'backend/nflverse/data.py', 'backend/features/drives.py', 'backend/features/qb.py', 'backend/features/scoring.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            nfl-core-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'backend/nflverse/data.py', 'backend/features/drives.py', 'backend/features/qb.py', 'backend/features/scoring.py') }}-
+      - name: Restore active-season unit data cache
+        if: steps.context.outputs.active == 'true'
+        id: unit-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: backend/data/processed/unit_games
+          key: nfl-units-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'backend/nflverse/data.py', 'backend/features/drives.py', 'backend/features/units.py') }}-${{ steps.context.outputs.season }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            nfl-units-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'backend/nflverse/data.py', 'backend/features/drives.py', 'backend/features/units.py') }}-${{ steps.context.outputs.season }}-
       - uses: actions/setup-python@v5
+        if: steps.context.outputs.active == 'true'
         with:
           python-version: "3.12"
       - name: Install poetry
+        if: steps.context.outputs.active == 'true'
         run: pipx install poetry
       - name: Install dependencies
+        if: steps.context.outputs.active == 'true'
         run: poetry install --no-interaction
-      # A fresh runner has no data directory, so every run rebuilds the full
-      # 2015-current history (a few minutes; QB careers and the preseason
-      # prior need it).
-      - name: Ingest
-        run: poetry run python -m backend ingest --seasons $(seq 2015 $(date +%Y))
-      - name: Build features
-        run: poetry run python -m backend features --seasons $(seq 2015 $(date +%Y))
-      - name: Fit and project
-        run: poetry run python -m backend fit
+      - name: Bootstrap missing historical core features
+        if: steps.context.outputs.active == 'true'
+        run: >-
+          poetry run python -m backend bootstrap-history
+          --through $(( ${{ steps.context.outputs.season }} - 1 ))
+      - name: Ingest active season
+        if: steps.context.outputs.active == 'true'
+        run: >-
+          poetry run python -m backend ingest
+          --seasons ${{ steps.context.outputs.season }}
+      - name: Build active-season features
+        if: steps.context.outputs.active == 'true'
+        run: >-
+          poetry run python -m backend features --incremental --lookback-weeks 2
+          --seasons ${{ steps.context.outputs.season }}
+      - name: Save updated core data cache
+        if: steps.context.outputs.active == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            backend/data/processed/team_games
+            backend/data/processed/qb_games
+          key: ${{ steps.core-cache.outputs.cache-primary-key }}
+      - name: Save updated active-season unit data cache
+        if: steps.context.outputs.active == 'true' && hashFiles('backend/data/processed/unit_games/*.parquet') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: backend/data/processed/unit_games
+          key: ${{ steps.unit-cache.outputs.cache-primary-key }}
+      - name: Fit ratings and project next week
+        if: steps.context.outputs.active == 'true'
+        run: >-
+          poetry run python -m backend fit
+          --season ${{ steps.context.outputs.season }}
       - name: Odds snapshot
-        run: poetry run python -m backend odds
+        if: steps.context.outputs.active == 'true'
+        run: >-
+          poetry run python -m backend odds
+          --season ${{ steps.context.outputs.season }}
         continue-on-error: true
       - name: Publish
-        run: poetry run python -m backend publish --skip-backtest
+        if: steps.context.outputs.active == 'true'
+        run: >-
+          poetry run python -m backend publish --skip-backtest
+          --season ${{ steps.context.outputs.season }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
     env:

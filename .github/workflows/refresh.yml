@@ -1,17 +1,31 @@
-# Sunday and Thursday projections refresh: re-pull schedules and depth
-# charts, re-run starter detection and the odds snapshot, republish only
-# game_projections and market_comparisons so late-week QB news and line
-# moves reach the site without touching ratings.
+# Daily schedule-aware projection refresh. It runs only when an unplayed game
+# starts in the next 30 hours, covering TNF, international games, Saturday
+# games, Sunday windows, MNF, Christmas, and reschedules without weekday logic.
+# Ratings remain the Tuesday snapshot; only schedules, depth charts, odds, and
+# current-game projections are refreshed.
 name: refresh
 on:
   schedule:
-    - cron: "0 15 * * 0,4"
-  workflow_dispatch: {}
+    - cron: "0 10 * 1,2,8-12 *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Refresh even with no kickoff in the next 30 hours
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: nfl-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -21,17 +35,66 @@ jobs:
         run: pipx install poetry
       - name: Install dependencies
         run: poetry install --no-interaction
-      - name: Ingest
-        run: poetry run python -m backend ingest --seasons $(seq 2015 $(date +%Y))
-      - name: Build features
-        run: poetry run python -m backend features --seasons $(seq 2015 $(date +%Y))
-      - name: Fit and project
-        run: poetry run python -m backend fit
+      - name: Resolve NFL season
+        id: context
+        shell: bash
+        run: |
+          year=$(date -u +%Y)
+          month=$(date -u +%m)
+          if [ "$month" -le 2 ]; then
+            season=$((year - 1))
+          else
+            season=$year
+          fi
+          echo "season=$season" >> "$GITHUB_OUTPUT"
+      - name: Refresh projection inputs
+        run: >-
+          poetry run python -m backend refresh-inputs
+          --season ${{ steps.context.outputs.season }}
+      - name: Check for an upcoming kickoff
+        id: upcoming
+        shell: bash
+        env:
+          FORCE_REFRESH: ${{ inputs.force }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$FORCE_REFRESH" = "true" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif poetry run python -m backend upcoming --season ${{ steps.context.outputs.season }} --hours 30; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            upcoming_exit=$?
+            if [ "$upcoming_exit" -ne 3 ]; then
+              exit "$upcoming_exit"
+            fi
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Restore Tuesday core data cache
+        if: steps.upcoming.outputs.run == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            backend/data/processed/team_games
+            backend/data/processed/qb_games
+          key: nfl-core-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'backend/nflverse/data.py', 'backend/features/drives.py', 'backend/features/qb.py', 'backend/features/scoring.py') }}-refresh-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            nfl-core-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'backend/nflverse/data.py', 'backend/features/drives.py', 'backend/features/qb.py', 'backend/features/scoring.py') }}-
+          fail-on-cache-miss: true
+      - name: Reproject from Tuesday ratings state
+        if: steps.upcoming.outputs.run == 'true'
+        run: >-
+          poetry run python -m backend fit --projections-only
+          --season ${{ steps.context.outputs.season }}
       - name: Odds snapshot
-        run: poetry run python -m backend odds
+        if: steps.upcoming.outputs.run == 'true'
+        run: >-
+          poetry run python -m backend odds
+          --season ${{ steps.context.outputs.season }}
         continue-on-error: true
       - name: Publish projections only
-        run: poetry run python -m backend publish --projections-only
+        if: steps.upcoming.outputs.run == 'true'
+        run: >-
+          poetry run python -m backend publish --projections-only
+          --season ${{ steps.context.outputs.season }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
     env:

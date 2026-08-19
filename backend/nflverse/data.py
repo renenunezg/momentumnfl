@@ -32,8 +32,7 @@ def load_pbp(seasons: list[int]) -> pd.DataFrame:
 
 
 def load_schedules(seasons: list[int]) -> pd.DataFrame:
-    df = normalize_teams(nflreadpy.load_schedules().to_pandas())
-    return df[df["season"].isin(seasons)].copy()
+    return normalize_teams(nflreadpy.load_schedules(seasons).to_pandas())
 
 
 def load_depth_charts(seasons: list[int]) -> pd.DataFrame:
@@ -54,7 +53,9 @@ def load_pfr_advstats(seasons: list[int], stat_type: str) -> pd.DataFrame:
     )
 
 
-def load_nextgen_stats(stat_type: str) -> pd.DataFrame:
+def load_nextgen_stats(seasons: list[int], stat_type: str) -> pd.DataFrame:
     return normalize_teams(
-        nflreadpy.load_nextgen_stats(stat_type=stat_type).to_pandas()
+        nflreadpy.load_nextgen_stats(
+            seasons=seasons, stat_type=stat_type
+        ).to_pandas()
     )
