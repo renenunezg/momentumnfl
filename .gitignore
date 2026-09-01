@@ -14,15 +14,8 @@ CLAUDE.md
 __pycache__/
 *.py[cod]
 .pytest_cache/
-poetry.lock
 venv/
 env/
-
-# Node
-node_modules/
-.next/
-*.log
-*.tsbuildinfo
 
 # Model data and generated artifacts
 backend/data/
