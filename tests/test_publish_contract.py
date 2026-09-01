@@ -6,7 +6,10 @@ from pathlib import Path
 
 from backend import publish
 
-DDL = (Path(__file__).parent.parent / "sql" / "001_nfl_schema.sql").read_text()
+DDL = "\n".join(
+    path.read_text()
+    for path in sorted((Path(__file__).parent.parent / "sql").glob("*.sql"))
+)
 
 CONTRACTS = {
     "teams": publish.TEAMS_COLUMNS,
@@ -15,6 +18,7 @@ CONTRACTS = {
     "game_projections": publish.GAME_PROJECTIONS_COLUMNS,
     "market_comparisons": publish.MARKET_COMPARISONS_COLUMNS,
     "backtest_predictions": publish.BACKTEST_COLUMNS,
+    "market_snapshots": publish.MARKET_SNAPSHOTS_COLUMNS,
 }
 
 

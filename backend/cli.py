@@ -320,7 +320,9 @@ def run_odds(args) -> None:
     from backend.etl import store
     from backend.features.drives import _kickoff_utc
     from backend.odds.client import OddsAPIClient
-    from backend.odds.markets import compare_priced_offers, flatten_offers
+    from backend.odds.markets import (
+        compare_priced_offers, consensus_lines, flatten_offers,
+    )
 
     season, week = resolve_week(args)
     projections = store.read_processed(
@@ -358,6 +360,10 @@ def run_odds(args) -> None:
     store.write_processed(
         offers, "market_offers", f"{season}_{week:02d}.parquet"
     )
+    store.write_processed(
+        consensus_lines(offers, projections),
+        "market_snapshots", f"{season}_{week:02d}.parquet",
+    )
     from backend.config import STATIC_DIR
 
     distribution = pd.read_csv(STATIC_DIR / "margin_distribution.csv")[
@@ -387,6 +393,10 @@ def run_publish(args) -> None:
     except FileNotFoundError:
         market = publish.fallback_market_comparisons(projections)
         print("no odds snapshot; publishing nflverse-line market comparisons")
+    try:
+        snapshot = store.read_processed("market_snapshots", stem)
+    except FileNotFoundError:
+        snapshot = None
 
     if args.projections_only:
         counts = publish.publish_week(
@@ -396,6 +406,7 @@ def run_publish(args) -> None:
             projections=projections,
             market_comparisons=market,
             backtest=None,
+            market_snapshot=snapshot,
         )
     else:
         ratings = store.read_processed("ratings", stem)
@@ -415,6 +426,7 @@ def run_publish(args) -> None:
             projections=projections,
             market_comparisons=market,
             backtest=backtest,
+            market_snapshot=snapshot,
         )
     for table, count in counts.items():
         print(f"{table}: {count} rows")

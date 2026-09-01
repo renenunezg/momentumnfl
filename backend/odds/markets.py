@@ -271,3 +271,39 @@ def compare_priced_offers(
         na_position="last",
         ignore_index=True,
     )
+
+
+def consensus_lines(
+    offers: pd.DataFrame, projections: pd.DataFrame
+) -> pd.DataFrame:
+    """One row per game: median sportsbook home spread and total across books
+    at market_fetched_at. Archived because nflverse overwrites its line in
+    place, so only this keeps the early-week line the site blended against."""
+    columns = [
+        "game_id", "season", "week", "fetched_at", "home_spread", "total",
+        "spread_books", "total_books",
+    ]
+    priced = offers.dropna(subset=["point"])
+    if priced.empty:
+        return pd.DataFrame(columns=columns)
+    spreads = priced[
+        priced["market"].eq("spreads") & priced["selection"].eq("home")
+    ]
+    totals = priced[
+        priced["market"].eq("totals") & priced["selection"].eq("over")
+    ]
+    lines = spreads.groupby("game_id")["point"].agg(
+        home_spread="median", spread_books="size"
+    ).join(
+        totals.groupby("game_id")["point"].agg(
+            total="median", total_books="size"
+        ),
+        how="outer",
+    )
+    out = projections[["game_id", "season", "week"]].merge(
+        lines, left_on="game_id", right_index=True
+    )
+    out["fetched_at"] = priced["market_fetched_at"].max()
+    for column in ("spread_books", "total_books"):
+        out[column] = out[column].fillna(0).astype(int)
+    return out[columns]

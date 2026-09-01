@@ -47,6 +47,10 @@ MARKET_COMPARISONS_COLUMNS = [
     "best_offer_model_cover_probability", "best_offer_model_fair_price",
     "best_offer_expected_value_per_unit",
 ]
+MARKET_SNAPSHOTS_COLUMNS = [
+    "game_id", "season", "week", "fetched_at", "home_spread", "total",
+    "spread_books", "total_books",
+]
 BACKTEST_COLUMNS = [
     "game_id", "season", "week", "week_index", "season_type", "home_team",
     "away_team", "neutral_site", "home_points", "away_points",
@@ -55,6 +59,7 @@ BACKTEST_COLUMNS = [
 
 _TIMESTAMP_COLUMNS = {
     "as_of", "start_date", "model_as_of", "best_offer_provider_last_update",
+    "fetched_at",
 }
 
 LEGACY_TEAM_NAMES = {
@@ -107,10 +112,13 @@ def publish_week(
     projections: pd.DataFrame,
     market_comparisons: pd.DataFrame | None,
     backtest: pd.DataFrame | None,
+    market_snapshot: pd.DataFrame | None = None,
 ) -> dict[str, int]:
     """One transaction; read-back counts returned for the caller to print.
     ratings=None (the projections-only refresh) leaves teams and both ratings
-    tables untouched."""
+    tables untouched. market_snapshot appends to the archive keyed by
+    (game_id, fetched_at), so a re-run of the same snapshot is idempotent
+    and earlier snapshots are never touched."""
     if ratings is not None:
         teams = build_teams_frame()
         metadata = team_metadata()
@@ -162,6 +170,24 @@ def publish_week(
             _prepare(market_comparisons, MARKET_COMPARISONS_COLUMNS).to_sql(
                 "market_comparisons", con=conn, if_exists="append", index=False
             )
+        if market_snapshot is not None and not market_snapshot.empty:
+            snapshot = _prepare(market_snapshot, MARKET_SNAPSHOTS_COLUMNS)
+            conn.execute(
+                text(
+                    "DELETE FROM market_snapshots "
+                    "WHERE game_id = ANY(:ids) AND fetched_at = ANY(:ts)"
+                ),
+                {
+                    "ids": snapshot["game_id"].tolist(),
+                    "ts": [
+                        t.to_pydatetime()
+                        for t in snapshot["fetched_at"].drop_duplicates()
+                    ],
+                },
+            )
+            snapshot.to_sql(
+                "market_snapshots", con=conn, if_exists="append", index=False
+            )
         if backtest is not None:
             conn.execute(text("TRUNCATE TABLE backtest_predictions"))
             _prepare(backtest, BACKTEST_COLUMNS).to_sql(
@@ -170,7 +196,7 @@ def publish_week(
             )
         for table in (
             "teams", "team_ratings", "team_unit_ratings", "game_projections",
-            "market_comparisons", "backtest_predictions",
+            "market_comparisons", "backtest_predictions", "market_snapshots",
         ):
             counts[table] = conn.execute(
                 text(f"SELECT COUNT(*) FROM {table}")
