@@ -71,7 +71,7 @@ jobs:
         run: pipx install poetry
       - name: Install dependencies
         if: steps.context.outputs.active == 'true'
-        run: poetry install --no-interaction
+        run: poetry sync --no-interaction
       - name: Bootstrap missing historical core features
         if: steps.context.outputs.active == 'true'
         run: >-
@@ -112,6 +112,8 @@ jobs:
           poetry run python -m backend odds
           --season ${{ steps.context.outputs.season }}
         continue-on-error: true
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
       - name: Publish
         if: steps.context.outputs.active == 'true'
         run: >-
@@ -119,5 +121,3 @@ jobs:
           --season ${{ steps.context.outputs.season }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-    env:
-      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}

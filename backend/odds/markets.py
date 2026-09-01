@@ -11,6 +11,7 @@ import pandas as pd
 from scipy.stats import t as student_t
 
 from backend.model.market_blend import cover_push_probabilities
+from backend.publish import MARKET_SNAPSHOTS_COLUMNS
 
 REVIEW_EDGE_POINTS = 4.0
 
@@ -81,11 +82,12 @@ def flatten_offers(
     ]
     offers = []
     for event in events:
+        home_team = event.get("home_team")
+        away_team = event.get("away_team")
+        if not (event.get("commence_time") and home_team and away_team):
+            continue
         game_id, match_score = match_event(
-            event["commence_time"],
-            event["home_team"],
-            event["away_team"],
-            schedule,
+            event["commence_time"], home_team, away_team, schedule
         )
         if game_id is None:
             continue
@@ -96,9 +98,9 @@ def flatten_offers(
                     continue
                 for outcome in market.get("outcomes") or []:
                     if market_key == "spreads":
-                        if outcome.get("name") == event["home_team"]:
+                        if outcome.get("name") == home_team:
                             selection = "home"
-                        elif outcome.get("name") == event["away_team"]:
+                        elif outcome.get("name") == away_team:
                             selection = "away"
                         else:
                             continue
@@ -163,8 +165,7 @@ def compare_priced_offers(
         executable = not eligible.empty
         candidate_offers = eligible if executable else game_offers
         total_scale = projection.total_sd * np.sqrt(
-            (projection.degrees_of_freedom - 2.0)
-            / projection.degrees_of_freedom
+            (projection.degrees_of_freedom - 2.0) / projection.degrees_of_freedom
         )
         candidates = []
         for offer in candidate_offers.itertuples():
@@ -175,35 +176,36 @@ def compare_priced_offers(
                 edge = projection.home_margin + offer.point
                 selection = projection.home_team
                 probability, push_probability = cover_push_probabilities(
-                    projection.home_margin, float(offer.point),
+                    projection.home_margin,
+                    float(offer.point),
                     margin_distribution,
                 )
             elif offer.market == "spreads" and offer.selection == "away":
                 edge = -projection.home_margin + offer.point
                 selection = projection.away_team
                 home_cover, push_probability = cover_push_probabilities(
-                    projection.home_margin, -float(offer.point),
+                    projection.home_margin,
+                    -float(offer.point),
                     margin_distribution,
                 )
                 probability = 1.0 - home_cover - push_probability
             elif offer.market == "totals" and offer.selection == "over":
                 edge = projection.model_total - offer.point
                 selection = "Over"
-                probability = float(student_t.cdf(
-                    edge / total_scale, projection.degrees_of_freedom
-                ))
+                probability = float(
+                    student_t.cdf(edge / total_scale, projection.degrees_of_freedom)
+                )
             elif offer.market == "totals" and offer.selection == "under":
                 edge = offer.point - projection.model_total
                 selection = "Under"
-                probability = float(student_t.cdf(
-                    edge / total_scale, projection.degrees_of_freedom
-                ))
+                probability = float(
+                    student_t.cdf(edge / total_scale, projection.degrees_of_freedom)
+                )
             else:
                 continue
             loss_probability = 1.0 - probability - push_probability
             expected_value = (
-                probability * _american_profit(float(offer.price))
-                - loss_probability
+                probability * _american_profit(float(offer.price)) - loss_probability
             )
             uncertainty = (
                 projection.margin_sd
@@ -246,12 +248,8 @@ def compare_priced_offers(
             "executable_offer_available": executable,
         }
         if candidates:
-            best = max(
-                candidates, key=lambda item: item["expected_value_per_unit"]
-            )
-            row.update(
-                {f"best_offer_{key}": value for key, value in best.items()}
-            )
+            best = max(candidates, key=lambda item: item["expected_value_per_unit"])
+            row.update({f"best_offer_{key}": value for key, value in best.items()})
             row["review_status"] = (
                 "requires_current_source_review"
                 if best["edge_points"] >= REVIEW_EDGE_POINTS
@@ -273,32 +271,22 @@ def compare_priced_offers(
     )
 
 
-def consensus_lines(
-    offers: pd.DataFrame, projections: pd.DataFrame
-) -> pd.DataFrame:
+def consensus_lines(offers: pd.DataFrame, projections: pd.DataFrame) -> pd.DataFrame:
     """One row per game: median sportsbook home spread and total across books
     at market_fetched_at. Archived because nflverse overwrites its line in
     place, so only this keeps the early-week line the site blended against."""
-    columns = [
-        "game_id", "season", "week", "fetched_at", "home_spread", "total",
-        "spread_books", "total_books",
-    ]
     priced = offers.dropna(subset=["point"])
     if priced.empty:
-        return pd.DataFrame(columns=columns)
-    spreads = priced[
-        priced["market"].eq("spreads") & priced["selection"].eq("home")
-    ]
-    totals = priced[
-        priced["market"].eq("totals") & priced["selection"].eq("over")
-    ]
-    lines = spreads.groupby("game_id")["point"].agg(
-        home_spread="median", spread_books="size"
-    ).join(
-        totals.groupby("game_id")["point"].agg(
-            total="median", total_books="size"
-        ),
-        how="outer",
+        return pd.DataFrame(columns=MARKET_SNAPSHOTS_COLUMNS)
+    spreads = priced[priced["market"].eq("spreads") & priced["selection"].eq("home")]
+    totals = priced[priced["market"].eq("totals") & priced["selection"].eq("over")]
+    lines = (
+        spreads.groupby("game_id")["point"]
+        .agg(home_spread="median", spread_books="size")
+        .join(
+            totals.groupby("game_id")["point"].agg(total="median", total_books="size"),
+            how="outer",
+        )
     )
     out = projections[["game_id", "season", "week"]].merge(
         lines, left_on="game_id", right_index=True
@@ -306,4 +294,4 @@ def consensus_lines(
     out["fetched_at"] = priced["market_fetched_at"].max()
     for column in ("spread_books", "total_books"):
         out[column] = out[column].fillna(0).astype(int)
-    return out[columns]
+    return out[MARKET_SNAPSHOTS_COLUMNS]

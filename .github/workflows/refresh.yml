@@ -34,7 +34,7 @@ jobs:
       - name: Install poetry
         run: pipx install poetry
       - name: Install dependencies
-        run: poetry install --no-interaction
+        run: poetry sync --no-interaction
       - name: Resolve NFL season
         id: context
         shell: bash
@@ -90,6 +90,8 @@ jobs:
           poetry run python -m backend odds
           --season ${{ steps.context.outputs.season }}
         continue-on-error: true
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
       - name: Publish projections only
         if: steps.upcoming.outputs.run == 'true'
         run: >-
@@ -97,5 +99,3 @@ jobs:
           --season ${{ steps.context.outputs.season }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-    env:
-      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}

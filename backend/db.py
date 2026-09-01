@@ -2,7 +2,7 @@ import os
 
 from sqlalchemy import create_engine, event
 
-from backend.config import REPO_ROOT  # noqa: F401  (importing loads .env)
+from backend import config  # noqa: F401  (importing loads .env)
 
 _WRITE_KEYWORDS = (
     "insert",
@@ -35,6 +35,9 @@ def writes_allowed() -> bool:
 def _block_unauthorized_writes(
     conn, cursor, statement, parameters, context, executemany
 ):
+    # Client-side check so an unauthorized run fails with a clear message
+    # before the statement leaves the process; the session below is also
+    # read-only server-side, so statement shape cannot slip past this.
     if _is_write_statement(statement) and not writes_allowed():
         raise RuntimeError(
             "Refusing to write to the production database (DATABASE_URL is "
@@ -44,12 +47,15 @@ def _block_unauthorized_writes(
         )
 
 
-def _pin_search_path(dbapi_connection, connection_record):
-    # The shared postgres role carries a role-level search_path=mlb,public
-    # (set for mlbmodel), and role settings win over the startup options
-    # through the pooler; a session-level SET wins over both.
+def _configure_session(dbapi_connection, connection_record):
+    # Every statement in publish.py is schema-qualified; the search_path is
+    # a convenience for ad-hoc queries through the same engine. The shared
+    # role carries its own role-level search_path, which a session SET wins
+    # over regardless of how the connection was pooled.
     with dbapi_connection.cursor() as cursor:
         cursor.execute("SET search_path TO nfl, public")
+        if not writes_allowed():
+            cursor.execute("SET default_transaction_read_only = on")
 
 
 _engine = None
@@ -64,13 +70,8 @@ def __getattr__(name):
             database_url = os.getenv("DATABASE_URL")
             if not database_url:
                 raise ValueError("DATABASE_URL not set in .env")
-            # NFL objects live in the nfl schema of the shared momentum
-            # Supabase project; public holds only cross-project objects.
-            _engine = create_engine(
-                database_url,
-                connect_args={"options": "-csearch_path=nfl,public"},
-            )
-            event.listens_for(_engine, "connect")(_pin_search_path)
+            _engine = create_engine(database_url)
+            event.listens_for(_engine, "connect")(_configure_session)
             event.listens_for(_engine, "before_cursor_execute")(
                 _block_unauthorized_writes
             )
