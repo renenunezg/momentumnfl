@@ -9,11 +9,13 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 
-from backend.features.units import EPA_PER_PRESSURE, POINTS_PER_LINE_YARD
-from backend.model.joint_scoring import _solve_ridge
+from backend.model.joint_scoring import solve_ridge
 
 MODEL_VERSION = "nfl_unit_ratings_v1"
 CHANNEL_PRIOR_SD = 3.0  # points per game
+# Points-scale conversions for the line-channel proxies.
+EPA_PER_PRESSURE = -0.45
+POINTS_PER_LINE_YARD = 0.08
 
 COLUMNS = (
     "rush_offense",
@@ -39,7 +41,7 @@ def _two_sided_ridge(
         design[row, n_teams + index[record.opponent]] = -1.0
     target = observations["value"].to_numpy(float)
     center = float(np.average(target, weights=weights))
-    parameters, _ = _solve_ridge(
+    parameters, _ = solve_ridge(
         design,
         target - center,
         weights,
@@ -63,9 +65,7 @@ def _pass_block_values(unit_games: pd.DataFrame) -> pd.Series:
     """Protection quality in points per game, higher is better. Uses charted
     pressures (2018+) corrected for QB time to throw; falls back to sack and
     hit EPA allowed."""
-    charted = unit_games["pressures_allowed"].notna() & unit_games[
-        "dropbacks"
-    ].gt(0)
+    charted = unit_games["pressures_allowed"].notna() & unit_games["dropbacks"].gt(0)
     values = pd.Series(np.nan, index=unit_games.index)
     if charted.any():
         subset = unit_games[charted]
@@ -82,9 +82,7 @@ def _pass_block_values(unit_games: pd.DataFrame) -> pd.Series:
             )
             adjusted.loc[valid_ttt] = rate[valid_ttt] - beta * centered_ttt
         values.loc[charted] = (
-            (adjusted - adjusted.mean())
-            * subset["dropbacks"]
-            * EPA_PER_PRESSURE
+            (adjusted - adjusted.mean()) * subset["dropbacks"] * EPA_PER_PRESSURE
         )
     fallback = values.isna()
     values.loc[fallback] = unit_games.loc[fallback, "protection_epa_allowed"]
@@ -99,8 +97,7 @@ def _run_block_values(unit_games: pd.DataFrame) -> pd.Series:
         / unit_games.loc[with_carries, "carries"].sum()
     )
     values = (
-        unit_games["line_yards"]
-        - league_per_carry * unit_games["carries"]
+        unit_games["line_yards"] - league_per_carry * unit_games["carries"]
     ) * POINTS_PER_LINE_YARD
     return values.where(with_carries, 0.0)
 
@@ -155,8 +152,7 @@ def fit_unit_ratings(
         run_block_value=_run_block_values(window),
     )
     teams = sorted(
-        set(training["home_team"].astype(str))
-        | set(training["away_team"].astype(str))
+        set(training["home_team"].astype(str)) | set(training["away_team"].astype(str))
     )
 
     channels = {
@@ -169,9 +165,7 @@ def fit_unit_ratings(
     ratings: dict[str, np.ndarray] = {}
     for name, column in channels.items():
         frame = _channel_frame(window, game_map, column)
-        unit, counter = _two_sided_ridge(
-            frame, teams, frame["weight"].to_numpy(float)
-        )
+        unit, counter = _two_sided_ridge(frame, teams, frame["weight"].to_numpy(float))
         if name == "rush":
             ratings["rush_offense"], ratings["rush_defense"] = unit, counter
         elif name == "pass":

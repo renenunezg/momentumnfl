@@ -1,6 +1,6 @@
 """The fit must refuse to train on games at or after as_of."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pandas as pd
 import pytest
@@ -24,7 +24,7 @@ def _toy_games() -> pd.DataFrame:
                 "game_drives": 22.0,
                 "home_epa_per_drive": 0.2,
                 "away_epa_per_drive": -0.1,
-                "start_date": datetime(2023, 9, week, tzinfo=timezone.utc),
+                "start_date": datetime(2023, 9, week, tzinfo=UTC),
             }
         )
     return pd.DataFrame(rows)
@@ -36,7 +36,7 @@ def test_fit_refuses_future_games():
         fit_joint_scoring(
             games,
             forecast_week=5,
-            as_of=datetime(2023, 9, 1, tzinfo=timezone.utc),
+            as_of=datetime(2023, 9, 1, tzinfo=UTC),
         )
 
 
@@ -44,7 +44,7 @@ def test_fit_accepts_clean_cut():
     fit = fit_joint_scoring(
         games=_toy_games(),
         forecast_week=5,
-        as_of=datetime(2023, 9, 10, tzinfo=timezone.utc),
+        as_of=datetime(2023, 9, 10, tzinfo=UTC),
     )
     assert fit.week == 5
     index = fit.team_index

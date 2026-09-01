@@ -4,14 +4,13 @@ total prices offseason change (QB moves, coaching, roster) that reversion
 cannot see."""
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import numpy as np
 import pandas as pd
 
-from backend.config import STATIC_DIR
+from backend.config import HISTORY_START_SEASON, STATIC_DIR
 from backend.etl import store
-from backend.model.fit_week import load_season_games, load_team_names
 from backend.model.joint_scoring import (
     DEFAULT_CONFIG,
     JointScoringConfig,
@@ -30,6 +29,10 @@ PACE_CARRYOVER = 0.35
 BASE_OFFSEASON_SD = 4.5
 WIN_TOTAL_MISSING_SD = 3.0
 FALLBACK_POINTS_PER_WIN = 2.7
+# Two full seasons of team-level (win total, rating) pairs before the fitted
+# slope replaces the fallback.
+MIN_SLOPE_SAMPLES = 64
+ENVIRONMENT_CLIP_POINTS = 8.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +60,7 @@ def points_per_win(
     for season in previous_seasons:
         try:
             totals = load_win_totals(season)
-            games = load_season_games(season)
+            games = store.season_games(season)
         except (FileNotFoundError, KeyError):
             continue
         if totals.empty or games.empty:
@@ -66,7 +69,7 @@ def points_per_win(
         fit = fit_joint_scoring(
             games,
             final_week,
-            datetime.now(timezone.utc),
+            datetime.now(UTC),
             engine_config,
         )
         power = {
@@ -84,7 +87,7 @@ def points_per_win(
             if team in power:
                 xs.append(float(total))
                 ys.append(power[team])
-    if len(xs) < 64:
+    if len(xs) < MIN_SLOPE_SAMPLES:
         return FALLBACK_POINTS_PER_WIN
     xs_array = np.asarray(xs)
     ys_array = np.asarray(ys)
@@ -171,9 +174,7 @@ class PreseasonPrior:
                     power_rating_sd=float(row.power_rating_sd),
                 )
             )
-        return sorted(
-            ratings, key=lambda rating: rating.power_rating, reverse=True
-        )
+        return sorted(ratings, key=lambda rating: rating.power_rating, reverse=True)
 
 
 def build_preseason_prior(
@@ -186,9 +187,9 @@ def build_preseason_prior(
 ) -> PreseasonPrior:
     """previous_fit and slope may be supplied by callers that already have
     them (the calibration loop) to avoid refitting."""
-    as_of = as_of or datetime.now(timezone.utc)
+    as_of = as_of or datetime.now(UTC)
     if previous_fit is None:
-        previous_games = load_season_games(season - 1)
+        previous_games = store.season_games(season - 1)
         final_week = int(previous_games["model_week"].max()) + 1
         previous_fit = fit_joint_scoring(
             previous_games, final_week, as_of, engine_config
@@ -202,10 +203,12 @@ def build_preseason_prior(
         win_totals = pd.Series(dtype=float)
     win_total_missing = win_totals.empty
     if slope is None:
-        slope = points_per_win(list(range(2015, season)))
+        slope = points_per_win(list(range(HISTORY_START_SEASON, season)))
 
     rows = []
-    centered_totals = win_totals - win_totals.mean() if not win_total_missing else win_totals
+    centered_totals = (
+        win_totals - win_totals.mean() if not win_total_missing else win_totals
+    )
     for team in previous_fit.teams:
         team_idx = index[team]
         previous_power = float(
@@ -220,9 +223,7 @@ def build_preseason_prior(
         if win_total_missing or team not in centered_totals:
             power = reverted
             missing = 1
-            sd = float(
-                np.sqrt(config.base_offseason_sd**2 + WIN_TOTAL_MISSING_SD**2)
-            )
+            sd = float(np.sqrt(config.base_offseason_sd**2 + WIN_TOTAL_MISSING_SD**2))
         else:
             implied = slope * float(centered_totals[team])
             power = (
@@ -236,8 +237,8 @@ def build_preseason_prior(
                 "power_rating": power,
                 "scoring_environment": np.clip(
                     config.environment_carryover * previous_environment,
-                    -8.0,
-                    8.0,
+                    -ENVIRONMENT_CLIP_POINTS,
+                    ENVIRONMENT_CLIP_POINTS,
                 ),
                 "expected_drives": base
                 + config.pace_carryover * float(previous_fit.pace[team_idx]),

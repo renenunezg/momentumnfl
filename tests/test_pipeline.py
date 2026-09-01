@@ -1,6 +1,6 @@
 """Production pipeline regressions for cached history and special game days."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pandas as pd
 
@@ -33,7 +33,7 @@ def test_upcoming_games_does_not_assume_a_weekday():
             }
         ]
     )
-    now = datetime(2026, 12, 23, 15, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 12, 23, 15, 0, tzinfo=UTC)
 
     games = pipeline.upcoming_games(schedules, 2026, hours=4, now=now)
 
@@ -55,9 +55,7 @@ def test_incremental_games_include_recent_weeks_and_old_gaps():
         {"W2", "W3"},
     ]
 
-    selected = pipeline.incremental_game_ids(
-        schedules, existing, lookback_weeks=1
-    )
+    selected = pipeline.incremental_game_ids(schedules, existing, lookback_weeks=1)
 
     assert selected == {"W1", "W3"}
 
@@ -69,9 +67,7 @@ def test_incremental_write_replaces_game_and_keeps_prior_weeks(monkeypatch):
             {"game_id": "W2", "value": 2, "start_date": "2026-09-08"},
         ]
     )
-    rebuilt = pd.DataFrame(
-        [{"game_id": "W2", "value": 20, "start_date": "2026-09-08"}]
-    )
+    rebuilt = pd.DataFrame([{"game_id": "W2", "value": 20, "start_date": "2026-09-08"}])
     written = []
     monkeypatch.setattr(
         pipeline.store,

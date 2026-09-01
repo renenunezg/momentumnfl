@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from math import isfinite
 
 
@@ -72,7 +72,7 @@ class TeamRating:
         return {
             "season": self.season,
             "week": self.week,
-            "as_of": self.as_of.astimezone(timezone.utc).isoformat(),
+            "as_of": self.as_of.astimezone(UTC).isoformat(),
             "model_version": self.model_version,
             "team_abbr": self.team_abbr,
             "team": self.team,
@@ -123,7 +123,8 @@ class GameProjection:
     market_weight: float = 0.0
 
     def __post_init__(self) -> None:
-        _validate_identity(self.game_id, self.game_id, "game")
+        if not self.game_id.strip():
+            raise ValueError("game_id must not be empty")
         _validate_identity(self.home_team_abbr, self.home_team, "home_team")
         _validate_identity(self.away_team_abbr, self.away_team, "away_team")
         _validate_as_of(self.as_of)
@@ -181,13 +182,13 @@ class GameProjection:
         return {
             "season": self.season,
             "week": self.week,
-            "as_of": self.as_of.astimezone(timezone.utc).isoformat(),
+            "as_of": self.as_of.astimezone(UTC).isoformat(),
             "model_version": self.model_version,
             "game_id": self.game_id,
             "start_date": (
                 None
                 if self.start_date is None
-                else self.start_date.astimezone(timezone.utc).isoformat()
+                else self.start_date.astimezone(UTC).isoformat()
             ),
             "home_team_abbr": self.home_team_abbr,
             "home_team": self.home_team,

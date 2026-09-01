@@ -1,7 +1,8 @@
+"""Parquet store under backend/data plus the loaders every model stage shares."""
+
 import os
 
 import pandas as pd
-import pyarrow.parquet
 
 from backend.config import PROCESSED_DIR, RAW_DIR
 
@@ -37,8 +38,33 @@ def processed_names(*parts: str) -> list[str]:
     return sorted(path.stem for path in directory.glob("*.parquet"))
 
 
-def processed_columns(*parts: str) -> list[str]:
-    """Column names of a processed artifact, from parquet metadata only."""
-    return list(
-        pyarrow.parquet.read_schema(PROCESSED_DIR.joinpath(*parts)).names
+def _read_seasons(
+    directory: str, seasons: list[int], columns: list[str] | None = None
+) -> pd.DataFrame:
+    available = set(processed_names(directory))
+    frames = [
+        read_processed(directory, f"{season}.parquet", columns=columns)
+        for season in seasons
+        if str(season) in available
+    ]
+    return pd.concat(frames, ignore_index=True)
+
+
+def team_names() -> dict[str, str]:
+    teams = read_raw("teams.parquet")
+    return dict(zip(teams["team_abbr"], teams["team_name"]))
+
+
+def season_games(season: int) -> pd.DataFrame:
+    return read_processed("team_games", f"{season}.parquet")
+
+
+def qb_games(seasons: list[int]) -> pd.DataFrame:
+    return _read_seasons("qb_games", seasons)
+
+
+def game_index(seasons: list[int]) -> pd.DataFrame:
+    """game_id, season, model_week, start_date across seasons with features."""
+    return _read_seasons(
+        "team_games", seasons, ["game_id", "season", "model_week", "start_date"]
     )

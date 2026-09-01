@@ -6,11 +6,12 @@ home-field parameter. Refit from scratch each week on all prior games."""
 from dataclasses import dataclass
 from datetime import datetime
 from math import isfinite, isnan
+from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
 
-from backend.model.outputs import GameProjection, TeamRating
+from backend.model.outputs import TeamRating
 
 MODEL_VERSION = "nfl_joint_scoring_v1"
 PACE_PRIOR_SD = 1.0
@@ -29,10 +30,7 @@ class JointScoringConfig:
     def __post_init__(self) -> None:
         if isnan(self.rating_half_life_weeks) or self.rating_half_life_weeks <= 0:
             raise ValueError("rating_half_life_weeks must be positive")
-        if (
-            not isfinite(self.strength_prior_sd_ppd)
-            or self.strength_prior_sd_ppd <= 0
-        ):
+        if not isfinite(self.strength_prior_sd_ppd) or self.strength_prior_sd_ppd <= 0:
             raise ValueError("strength_prior_sd_ppd must be positive")
         if not 0 <= self.covariance_shrinkage < 1:
             raise ValueError("covariance_shrinkage must be in [0, 1)")
@@ -59,7 +57,7 @@ DEFAULT_CONFIG = JointScoringConfig(
 )
 
 
-def _solve_ridge(
+def solve_ridge(
     design: np.ndarray,
     target: np.ndarray,
     weights: np.ndarray,
@@ -140,11 +138,8 @@ class JointScoringFit:
             )
         return sorted(ratings, key=lambda rating: rating.power_rating, reverse=True)
 
-    def engine_projection(
-        self, game
-    ) -> tuple[float, float, float, float, float, float]:
-        """Engine-only numbers for one schedule row: expected home/away points,
-        home-field points, margin_sd, total_sd, correlation."""
+    def engine_projection(self, game) -> "EngineProjection":
+        """Engine-only numbers for one schedule row."""
         index = self.team_index
         n_teams = len(self.teams)
         home = index[str(game.home_team)]
@@ -178,7 +173,7 @@ class JointScoringFit:
         margin_sd = float(np.sqrt(margin_total[0, 0]))
         total_sd = float(np.sqrt(margin_total[1, 1]))
         correlation = float(margin_total[0, 1] / (margin_sd * total_sd))
-        return (
+        return EngineProjection(
             float(expected_home),
             float(expected_away),
             float(home_field),
@@ -186,6 +181,15 @@ class JointScoringFit:
             total_sd,
             float(np.clip(correlation, -0.999, 0.999)),
         )
+
+
+class EngineProjection(NamedTuple):
+    expected_home: float
+    expected_away: float
+    home_field: float
+    margin_sd: float
+    total_sd: float
+    correlation: float
 
 
 def fit_joint_scoring(
@@ -206,9 +210,7 @@ def fit_joint_scoring(
     if training.empty:
         raise ValueError("at least one prior model week is required")
     if "start_date" in training:
-        latest_training_start = pd.to_datetime(
-            training["start_date"], utc=True
-        ).max()
+        latest_training_start = pd.to_datetime(training["start_date"], utc=True).max()
         if latest_training_start.to_pydatetime() >= as_of:
             raise ValueError("training games must start before as_of")
     teams = _team_catalog(games)
@@ -270,9 +272,7 @@ def fit_joint_scoring(
     prior_mean[-1] = HFA_PRIOR_POINTS / base_drives
     prior_sd = np.full(2 * n_teams + 1, config.strength_prior_sd_ppd)
     prior_sd[-1] = HFA_PRIOR_SD_POINTS / base_drives
-    parameters, covariance = _solve_ridge(
-        design, target, recency, prior_mean, prior_sd
-    )
+    parameters, covariance = solve_ridge(design, target, recency, prior_mean, prior_sd)
     paired_residuals = np.column_stack(
         [centered_points - design @ parameters, process_points - design @ parameters]
     )
@@ -290,7 +290,7 @@ def fit_joint_scoring(
         @ ones
         / information
     )
-    parameters, covariance = _solve_ridge(
+    parameters, covariance = solve_ridge(
         design, target, recency * information, prior_mean, prior_sd
     )
 
@@ -314,7 +314,7 @@ def fit_joint_scoring(
         pace_design[row, team_index[str(game.home_team)]] = 0.5
         pace_design[row, team_index[str(game.away_team)]] = 0.5
     base_drives = float(np.average(pace_target))
-    pace, _ = _solve_ridge(
+    pace, _ = solve_ridge(
         pace_design,
         pace_target - base_drives,
         recency[::2],

@@ -7,9 +7,18 @@ from backend.etl.store import write_parquet
 from backend.nflverse import data
 
 
+def _published(season: int) -> bool:
+    """nflreadpy rejects seasons it has not opened yet; before the season
+    starts that is expected, not a pipeline failure."""
+    return season <= nflreadpy.get_current_season()
+
+
 def ingest_season(season: int) -> list[str]:
     """Each source pulls independently so a season with no pbp yet (August)
     still gets depth charts and injuries. Returns per-source problems."""
+    if not _published(season):
+        print(f"note: {season} not yet published upstream")
+        return []
     sources = [
         ("pbp", lambda: data.load_pbp([season]), RAW_DIR / "pbp"),
         (
@@ -36,12 +45,7 @@ def ingest_season(season: int) -> list[str]:
         try:
             write_parquet(loader(), directory / f"{season}.parquet")
         except Exception as error:  # noqa: BLE001 - report and continue
-            # nflreadpy rejects seasons it has not published yet; before the
-            # season starts that is expected, not a pipeline failure.
-            if "must be between" in str(error):
-                print(f"note: {season} {name} not yet published upstream")
-            else:
-                problems.append(f"{season} {name}: {error}")
+            problems.append(f"{season} {name}: {error}")
     return problems
 
 
@@ -50,7 +54,7 @@ def ingest_shared(seasons: list[int]) -> None:
     write_parquet(data.load_teams(), RAW_DIR / "teams.parquet")
     # nflreadpy rejects NGS for a season until the Thursday after Labor Day,
     # so the Tuesday runs before kickoff pull only the seasons it accepts.
-    published = [s for s in seasons if s <= nflreadpy.get_current_season()]
+    published = [s for s in seasons if _published(s)]
     if published:
         write_parquet(
             data.load_nextgen_stats(published, "passing"),
@@ -64,14 +68,14 @@ def ingest_projection_inputs(season: int) -> list[str]:
     """Refresh only inputs that can change an unplayed game's projection."""
     write_parquet(data.load_schedules([season]), RAW_DIR / "schedules.parquet")
     write_parquet(data.load_teams(), RAW_DIR / "teams.parquet")
+    if not _published(season):
+        print(f"note: {season} depth_charts not yet published upstream")
+        return []
     try:
         write_parquet(
             data.load_depth_charts([season]),
             RAW_DIR / "depth_charts" / f"{season}.parquet",
         )
     except Exception as error:  # noqa: BLE001 - caller reports all sources
-        if "must be between" in str(error):
-            print(f"note: {season} depth_charts not yet published upstream")
-            return []
         return [f"{season} depth_charts: {error}"]
     return []

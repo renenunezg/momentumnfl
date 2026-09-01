@@ -23,9 +23,7 @@ CONTRACTS = {
 
 
 def _ddl_columns(table: str) -> list[str]:
-    match = re.search(
-        rf"create table nfl\.{table} \((.*?)\);", DDL, re.DOTALL
-    )
+    match = re.search(rf"create table nfl\.{table} \((.*?)\);", DDL, re.DOTALL)
     assert match, f"table {table} not in DDL"
     columns = []
     for line in match.group(1).splitlines():

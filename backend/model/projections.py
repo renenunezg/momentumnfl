@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 from backend.model.joint_scoring import MODEL_VERSION, JointScoringFit
-from backend.model.market_blend import blend_margin
+from backend.model.market_blend import blend_margin, capped_weight
 from backend.model.outputs import GameProjection
 
 # Selected by the calibrate walk-forward (dev 2016-2021): the rest signal is
@@ -17,21 +17,23 @@ from backend.model.outputs import GameProjection
 REST_POINTS_PER_DAY = 0.0
 REST_CLIP_DAYS = 7.0
 DEFAULT_MARKET_WEIGHT = 0.5
+DEFAULT_QB_SPAN_DROPBACKS = 250.0
 
 
 @dataclass(frozen=True, slots=True)
 class LayerConfig:
+    """Output-layer parameters shared by production and the calibration
+    search, so the backtest scores exactly what gets published."""
+
     market_weight: float = DEFAULT_MARKET_WEIGHT
     rest_points_per_day: float = REST_POINTS_PER_DAY
-    qb_span_dropbacks: float = 250.0
+    qb_span_dropbacks: float = DEFAULT_QB_SPAN_DROPBACKS
 
 
 def rest_adjustment(
     home_rest: float | None, away_rest: float | None, points_per_day: float
 ) -> float:
-    if home_rest is None or away_rest is None:
-        return 0.0
-    if np.isnan(home_rest) or np.isnan(away_rest):
+    if pd.isna(home_rest) or pd.isna(away_rest):
         return 0.0
     return points_per_day * float(
         np.clip(home_rest - away_rest, -REST_CLIP_DAYS, REST_CLIP_DAYS)
@@ -56,14 +58,7 @@ def assemble_projections(
     projections = []
     for game in schedule.itertuples():
         game_id = str(game.game_id)
-        (
-            expected_home,
-            expected_away,
-            home_field,
-            margin_sd,
-            total_sd,
-            correlation,
-        ) = fit.engine_projection(game)
+        engine = fit.engine_projection(game)
 
         home_qb, away_qb = qb_adjustments.get(game_id, (0.0, 0.0))
         rest = rest_adjustment(
@@ -71,10 +66,8 @@ def assemble_projections(
             getattr(game, "away_rest", None),
             config.rest_points_per_day,
         )
-        expected_home += home_qb + 0.5 * rest
-        expected_away += away_qb - 0.5 * rest
-        expected_home = max(expected_home, 0.0)
-        expected_away = max(expected_away, 0.0)
+        expected_home = max(engine.expected_home + home_qb + 0.5 * rest, 0.0)
+        expected_away = max(engine.expected_away + away_qb - 0.5 * rest, 0.0)
         pure_margin = expected_home - expected_away
 
         market_spread = market_home_spreads.get(game_id)
@@ -104,7 +97,7 @@ def assemble_projections(
                 away_team=team_names.get(str(game.away_team), str(game.away_team)),
                 neutral_site=bool(game.neutral_site),
                 div_game=None if div_game is None else bool(div_game),
-                home_field_points=home_field,
+                home_field_points=engine.home_field,
                 expected_home_points=float(expected_home),
                 expected_away_points=float(expected_away),
                 home_qb_adjustment=float(home_qb),
@@ -115,13 +108,13 @@ def assemble_projections(
                     None if market_spread is None else float(market_spread)
                 ),
                 market_weight=(
-                    0.0 if market_margin is None else float(
-                        min(config.market_weight, 0.5)
-                    )
+                    0.0
+                    if market_margin is None
+                    else capped_weight(config.market_weight)
                 ),
-                margin_sd=margin_sd,
-                total_sd=total_sd,
-                margin_total_correlation=correlation,
+                margin_sd=engine.margin_sd,
+                total_sd=engine.total_sd,
+                margin_total_correlation=engine.correlation,
                 degrees_of_freedom=fit.config.student_t_degrees_of_freedom,
             )
         )

@@ -1,7 +1,7 @@
 """nflreadpy wrappers returning pandas with current-franchise team codes."""
 
-import pandas as pd
 import nflreadpy
+import pandas as pd
 
 # Historical to current franchise codes so 32 teams are continuous 2015+.
 # LAR is the Rams code some nflverse datasets (teams, NGS, PFR) use where
@@ -55,7 +55,5 @@ def load_pfr_advstats(seasons: list[int], stat_type: str) -> pd.DataFrame:
 
 def load_nextgen_stats(seasons: list[int], stat_type: str) -> pd.DataFrame:
     return normalize_teams(
-        nflreadpy.load_nextgen_stats(
-            seasons=seasons, stat_type=stat_type
-        ).to_pandas()
+        nflreadpy.load_nextgen_stats(seasons=seasons, stat_type=stat_type).to_pandas()
     )

@@ -2,18 +2,17 @@
 
 import pandas as pd
 
-from backend.config import STATIC_DIR
+from backend.config import REPO_ROOT
+
+# Optional manual starter overrides: season, week, team_abbr, gsis_id.
+OVERRIDES_PATH = REPO_ROOT / "overrides" / "qb_starters.csv"
 
 
 def build_qb_games(pbp: pd.DataFrame) -> pd.DataFrame:
     """One row per (game_id, passer): dropbacks, EPA, team, starter flag."""
-    dropbacks = pbp[
-        pbp["qb_dropback"].eq(1) & pbp["passer_player_id"].notna()
-    ]
+    dropbacks = pbp[pbp["qb_dropback"].eq(1) & pbp["passer_player_id"].notna()]
     qb = (
-        dropbacks.groupby(
-            ["game_id", "posteam", "passer_player_id"], as_index=False
-        )
+        dropbacks.groupby(["game_id", "posteam", "passer_player_id"], as_index=False)
         .agg(
             dropbacks=("epa", "size"),
             epa=("epa", "sum"),
@@ -31,12 +30,9 @@ def build_qb_games(pbp: pd.DataFrame) -> pd.DataFrame:
 
 
 def _overrides() -> pd.DataFrame:
-    path = STATIC_DIR.parent.parent / "overrides" / "qb_starters.csv"
-    if not path.exists():
-        return pd.DataFrame(
-            columns=["season", "week", "team_abbr", "gsis_id"]
-        )
-    return pd.read_csv(path)
+    if not OVERRIDES_PATH.exists():
+        return pd.DataFrame(columns=["season", "week", "team_abbr", "gsis_id"])
+    return pd.read_csv(OVERRIDES_PATH)
 
 
 def _depth_chart_qb1(
@@ -53,10 +49,7 @@ def _depth_chart_qb1(
             return None
         latest = charts[charts["dt"].eq(charts["dt"].max())]
         return (
-            latest.sort_values("pos_rank")
-            .groupby("team")["gsis_id"]
-            .first()
-            .dropna()
+            latest.sort_values("pos_rank").groupby("team")["gsis_id"].first().dropna()
         )
     if "season" not in depth_charts.columns:
         return None
@@ -120,9 +113,7 @@ def expected_starters(
         result.update(qb1)
 
     overrides = _overrides()
-    overrides = overrides[
-        overrides["season"].eq(season) & overrides["week"].eq(week)
-    ]
+    overrides = overrides[overrides["season"].eq(season) & overrides["week"].eq(week)]
     for row in overrides.itertuples():
         result[row.team_abbr] = row.gsis_id
     return result

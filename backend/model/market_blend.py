@@ -12,17 +12,19 @@ RESIDUAL_RANGE = 60  # residual bins span [-60, 60]
 LAPLACE_SMOOTHING = 0.5
 
 
-def blend_margin(
-    pure_margin: float, market_margin: float | None, weight: float
-) -> float:
-    """market_margin is -market home spread. Falls back to pure when the
-    market is missing."""
-    w = min(weight, MARKET_WEIGHT_CAP)
-    if market_margin is None or (
-        isinstance(market_margin, float) and np.isnan(market_margin)
-    ):
-        return pure_margin
-    return (1.0 - w) * pure_margin + w * market_margin
+def capped_weight(weight: float) -> float:
+    return min(weight, MARKET_WEIGHT_CAP)
+
+
+def blend_margin(pure_margin, market_margin, weight: float):
+    """market_margin is -market home spread; None or NaN falls back to the
+    pure margin. Accepts scalars or aligned arrays and returns the same shape
+    (a float for scalar inputs)."""
+    w = capped_weight(weight)
+    pure = np.asarray(pure_margin, dtype=float)
+    market = np.asarray(market_margin, dtype=float)
+    blended = np.where(np.isnan(market), pure, (1.0 - w) * pure + w * market)
+    return float(blended) if blended.ndim == 0 else blended
 
 
 def fit_margin_residual_distribution(residuals: np.ndarray) -> np.ndarray:
@@ -34,9 +36,7 @@ def fit_margin_residual_distribution(residuals: np.ndarray) -> np.ndarray:
         -RESIDUAL_RANGE,
         RESIDUAL_RANGE,
     ).astype(int)
-    counts = np.bincount(
-        rounded + RESIDUAL_RANGE, minlength=len(bins)
-    ).astype(float)
+    counts = np.bincount(rounded + RESIDUAL_RANGE, minlength=len(bins)).astype(float)
     counts += LAPLACE_SMOOTHING
     return counts / counts.sum()
 
@@ -47,10 +47,7 @@ def cover_push_probabilities(
     """P(home covers offer_home_spread), P(push), from the residual
     distribution shifted to the model margin. Home covers when
     actual_margin + offer_home_spread > 0."""
-    margins = (
-        np.arange(-RESIDUAL_RANGE, RESIDUAL_RANGE + 1)
-        + round(model_margin)
-    )
+    margins = np.arange(-RESIDUAL_RANGE, RESIDUAL_RANGE + 1) + round(model_margin)
     edge = margins + offer_home_spread
     cover = float(distribution[edge > 1e-9].sum())
     push = float(distribution[np.abs(edge) <= 1e-9].sum())
