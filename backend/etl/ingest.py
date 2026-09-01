@@ -1,5 +1,7 @@
 """Season pulls into backend/data/raw parquet. All writes are atomic."""
 
+import nflreadpy
+
 from backend.config import RAW_DIR
 from backend.etl.store import write_parquet
 from backend.nflverse import data
@@ -46,10 +48,16 @@ def ingest_season(season: int) -> list[str]:
 def ingest_shared(seasons: list[int]) -> None:
     write_parquet(data.load_schedules(seasons), RAW_DIR / "schedules.parquet")
     write_parquet(data.load_teams(), RAW_DIR / "teams.parquet")
-    write_parquet(
-        data.load_nextgen_stats(seasons, "passing"),
-        RAW_DIR / "ngs_passing.parquet",
-    )
+    # nflreadpy rejects NGS for a season until the Thursday after Labor Day,
+    # so the Tuesday runs before kickoff pull only the seasons it accepts.
+    published = [s for s in seasons if s <= nflreadpy.get_current_season()]
+    if published:
+        write_parquet(
+            data.load_nextgen_stats(published, "passing"),
+            RAW_DIR / "ngs_passing.parquet",
+        )
+    else:
+        print(f"note: {seasons[-1]} ngs_passing not yet published upstream")
 
 
 def ingest_projection_inputs(season: int) -> list[str]:
