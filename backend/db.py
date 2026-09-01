@@ -35,9 +35,8 @@ def writes_allowed() -> bool:
 def _block_unauthorized_writes(
     conn, cursor, statement, parameters, context, executemany
 ):
-    # Client-side check so an unauthorized run fails with a clear message
-    # before the statement leaves the process; the session below is also
-    # read-only server-side, so statement shape cannot slip past this.
+    # Fails fast with a clear message; the read-only session below is the
+    # real guard.
     if _is_write_statement(statement) and not writes_allowed():
         raise RuntimeError(
             "Refusing to write to the production database (DATABASE_URL is "
@@ -48,10 +47,8 @@ def _block_unauthorized_writes(
 
 
 def _configure_session(dbapi_connection, connection_record):
-    # Every statement in publish.py is schema-qualified; the search_path is
-    # a convenience for ad-hoc queries through the same engine. The shared
-    # role carries its own role-level search_path, which a session SET wins
-    # over regardless of how the connection was pooled.
+    # publish.py qualifies every statement; the search_path only serves
+    # ad-hoc queries. A session SET beats the shared role's own setting.
     with dbapi_connection.cursor() as cursor:
         cursor.execute("SET search_path TO nfl, public")
         if not writes_allowed():
