@@ -84,6 +84,11 @@ jobs:
         run: >-
           poetry run python -m backend fit --projections-only
           --season ${{ steps.context.outputs.season }}
+      - name: Project regular-season wins
+        if: steps.upcoming.outputs.run == 'true'
+        run: >-
+          poetry run python -m backend season-wins
+          --season ${{ steps.context.outputs.season }}
       - name: Odds snapshot
         if: steps.upcoming.outputs.run == 'true'
         run: >-

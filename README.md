@@ -91,8 +91,16 @@ poetry run python -m backend features --seasons 2024 2025
 poetry run python -m backend calibrate
 poetry run python -m backend preseason --season 2025
 poetry run python -m backend fit --season 2025 --week 3
-poetry run python -m backend odds --season 2025 --week 3
-poetry run python -m backend publish --season 2025 --week 3
+```
+
+For the current preseason forecast, after the historical feature cache exists:
+
+```bash
+poetry run python -m backend refresh-inputs --season 2026
+poetry run python -m backend fit --season 2026
+poetry run python -m backend season-wins --season 2026
+poetry run python -m backend odds --season 2026
+poetry run python -m backend publish --season 2026 --skip-backtest
 ```
 
 `fit`, `odds`, and `publish` infer the season and week from the next unplayed
@@ -107,6 +115,7 @@ game of the season has been played yet.
 | `features --seasons [--incremental --lookback-weeks N]` | Build feature parquet; incremental mode rebuilds only recent and missing games. |
 | `fit [--season --week] [--projections-only]` | Fit ratings and unit ratings and project the week. |
 | `preseason --season` | Build the week-1 prior, ratings, and projections. |
+| `season-wins --season` | Project full regular-season wins for all 32 teams and write a per-game probability audit. |
 | `calibrate` | Run the walk-forward search and freeze the margin distribution. |
 | `validate-qb [--memory] [--context]` | Reproduce the development memory search, select the QB layer, report retrospective validation, and optionally test the context promotion gate, without changing artifacts. |
 | `qbs --season --week --team BUF [--context]` | Inspect starter/backup strengths, recorded and effective samples, and substitutions; optionally show context effects and model uncertainty. |
@@ -121,6 +130,30 @@ read-only server-side as well.
 Manual starter overrides can be placed in `overrides/qb_starters.csv` with
 columns `season, week, team_abbr, gsis_id`; they take priority over the depth
 chart.
+
+## Season win projections
+
+`season-wins` applies the existing engine and current expected QB adjustments to the complete regular-season schedule, with no game-line blend.
+Preseason ratings already use the frozen sportsbook win totals, so these outputs are not market-independent and their differences from that input are not betting edges.
+The sportsbook source and date live in `backend/data_static/win_total_sources.json`; missing provenance stays missing.
+
+Expected wins are completed wins plus the sum of remaining Student-t win probabilities.
+Completed ties contribute zero wins; future ties are not simulated.
+The command requires 272 unique games and 17 appearances per team (2021 onward), so incomplete schedules fail closed.
+Canceled games require explicit schedule support before a shortened season can be published.
+
+The 10th, 50th, and 90th percentiles come from 100,000 reproducible season draws using seed 20260907.
+A Gaussian copula combines shared draws from the engine's team-strength/HFA covariance with independent game residuals, preserving each game's Student-t win probability without counting parameter uncertainty twice.
+Current strength means and expected QBs stay fixed through the remaining schedule; future injuries, roster changes, and strength evolution are not modeled.
+The season ranges have not been coverage-calibrated and are not calibrated confidence intervals for the mean.
+Every draw awards exactly one win per remaining game, and analytic league expected wins equal 272 minus completed tied games.
+A retrospective preseason replay of 2023-2025 (96 team-seasons) had 2.53 wins MAE versus 2.39 for the frozen sportsbook input, with 81.25% of actual win totals inside the nominal 80% ranges.
+This is a descriptive check, not a tuning step or evidence of an independent market edge.
+
+`nfl.season_win_totals` contains the latest 32-team snapshot for each season, replaced in the same transaction as game projections.
+Apply `sql/003_season_win_totals.sql` before publishing this contract.
+The weekly and projection-refresh workflows regenerate season wins before publication.
+The `/nfl/season-wins` frontend reads only that schema and displays completed records, full-season expected wins, remaining wins, model ranges, and the dated sportsbook comparison.
 
 ## Production
 

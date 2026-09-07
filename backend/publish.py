@@ -143,6 +143,36 @@ BACKTEST_COLUMNS = [
     "actual_margin",
 ]
 
+SEASON_WIN_TOTALS_COLUMNS = [
+    "season",
+    "as_of",
+    "model_version",
+    "team_abbr",
+    "team",
+    "conference",
+    "division",
+    "wins",
+    "losses",
+    "ties",
+    "games_played",
+    "games_remaining",
+    "projected_wins",
+    "remaining_expected_wins",
+    "wins_p10",
+    "wins_p50",
+    "wins_p90",
+    "simulation_count",
+    "simulation_seed",
+    "ratings_through_week",
+    "ratings_through_date",
+    "schedule_fetched_at",
+    "depth_chart_as_of",
+    "sportsbook_win_total",
+    "sportsbook_source_name",
+    "sportsbook_source_date",
+    "sportsbook_source_url",
+]
+
 TABLES = (
     "teams",
     "team_ratings",
@@ -151,6 +181,7 @@ TABLES = (
     "market_comparisons",
     "backtest_predictions",
     "market_snapshots",
+    "season_win_totals",
 )
 
 _TIMESTAMP_COLUMNS = {
@@ -159,6 +190,9 @@ _TIMESTAMP_COLUMNS = {
     "model_as_of",
     "best_offer_provider_last_update",
     "fetched_at",
+    "ratings_through_date",
+    "schedule_fetched_at",
+    "depth_chart_as_of",
 }
 
 
@@ -201,6 +235,7 @@ def publish_week(
     market_comparisons: pd.DataFrame | None,
     backtest: pd.DataFrame | None,
     market_snapshot: pd.DataFrame | None = None,
+    season_win_totals: pd.DataFrame | None = None,
 ) -> dict[str, int]:
     """One transaction; read-back counts returned for the caller to print.
     ratings=None (the projections-only refresh) leaves teams and both ratings
@@ -217,7 +252,26 @@ def publish_week(
     game_ids = projections["game_id"].astype(str).tolist()
     week_key = {"s": season, "w": week}
     counts: dict[str, int] = {}
+    if season_win_totals is not None:
+        if (
+            len(season_win_totals) != 32
+            or season_win_totals["team_abbr"].duplicated().any()
+            or not season_win_totals["season"].eq(season).all()
+        ):
+            raise ValueError(
+                "Season win totals must contain all 32 teams for this season"
+            )
     with engine.begin() as conn:
+        if season_win_totals is not None:
+            conn.execute(
+                text(f"DELETE FROM {SCHEMA}.season_win_totals WHERE season = :s"),
+                {"s": season},
+            )
+            _append(
+                _prepare(season_win_totals, SEASON_WIN_TOTALS_COLUMNS),
+                "season_win_totals",
+                conn,
+            )
         if ratings is not None:
             conn.execute(text(f"DELETE FROM {SCHEMA}.teams"))
             _append(_prepare(teams, TEAMS_COLUMNS), "teams", conn)

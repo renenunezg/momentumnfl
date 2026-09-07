@@ -138,10 +138,24 @@ class JointScoringFit:
             )
         return sorted(ratings, key=lambda rating: rating.power_rating, reverse=True)
 
+    def score_design(self, game) -> np.ndarray:
+        """Map the fitted strength parameters to this matchup's two scores."""
+        index = self.team_index
+        n_teams = len(self.teams)
+        home = index[str(game.home_team)]
+        away = index[str(game.away_team)]
+        score_design = np.zeros((2, 2 * n_teams + 1))
+        score_design[0, home] = self.base_drives
+        score_design[0, n_teams + away] = -self.base_drives
+        score_design[1, away] = self.base_drives
+        score_design[1, n_teams + home] = -self.base_drives
+        if not bool(game.neutral_site):
+            score_design[:, -1] = [0.5 * self.base_drives, -0.5 * self.base_drives]
+        return score_design
+
     def engine_projection(self, game) -> "EngineProjection":
         """Engine-only numbers for one schedule row."""
         index = self.team_index
-        n_teams = len(self.teams)
         home = index[str(game.home_team)]
         away = index[str(game.away_team)]
         home_field = 0.0 if bool(game.neutral_site) else self.hfa_points
@@ -157,13 +171,7 @@ class JointScoringFit:
             + self.base_drives * (self.offense_ppd[away] - self.defense_ppd[home])
             - 0.5 * home_field
         )
-        score_design = np.zeros((2, 2 * n_teams + 1))
-        score_design[0, home] = self.base_drives
-        score_design[0, n_teams + away] = -self.base_drives
-        score_design[1, away] = self.base_drives
-        score_design[1, n_teams + home] = -self.base_drives
-        if not bool(game.neutral_site):
-            score_design[:, -1] = [0.5 * self.base_drives, -0.5 * self.base_drives]
+        score_design = self.score_design(game)
         score_covariance = self.score_residual_covariance + (
             score_design @ self.parameter_covariance @ score_design.T
         )

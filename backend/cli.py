@@ -44,6 +44,11 @@ def main() -> None:
     )
     preseason_parser.add_argument("--season", type=int, required=True)
 
+    season_wins_parser = subparsers.add_parser(
+        "season-wins", help="project full regular-season wins"
+    )
+    season_wins_parser.add_argument("--season", type=int, required=True)
+
     subparsers.add_parser("calibrate", help="walk-forward hyperparameter search")
     validate_qb_parser = subparsers.add_parser(
         "validate-qb",
@@ -250,6 +255,29 @@ def run_preseason(args) -> None:
         f"points/win slope {prior.slope:.2f}"
     )
     print(ratings_df.head(5)[["team_abbr", "power_rating"]].to_string(index=False))
+
+
+def run_season_wins(args) -> None:
+    from backend.etl import store
+    from backend.model.season_wins import build_season_forecast
+
+    totals, games = build_season_forecast(args.season)
+    store.write_processed(totals, "season_win_totals", f"{args.season}.parquet")
+    store.write_processed(games, "season_win_games", f"{args.season}.parquet")
+    print(
+        f"season wins {args.season}: {len(totals)} teams, {len(games)} remaining games"
+    )
+    print(
+        totals[
+            [
+                "team_abbr",
+                "projected_wins",
+                "wins_p10",
+                "wins_p90",
+                "sportsbook_win_total",
+            ]
+        ].to_string(index=False)
+    )
 
 
 def run_upcoming(args) -> None:
@@ -535,6 +563,9 @@ def run_publish(args) -> None:
         market_comparisons=market,
         backtest=backtest,
         market_snapshot=snapshot,
+        season_win_totals=store.read_processed(
+            "season_win_totals", f"{season}.parquet"
+        ),
     )
     for table, count in counts.items():
         print(f"{table}: {count} rows")
@@ -635,6 +666,7 @@ COMMANDS = {
     "fit": run_fit,
     "preseason": run_preseason,
     "calibrate": run_calibrate,
+    "season-wins": run_season_wins,
     "validate-qb": run_validate_qb,
     "qbs": run_qbs,
     "odds": run_odds,

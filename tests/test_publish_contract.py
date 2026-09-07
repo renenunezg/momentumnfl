@@ -22,6 +22,7 @@ CONTRACTS = {
     "market_comparisons": publish.MARKET_COMPARISONS_COLUMNS,
     "backtest_predictions": publish.BACKTEST_COLUMNS,
     "market_snapshots": publish.MARKET_SNAPSHOTS_COLUMNS,
+    "season_win_totals": publish.SEASON_WIN_TOTALS_COLUMNS,
 }
 
 
