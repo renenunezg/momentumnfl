@@ -45,16 +45,19 @@ def main() -> None:
     preseason_parser.add_argument("--season", type=int, required=True)
 
     subparsers.add_parser("calibrate", help="walk-forward hyperparameter search")
-    subparsers.add_parser(
+    validate_qb_parser = subparsers.add_parser(
         "validate-qb",
         help="compare QB layers on frozen engine forecasts without writes",
     )
+    validate_qb_parser.add_argument("--context", action="store_true")
+    validate_qb_parser.add_argument("--memory", action="store_true")
     qbs_parser = subparsers.add_parser(
         "qbs", help="inspect quarterback strengths and starter/backup swap adjustments"
     )
     qbs_parser.add_argument("--season", type=int)
     qbs_parser.add_argument("--week", type=int)
     qbs_parser.add_argument("--team", required=True)
+    qbs_parser.add_argument("--context", action="store_true")
 
     odds_parser = subparsers.add_parser(
         "odds", help="snapshot Odds API offers for a week"
@@ -239,7 +242,7 @@ def run_preseason(args) -> None:
     projections_df = pd.DataFrame(
         [projection.to_record() for projection in projections]
     )
-    projections_df["model_version"] = f"{MODEL_VERSION}_qb_v2"
+    projections_df["model_version"] = f"{MODEL_VERSION}_qb_v3"
     _write_week(projections_df, "projections", args.season, 1)
     print(
         f"preseason {args.season}: {len(ratings_df)} ratings, "
@@ -293,15 +296,25 @@ def run_validate_qb(args) -> None:
         rescore_qb_layer,
         select_qb_layer,
     )
-    from backend.model.projections import DEFAULT_MARKET_WEIGHT
+    from backend.model.projections import DEFAULT_MARKET_WEIGHT, LayerConfig
 
     frozen = store.read_processed("calibration", "predictions.parquet")
+    if getattr(args, "memory", False):
+        from backend.model.calibration import select_qb_memory
+
+        print(f"Development memory selection: {select_qb_memory(frozen)}")
     rescored = rescore_qb_layer(frozen)
+    previous = apply_layers(
+        rescore_qb_layer(frozen, anchor_preseason=False), LayerConfig()
+    )
     selected = replace(select_qb_layer(rescored), market_weight=DEFAULT_MARKET_WEIGHT)
     candidate = apply_layers(rescored, selected)
     print(f"Development-selected QB layer: {selected}")
-    print("Conditional on actual starters; engine forecasts and artifacts unchanged.")
-    for label, frame in (("existing", frozen), ("candidate", candidate)):
+    print("Conditional on majority-dropback QBs; engine/artifacts unchanged.")
+    print("Historical market QB references include weekly lineup proxies.")
+    for label, frame in (
+        ("frozen", frozen), ("unanchored", previous), ("candidate", candidate)
+    ):
         for split, mask in (
             ("development", frame["season"].between(2016, 2021)),
             ("holdout", frame["season"].between(2022, 2025)),
@@ -316,6 +329,12 @@ def run_validate_qb(args) -> None:
                 f"blended MAE {blended_mae:.4f}, closing MAE {market_mae:.4f}, "
                 f"blended NLL {margin_log_loss(subset, 1.0, 7.0):.5f}"
             )
+    if getattr(args, "context", False):
+        from backend.model.calibration import evaluate_qb_context
+
+        print("Context gate (development-selected, no artifact writes):")
+        for key, value in evaluate_qb_context(frozen).items():
+            print(f"  {key}: {value:.6f}")
 
 
 def run_qbs(args) -> None:
@@ -325,6 +344,7 @@ def run_qbs(args) -> None:
     from backend.features.qb import expected_starters
     from backend.model.fit_week import load_depth_charts
     from backend.model.joint_scoring import DEFAULT_CONFIG
+    from backend.model.preseason import WIN_TOTAL_BLEND, load_qb_references
     from backend.model.projections import LayerConfig
     from backend.model.qb_adjustment import context_before_week, strength_history
 
@@ -333,11 +353,19 @@ def run_qbs(args) -> None:
     index = store.game_index(list(range(HISTORY_START_SEASON, season + 1)))
     games = store.qb_games(list(range(HISTORY_START_SEASON, season + 1)))
     layer = LayerConfig()
+    eligible_ids = index.loc[
+        (index["season"] < season)
+        | (index["season"].eq(season) & (index["model_week"] < week)), "game_id"
+    ]
+    prior_games = games[games["game_id"].isin(eligible_ids)]
+    dropbacks = prior_games.groupby("passer_player_id")["dropbacks"].sum()
     context = context_before_week(
         strength_history(games, index, layer.qb_span_dropbacks),
         season,
         week,
         DEFAULT_CONFIG.rating_half_life_weeks,
+        load_qb_references(season),
+        WIN_TOTAL_BLEND,
     )
     depth = load_depth_charts(season)
     if "pos_abb" not in depth or team not in depth["team"].values:
@@ -355,6 +383,13 @@ def run_qbs(args) -> None:
                 "quarterback": row.player_name,
                 "gsis_id": row.gsis_id,
                 "starter": row.gsis_id == starter,
+                "recorded_dropbacks": int(dropbacks.get(row.gsis_id, 0)),
+                "effective_dropbacks": context.effective_dropbacks.get(
+                    row.gsis_id, 0.0
+                ),
+                "estimate_basis": (
+                    "observed EPA" if row.gsis_id in dropbacks else "replacement prior"
+                ),
                 "strength": context.strengths.get(row.gsis_id, 0.0),
                 "team_baseline": context.baselines.get(team),
                 "adjustment": adjustment,
@@ -364,11 +399,41 @@ def run_qbs(args) -> None:
             }
         )
     print(f"{team}, {season} week {week}; depth chart {roster['dt'].max()}")
+    print(f"Recorded history begins in {HISTORY_START_SEASON}.")
     print(
         "Strength/baseline: raw points above replacement; "
         f"adjustment = {layer.qb_adjustment_weight:g} * (strength - baseline)."
     )
     print(pd.DataFrame(rows).round(3).to_string(index=False))
+    if getattr(args, "context", False):
+        from backend.features.qb_context import load_context_games
+        from backend.model.qb_context import fit_context
+
+        fitted = fit_context(load_context_games(season), season, week)
+        comparisons = []
+        for row in roster.itertuples():
+            if pd.isna(row.gsis_id):
+                continue
+            contrast = {row.gsis_id: 1.0}
+            if starter is not None:
+                contrast[starter] = contrast.get(starter, 0.0) - 1.0
+            comparisons.append({
+                "quarterback": row.player_name,
+                "context_vs_average": fitted.strengths.get(row.gsis_id, 0.0),
+                "supporting_cast": fitted.supporting_cast.get(row.gsis_id),
+                "opponents": fitted.opponents.get(row.gsis_id),
+                "hit_sack_pct": 100 * fitted.hit_sack_rates.get(
+                    row.gsis_id, float("nan")
+                ),
+                "swap_vs_starter": sum(
+                    w * fitted.strengths.get(q, 0.0) for q, w in contrast.items()
+                ),
+                "swap_model_sd": fitted.contrast_sd([contrast])[0],
+            })
+        print("Context diagnostics only; not used in published spreads.")
+        print("Positive context means a helpful environment; hits/sacks are a proxy.")
+        print("Model SD is parameter uncertainty, not a game prediction interval.")
+        print(pd.DataFrame(comparisons).round(3).to_string(index=False))
 
 
 def run_odds(args) -> None:

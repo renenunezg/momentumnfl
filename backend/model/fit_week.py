@@ -17,7 +17,11 @@ from backend.model.joint_scoring import (
     fit_joint_scoring,
 )
 from backend.model.outputs import GameProjection, TeamRating
-from backend.model.preseason import build_preseason_prior
+from backend.model.preseason import (
+    WIN_TOTAL_BLEND,
+    build_preseason_prior,
+    load_qb_references,
+)
 from backend.model.projections import LayerConfig, assemble_projections
 
 
@@ -58,7 +62,8 @@ def compute_qb_adjustments(
         qb_history, eligible, layer_config.qb_span_dropbacks
     )
     context = qb_layer.context_before_week(
-        history, season, week, config.rating_half_life_weeks
+        history, season, week, config.rating_half_life_weeks,
+        load_qb_references(season), WIN_TOTAL_BLEND,
     )
     expected = qb_features.expected_starters(
         qb_history, eligible, depth_charts, season, week

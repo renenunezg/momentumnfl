@@ -50,6 +50,27 @@ def load_win_totals(season: int) -> pd.Series:
     return totals.set_index("team_abbr")["win_total"]
 
 
+def load_qb_references(season: int) -> dict[str, str]:
+    """Fixed lineup associated with the preseason market input, never QB overrides.
+
+    Missing references or totals leave the empirical QB baseline unchanged.
+    Historical weekly references are lineup proxies, not timestamped prices.
+    """
+    path = STATIC_DIR / "preseason_qbs.csv"
+    if not path.exists():
+        return {}
+    references = pd.read_csv(path)
+    references = references[references["season"].eq(season)]
+    if references["team_abbr"].duplicated().any():
+        raise ValueError(f"Duplicate preseason QB references for {season}")
+    if references[["team_abbr", "gsis_id"]].isna().any().any():
+        raise ValueError(f"Incomplete preseason QB references for {season}")
+    available = load_win_totals(season).dropna().index
+    return references[references["team_abbr"].isin(available)].set_index("team_abbr")[
+        "gsis_id"
+    ].to_dict()
+
+
 def points_per_win(
     previous_seasons: list[int],
     engine_config: JointScoringConfig = DEFAULT_CONFIG,

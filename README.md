@@ -23,11 +23,19 @@ honesty benchmark, and `recommendation_status` is always `not_recommended`.
    and a fitted home-field parameter, with a Student-t score distribution.
    Before week 1 a preseason prior blends mean reversion of last season's
    final ratings with the season win-total market.
-4. **Layers.** The QB adjustment is `0.75 * (selected QB strength - team QB baseline)`.
-   Both sides use current 500-dropback rolling EPA strengths on the same replacement-relative scale; the baseline weights every passer by recent dropbacks and the engine's time decay, carrying the previous season's mix into preseason.
+4. **Layers.** The QB adjustment is `selected QB strength - team QB baseline`.
+   Both sides use rolling EPA strengths on the same replacement-relative scale, with half-lives of 1,000 dropbacks and 52 calendar weeks.
+   The estimate shrinks toward replacement using 200 prior dropbacks and the remaining effective sample, rather than treating lifetime dropbacks as current evidence.
+   The team baseline weights every passer by recent dropbacks and the engine's time decay, carrying the previous season's mix into preseason.
+   For a team that has not played yet, the win-total-funded share of that baseline uses the fixed preseason QB reference instead, so the market's offseason QB change is not added again.
+   That reference stays fixed when a depth chart or manual starter override changes; an injury moves the pure spread by `backup strength - starter strength`.
    This separates a QB's strength from the change applied to a team that already contains his contribution, and permits starter-to-backup substitutions without changing stored team ratings.
    Expected points then receive the rest adjustment, and the published margin is shifted toward the market line by a weight capped at 0.5.
-   The QB span and 0.75 weight were selected using development-season pure-model log loss with the engine held fixed, before checking the 2022-2025 holdout.
+   QB memory and shrinkage were selected using development-season pure-model log loss with the engine held fixed; the subsequent layer search selected a 1.0 coefficient.
+   The 2022-2025 evaluation is a repeatedly inspected retrospective validation window, not a fresh prospective test of this revision.
+   `qbs --context` additionally fits separate QB, team-season, and opposing-defense effects, including hit/sack exposure and the QB's own tendency to invite pressure.
+   Its conditional parameter uncertainty reflects limited recent samples and ambiguity between player and supporting cast; it is not a calibrated interval for game scores or an identified causal player value.
+   These context estimates remain diagnostics because development testing did not support adding their means or uncertainty to published spreads.
 5. **Calibrate.** A walk-forward backtest over 2016 onward selects every
    hyperparameter on development seasons (2016 to 2021) and reports holdout
    seasons (2022 to 2025) untouched. The backtest is republished as the
@@ -100,8 +108,8 @@ game of the season has been played yet.
 | `fit [--season --week] [--projections-only]` | Fit ratings and unit ratings and project the week. |
 | `preseason --season` | Build the week-1 prior, ratings, and projections. |
 | `calibrate` | Run the walk-forward search and freeze the margin distribution. |
-| `validate-qb` | Select the QB layer on development seasons and report its holdout against the frozen engine forecasts, without changing artifacts. |
-| `qbs --season --week --team BUF` | Show current starter and backup strengths, the team QB baseline, and each lineup substitution's effect before the market blend. |
+| `validate-qb [--memory] [--context]` | Reproduce the development memory search, select the QB layer, report retrospective validation, and optionally test the context promotion gate, without changing artifacts. |
+| `qbs --season --week --team BUF [--context]` | Inspect starter/backup strengths, recorded and effective samples, and substitutions; optionally show context effects and model uncertainty. |
 | `odds [--season --week]` | Snapshot Odds API offers and price them against the projections. |
 | `upcoming --season [--hours]` | Exit 0 when an unplayed game kicks off within the window, 3 otherwise. |
 | `publish [--season --week] [--skip-backtest] [--projections-only]` | Write the week to the `nfl` schema. |
@@ -139,6 +147,16 @@ Secrets: `DATABASE_URL`, `ODDS_API_KEY`.
 - `backend/data_static/win_totals.csv` holds preseason sportsbook win totals
   by team and season, collected by hand.
   The 2026 inputs are BetMGM's September 1, 2026 [regular-season win totals](https://sports.betmgm.com/en/blog/nfl/nfl-over-under-wins-2026-win-totals-all-32-teams-bm16/), retrieved September 7 before kickoff and frozen for the season.
+- `backend/data_static/preseason_qbs.csv` freezes the market input's assumed QB lineup using [nflverse depth charts](https://github.com/nflverse/nflverse-data/releases/tag/depth_charts).
+  The 2026 references use September 1 snapshots, and 2025 uses the last snapshot before the season opener.
+  The 2016-2024 references are week-one lineup proxies with no intraday timestamps; missing references, including the postponed Miami and Tampa Bay openers in 2017, retain the empirical baseline.
+  These references approximate the lineup priced into historical win totals; the historical evaluation remains conditional on the realized majority-dropback QB and does not validate injury-news timing.
+  QB strengths are rolling EPA estimates, not identified causal player values or a forced 5-to-8-point scale; unobserved QBs receive a replacement prior, and `qbs` exposes recorded dropbacks since 2015 alongside each estimate.
+- Context diagnostics require local historical raw PBP and make no network requests or artifact writes.
+  Their separate observations include competitive scrambles and [nflfastR QB EPA](https://nflfastr.com/articles/beginners_guide.html), which avoids charging the passer for a receiver's lost fumble.
+  Hits and sacks are a consistently available protection proxy, not all charted pressures or an offensive-line grade.
+  The ridge separates supporting-cast and opponent effects while retaining estimated QB-specific pressure liability.
+  Its penalty sizes and residual-variance floors define conditional uncertainty; the context model is not used by the ratings engine or published projection distributions.
 - `backend/data_static/margin_distribution.csv` is generated by `calibrate`.
 
 ## License

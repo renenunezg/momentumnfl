@@ -33,6 +33,7 @@ from backend.model.market_blend import (
 from backend.model.preseason import (
     PreseasonConfig,
     build_preseason_prior,
+    load_qb_references,
     points_per_win,
 )
 from backend.model.projections import LayerConfig, rest_adjustment
@@ -113,6 +114,7 @@ def generate_walk_forward(
             slope=data.slopes[season],
         )
         prior_means = prior.strength_prior_means() if use_prior_means else None
+        qb_references = load_qb_references(season)
         weeks = sorted(games["model_week"].unique())
         for week in weeks:
             slate = games[games["model_week"].eq(week)]
@@ -135,6 +137,8 @@ def generate_walk_forward(
                     season,
                     week,
                     engine_config.rating_half_life_weeks,
+                    qb_references,
+                    preseason_config.win_total_blend,
                 )
                 for span in qb_spans
             }
@@ -280,7 +284,12 @@ def select_qb_layer(predictions: pd.DataFrame) -> LayerConfig:
     return min(candidates, key=_lowest_loss)[1]
 
 
-def rescore_qb_layer(predictions: pd.DataFrame) -> pd.DataFrame:
+def rescore_qb_layer(
+    predictions: pd.DataFrame, anchor_preseason: bool = True,
+    qb_spans: tuple[float, ...] = QB_SPANS,
+    calendar_half_life: float = qb_layer.CALENDAR_HALF_LIFE_WEEKS,
+    prior_dropbacks: float = qb_layer.SHRINK_DROPBACKS,
+) -> pd.DataFrame:
     """Keep frozen engine forecasts and replace only their QB deltas.
 
     Actual starters are supplied as lineup scenarios, as in the original
@@ -296,12 +305,19 @@ def rescore_qb_layer(predictions: pd.DataFrame) -> pd.DataFrame:
     from backend.model.joint_scoring import DEFAULT_CONFIG
 
     out = predictions.copy()
-    for span in QB_SPANS:
-        history = qb_layer.strength_history(games, index, span)
+    references = {
+        season: load_qb_references(season) if anchor_preseason else {}
+        for season in out["season"].unique()
+    }
+    for span in qb_spans:
+        history = qb_layer.strength_history(
+            games, index, span, calendar_half_life, prior_dropbacks
+        )
         deltas = {}
         for (season, week), slate in out.groupby(["season", "model_week"]):
             context = qb_layer.context_before_week(
-                history, season, week, DEFAULT_CONFIG.rating_half_life_weeks
+                history, season, week, DEFAULT_CONFIG.rating_half_life_weeks,
+                references[season], PreseasonConfig().win_total_blend,
             )
             for game in slate.itertuples():
                 deltas[game.game_id] = context.adjustment(
@@ -311,6 +327,105 @@ def rescore_qb_layer(predictions: pd.DataFrame) -> pd.DataFrame:
                 )
         out[f"qb_adj_{int(span)}"] = out["game_id"].map(deltas)
     return out
+
+
+def select_qb_memory(predictions: pd.DataFrame) -> dict:
+    """Reproduce the memory search on development data at a fixed 500-DB span."""
+    development = predictions[predictions["season"].isin(DEVELOPMENT_SEASONS)]
+    choices = []
+    for calendar, prior in itertools.product(
+        (52.0, 104.0, 208.0), (50.0, 100.0, 200.0)
+    ):
+        rescored = rescore_qb_layer(
+            development, qb_spans=(500.0,), calendar_half_life=calendar,
+            prior_dropbacks=prior,
+        )
+        for weight in (0.5, 0.75, 1.0):
+            layer = LayerConfig(
+                market_weight=0.0, qb_span_dropbacks=500.0, qb_adjustment_weight=weight
+            )
+            loss = margin_log_loss(apply_layers(rescored, layer), 1.0, 7.0)
+            choices.append((loss, calendar, prior, weight))
+    loss, calendar, prior, weight = min(choices, key=_lowest_loss)
+    return {"calendar_half_life": calendar, "prior_dropbacks": prior,
+            "qb_weight": weight, "development_pure_nll": loss}
+
+
+def evaluate_qb_context(predictions: pd.DataFrame) -> dict:
+    """Read-only development selection for the experimental context diagnostics."""
+    from backend.features.qb_context import load_context_games
+    from backend.model.qb_context import fit_context
+
+    observations = load_context_games(int(predictions["season"].max()))
+    seasons = list(range(HISTORY_START_SEASON, int(predictions["season"].max()) + 1))
+    games = store.qb_games(seasons)
+    index = store.game_index(seasons)
+    layer = LayerConfig()
+    history = qb_layer.strength_history(games, index, layer.qb_span_dropbacks)
+    starters = {
+        (r.game_id, r.team): r.passer_player_id
+        for r in games[games["started"]].itertuples()
+    }
+    references = {s: load_qb_references(s) for s in predictions["season"].unique()}
+    raw = rescore_qb_layer(predictions)
+    raw_delta = raw[f"qb_adj_{int(layer.qb_span_dropbacks)}"]
+    development = raw["season"].isin(DEVELOPMENT_SEASONS)
+    candidates = []
+    for qb_penalty, team_penalty in itertools.product((100.0, 300.0), repeat=2):
+        deltas, variances = {}, {}
+        for (season, week), slate in raw.groupby(["season", "model_week"]):
+            fitted = fit_context(observations, season, week, qb_penalty, team_penalty)
+            context = qb_layer.context_before_week(
+                history, season, week, 6.0, references[season],
+                PreseasonConfig().win_total_blend, fitted.strengths,
+            )
+            contrasts = []
+            for game in slate.itertuples():
+                contrast = {}
+                for sign, team in ((1, game.home_team), (-1, game.away_team)):
+                    for passer, weight in context.contrast(
+                        team, starters.get((game.game_id, team))
+                    ).items():
+                        contrast[passer] = contrast.get(passer, 0.0) + sign * weight
+                deltas[game.game_id] = sum(
+                    w * fitted.strengths.get(q, 0.0) for q, w in contrast.items()
+                )
+                contrasts.append(contrast)
+            variances.update(zip(slate["game_id"], fitted.contrast_sd(contrasts)**2))
+        context_delta = raw["game_id"].map(deltas)
+        variance = raw["game_id"].map(variances)
+        for share in (0.0, 0.25, 0.5, 0.75, 1.0):
+            frame = raw.copy()
+            frame["pure_model_margin"] = frame["engine_margin"] + (
+                layer.qb_adjustment_weight
+                * ((1 - share) * raw_delta + share * context_delta)
+            )
+            frame["model_margin"] = frame["pure_model_margin"]
+            loss = margin_log_loss(frame[development], 1.0, 7.0)
+            candidates.append((loss, share, qb_penalty, team_penalty, frame, variance))
+    loss, share, qp, tp, frame, variance = min(candidates, key=_lowest_loss)
+    frame["model_margin"] = blend_margin(
+        frame["pure_model_margin"].to_numpy(), frame["market_margin"].to_numpy(),
+        layer.market_weight,
+    )
+    market_weight = np.where(frame["market_margin"].notna(), layer.market_weight, 0)
+    # Translate normal parameter variance into the Student-t scale convention.
+    added_scale = (
+        (5 / 7) * (1 - market_weight)**2 * layer.qb_adjustment_weight**2 * variance
+    )
+    scores = []
+    for weight in (0.0, 0.25, 0.5, 1.0, 2.0, 4.0):
+        trial = frame.copy()
+        trial["margin_sd"] = np.sqrt(frame["margin_sd"]**2 + weight * added_scale)
+        scores.append((margin_log_loss(trial[development], 1.0, 7.0), weight, trial))
+    _, variance_weight, selected = min(scores, key=_lowest_loss)
+    return {
+        "context_share": share, "variance_weight": variance_weight,
+        "qb_penalty": qp, "team_penalty": tp,
+        "development_pure_nll": loss,
+        "development_blended_nll": margin_log_loss(selected[development], 1.0, 7.0),
+        "holdout_blended_nll": margin_log_loss(selected[~development], 1.0, 7.0),
+    }
 
 
 def run_calibration(verbose: bool = True) -> dict:

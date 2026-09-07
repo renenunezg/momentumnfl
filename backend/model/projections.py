@@ -11,6 +11,7 @@ import pandas as pd
 from backend.model.joint_scoring import JointScoringFit
 from backend.model.market_blend import blend_margin, capped_weight
 from backend.model.outputs import GameProjection
+from backend.model.qb_adjustment import DEFAULT_SPAN_DROPBACKS
 
 # Selected by the calibrate walk-forward (dev 2016-2021): the rest signal is
 # already priced into the market line at this blend weight, so its own
@@ -20,9 +21,9 @@ REST_CLIP_DAYS = 7.0
 DEFAULT_MARKET_WEIGHT = 0.5
 # Selected on development seasons 2016-2021 with the engine held fixed.
 # The QB selection gate scores pure-model log loss before the market blend.
-DEFAULT_QB_SPAN_DROPBACKS = 500.0
-DEFAULT_QB_ADJUSTMENT_WEIGHT = 0.75
-MODEL_VERSION = "nfl_joint_scoring_qb_v2"
+DEFAULT_QB_SPAN_DROPBACKS = DEFAULT_SPAN_DROPBACKS
+DEFAULT_QB_ADJUSTMENT_WEIGHT = 1.0
+MODEL_VERSION = "nfl_joint_scoring_qb_v3"
 
 
 @dataclass(frozen=True, slots=True)
