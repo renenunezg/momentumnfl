@@ -84,6 +84,11 @@ def main() -> None:
     publish_parser.add_argument("--skip-backtest", action="store_true")
     publish_parser.add_argument("--projections-only", action="store_true")
 
+    grade_parser = subparsers.add_parser(
+        "grade", help="grade archived pregame forecasts against completed results"
+    )
+    grade_parser.add_argument("--season", type=int, required=True)
+
     args = parser.parse_args()
     COMMANDS[args.command](args)
 
@@ -522,6 +527,26 @@ def run_odds(args) -> None:
     )
 
 
+def run_grade(args) -> None:
+    from datetime import UTC, datetime
+
+    from backend import db
+    from backend.etl import store
+    from backend.grading import result_frame
+    from backend.publish import grade_season
+
+    fetched_at = datetime.fromtimestamp(
+        (store.RAW_DIR / "schedules.parquet").stat().st_mtime, UTC
+    )
+    results = result_frame(
+        store.read_raw("schedules.parquet"),
+        args.season,
+        store.team_names(),
+        fetched_at,
+    )
+    print(grade_season(db.engine, results, args.season))
+
+
 def run_publish(args) -> None:
     from backend import db, publish
     from backend.config import BACKTEST_PUBLISH_FLOOR
@@ -672,4 +697,5 @@ COMMANDS = {
     "odds": run_odds,
     "upcoming": run_upcoming,
     "publish": run_publish,
+    "grade": run_grade,
 }

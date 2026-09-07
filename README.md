@@ -40,7 +40,7 @@ honesty benchmark, and `recommendation_status` is always `not_recommended`.
    hyperparameter on development seasons (2016 to 2021) and reports holdout
    seasons (2022 to 2025) untouched. The backtest is republished as the
    model's track record.
-6. **Publish.** Seven tables in the `nfl` schema, written in one transaction.
+6. **Publish.** Weekly outputs in the `nfl` schema, written in one transaction.
    The column lists in `backend/publish.py` are the contract with the
    frontend and are checked against `sql/` by a test.
 
@@ -122,6 +122,7 @@ game of the season has been played yet.
 | `odds [--season --week]` | Snapshot Odds API offers and price them against the projections. |
 | `upcoming --season [--hours]` | Exit 0 when an unplayed game kicks off within the window, 3 otherwise. |
 | `publish [--season --week] [--skip-backtest] [--projections-only]` | Write the week to the `nfl` schema. |
+| `grade --season` | Update completed results and grade preserved pregame forecasts. |
 
 Publishing refuses to touch the database unless `MOMENTUMNFL_DB_WRITES=1` is
 set; GitHub Actions opts in automatically. Without it the session is opened
@@ -167,6 +168,25 @@ concurrency group:
   refreshes schedules and depth charts, reprojects from the Tuesday ratings,
   takes an odds snapshot, and republishes the projections. Ratings stay the
   Tuesday snapshot.
+
+Both workflows grade completed games immediately after refreshing schedules, even when no upcoming kickoff requires new projections.
+Grading uses `DATABASE_URL` and the same production write guard as publication.
+
+Apply `sql/004_live_forecasts.sql` before deploying the forecast archive publisher or the frontend live history/performance views.
+Each accepted pregame publication appends an immutable `nfl.forecast_snapshots` revision using database receipt time.
+The database blocks stale revisions, post-kickoff replacements, backdated late first publications, and deletions of published projections.
+Existing forecasts are seeded only for games that have not started when the migration runs.
+Postponing a game after its previously published kickoff does not reopen its frozen forecast.
+
+`grade --season 2026` upserts completed nflverse schedule results and closing spreads into `nfl.game_results`.
+The `nfl.live_predictions` view selects the last eligible pregame revision and recomputes errors when source results or closing lines are corrected.
+It includes games with missing forecasts or closes so coverage remains visible; pure-model, blended-model, and closing-line MAE use exactly the same complete cohort.
+Live tracking starts in 2026 and is kept separate from `nfl.backtest_predictions`.
+The closing benchmark is the final nflverse schedule line, not an earlier Odds API snapshot relabeled as a close.
+
+Run the PostgreSQL lifecycle acceptance with `NFL_TEST_DATABASE_URL` pointing to a local disposable PostgreSQL admin database and `poetry run pytest -q tests/test_live_grading.py tests/test_publish_contract.py`.
+The local cluster needs the `anon` and `authenticated` roles used by the migrations.
+The test creates and removes its own database and refuses non-loopback hosts.
 
 Secrets: `DATABASE_URL`, `ODDS_API_KEY`.
 

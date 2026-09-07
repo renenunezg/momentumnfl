@@ -51,6 +51,12 @@ jobs:
         run: >-
           poetry run python -m backend refresh-inputs
           --season ${{ steps.context.outputs.season }}
+      - name: Grade completed games
+        run: >-
+          poetry run python -m backend grade
+          --season ${{ steps.context.outputs.season }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
       - name: Check for an upcoming kickoff
         id: upcoming
         shell: bash

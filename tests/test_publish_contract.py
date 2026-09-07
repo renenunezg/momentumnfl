@@ -8,6 +8,7 @@ import pandas as pd
 
 from backend import publish
 from backend.etl import store
+from backend.grading import RESULT_COLUMNS
 
 DDL = "\n".join(
     path.read_text()
@@ -23,6 +24,7 @@ CONTRACTS = {
     "backtest_predictions": publish.BACKTEST_COLUMNS,
     "market_snapshots": publish.MARKET_SNAPSHOTS_COLUMNS,
     "season_win_totals": publish.SEASON_WIN_TOTALS_COLUMNS,
+    "game_results": RESULT_COLUMNS,
 }
 
 

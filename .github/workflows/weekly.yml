@@ -82,6 +82,13 @@ jobs:
         run: >-
           poetry run python -m backend ingest
           --seasons ${{ steps.context.outputs.season }}
+      - name: Grade completed games
+        if: steps.context.outputs.active == 'true'
+        run: >-
+          poetry run python -m backend grade
+          --season ${{ steps.context.outputs.season }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
       - name: Build active-season features
         if: steps.context.outputs.active == 'true'
         run: >-

@@ -7,7 +7,8 @@ precision would accept a literal NaN, but PostgREST cannot serialize it to
 JSON, so NULL is the only safe missing value."""
 
 import pandas as pd
-from sqlalchemy import text
+from sqlalchemy import MetaData, Table, text
+from sqlalchemy.dialects.postgresql import insert
 
 from backend.etl import store
 
@@ -182,9 +183,12 @@ TABLES = (
     "backtest_predictions",
     "market_snapshots",
     "season_win_totals",
+    "forecast_snapshots",
+    "game_results",
 )
 
 _TIMESTAMP_COLUMNS = {
+    "source_fetched_at",
     "as_of",
     "start_date",
     "model_as_of",
@@ -208,6 +212,25 @@ def _prepare(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
 def _append(frame: pd.DataFrame, table: str, conn, **kwargs) -> None:
     frame.to_sql(
         table, con=conn, schema=SCHEMA, if_exists="append", index=False, **kwargs
+    )
+
+
+def _upsert(frame: pd.DataFrame, table: str, conn) -> None:
+    if frame.empty:
+        return
+    target = Table(table, MetaData(), schema=SCHEMA, autoload_with=conn)
+    statement = insert(target).values(frame.to_dict("records"))
+    newer = (
+        target.c.source_fetched_at <= statement.excluded.source_fetched_at
+        if table == "game_results"
+        else None
+    )
+    conn.execute(
+        statement.on_conflict_do_update(
+            index_elements=["game_id"],
+            set_={c: statement.excluded[c] for c in frame.columns if c != "game_id"},
+            where=newer,
+        )
     )
 
 
@@ -249,7 +272,6 @@ def publish_week(
         ratings["conference"] = ratings["team_abbr"].map(metadata["team_conf"])
         ratings["division"] = ratings["team_abbr"].map(metadata["team_division"])
 
-    game_ids = projections["game_id"].astype(str).tolist()
     week_key = {"s": season, "w": week}
     counts: dict[str, int] = {}
     if season_win_totals is not None:
@@ -295,13 +317,9 @@ def publish_week(
                 "team_unit_ratings",
                 conn,
             )
-        # Delete projections by game id, not by week, so a game that moved
-        # weeks between publishes cannot survive as a duplicate row.
-        conn.execute(
-            text(f"DELETE FROM {SCHEMA}.game_projections WHERE game_id = ANY(:ids)"),
-            {"ids": game_ids},
-        )
-        _append(
+        # The database archives revisions and rejects late/stale replacements.
+        # Upsert keeps one public row per game even when its week changes.
+        _upsert(
             _prepare(projections, GAME_PROJECTIONS_COLUMNS), "game_projections", conn
         )
         if market_comparisons is not None:
@@ -388,3 +406,32 @@ def build_backtest_frame(floor_season: int) -> pd.DataFrame:
             "actual_margin": predictions["actual_margin"],
         }
     )
+
+
+def grade_season(engine, results: pd.DataFrame, season: int) -> dict:
+    with engine.begin() as conn:
+        _upsert(results, "game_results", conn)
+        return dict(
+            conn.execute(
+                text("""
+            select count(*) as completed_games,
+              count(model_margin) as frozen_forecasts,
+              count(*) filter (where model_margin is not null
+                and pure_model_margin is not null and closing_spread is not null)
+                as benchmark_games,
+              avg(model_absolute_error) filter (where model_margin is not null
+                and pure_model_margin is not null and closing_spread is not null)
+                as blended_mae,
+              avg(pure_absolute_error) filter (where model_margin is not null
+                and pure_model_margin is not null and closing_spread is not null)
+                as pure_mae,
+              avg(closing_absolute_error) filter (where model_margin is not null
+                and pure_model_margin is not null and closing_spread is not null)
+                as closing_mae
+            from nfl.live_predictions where season = :season
+        """),
+                {"season": season},
+            )
+            .mappings()
+            .one()
+        )
