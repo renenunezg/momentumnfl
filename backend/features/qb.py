@@ -47,7 +47,7 @@ def _depth_chart_qb1(
         ]
         if charts.empty:
             return None
-        latest = charts[charts["dt"].eq(charts["dt"].max())]
+        latest = charts[charts["dt"].eq(charts.groupby("team")["dt"].transform("max"))]
         return (
             latest.sort_values("pos_rank").groupby("team")["gsis_id"].first().dropna()
         )
@@ -108,9 +108,9 @@ def expected_starters(
 
     qb1 = _depth_chart_qb1(depth_charts, season, week)
     if qb1 is not None and not qb1.empty:
-        known = set(qb_games["passer_player_id"])
-        qb1 = qb1[qb1.isin(known) | ~qb1.index.isin(result.index)]
-        result.update(qb1)
+        # A named rookie starter has no NFL history yet. Keep that identity;
+        # the projection layer supplies replacement value for an unseen QB.
+        result = qb1.combine_first(result)
 
     overrides = _overrides()
     overrides = overrides[overrides["season"].eq(season) & overrides["week"].eq(week)]

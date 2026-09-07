@@ -5,6 +5,8 @@ from datetime import UTC, datetime
 import pandas as pd
 
 from backend import pipeline
+from backend.etl import ingest, store
+from backend.features.qb import expected_starters
 
 
 def test_history_cache_skips_complete_seasons(monkeypatch):
@@ -88,3 +90,49 @@ def test_incremental_write_replaces_game_and_keeps_prior_weeks(monkeypatch):
         {"game_id": "W1", "value": 1},
         {"game_id": "W2", "value": 20},
     ]
+
+
+def test_preseason_runs_load_current_starters_before_pbp_opens(monkeypatch, tmp_path):
+    monkeypatch.setattr(ingest, "RAW_DIR", tmp_path)
+    monkeypatch.setattr(store, "RAW_DIR", tmp_path)
+    monkeypatch.setattr(
+        ingest.nflreadpy,
+        "get_current_season",
+        lambda roster=False: 2026 if roster else 2025,
+    )
+    monkeypatch.setattr(ingest.data, "load_schedules", lambda seasons: pd.DataFrame())
+    monkeypatch.setattr(ingest.data, "load_teams", pd.DataFrame)
+    charts = pd.DataFrame(
+        [
+            ("2026-09-06", "MIN", "former", 1),
+            ("2026-09-07", "MIN", "transfer", 1),
+            ("2026-09-06", "LV", "rookie", 1),
+            ("2026-09-07", "NEW", "new_team_qb", 1),
+        ],
+        columns=["dt", "team", "gsis_id", "pos_rank"],
+    ).assign(pos_abb="QB")
+    monkeypatch.setattr(ingest.data, "load_depth_charts", lambda seasons: charts)
+
+    def game_data_unavailable(*args, **kwargs):
+        raise AssertionError("Preseason must not request unavailable game data")
+
+    for loader in ("load_pbp", "load_injuries", "load_pfr_advstats"):
+        monkeypatch.setattr(ingest.data, loader, game_data_unavailable)
+
+    for run in (ingest.ingest_season, ingest.ingest_projection_inputs):
+        assert run(2026) == []
+        loaded = store.read_raw("depth_charts", "2026.parquet")
+        pd.testing.assert_frame_equal(loaded, charts)
+        (tmp_path / "depth_charts" / "2026.parquet").unlink()
+
+    index = pd.DataFrame([{"game_id": "old", "season": 2025, "model_week": 18}])
+    history = pd.DataFrame(
+        [("old", "MIN", "former"), ("old", "LV", "incumbent")],
+        columns=["game_id", "team", "passer_player_id"],
+    ).assign(dropbacks=30, started=True)
+    starters = expected_starters(history, index, loaded, 2026, 1)
+    assert starters.to_dict() == {
+        "MIN": "transfer",
+        "LV": "rookie",
+        "NEW": "new_team_qb",
+    }

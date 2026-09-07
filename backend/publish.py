@@ -161,14 +161,6 @@ _TIMESTAMP_COLUMNS = {
     "fetched_at",
 }
 
-LEGACY_TEAM_NAMES = {
-    "Oakland Raiders",
-    "San Diego Chargers",
-    "St. Louis Rams",
-    "Washington Redskins",
-    "Washington Football Team",
-}
-
 
 def _prepare(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     out = df.reindex(columns=columns)
@@ -185,15 +177,8 @@ def _append(frame: pd.DataFrame, table: str, conn, **kwargs) -> None:
     )
 
 
-def current_teams() -> pd.DataFrame:
-    """nflverse teams table reduced to the 32 current franchises."""
-    raw = store.read_raw("teams.parquet")
-    raw = raw[~raw["team_name"].isin(LEGACY_TEAM_NAMES)]
-    return raw.drop_duplicates("team_abbr")
-
-
 def build_teams_frame() -> pd.DataFrame:
-    raw = current_teams()
+    raw = store.current_teams()
     return pd.DataFrame(
         {
             "team_abbr": raw["team_abbr"],
@@ -224,7 +209,7 @@ def publish_week(
     and earlier snapshots are never touched."""
     if ratings is not None:
         teams = build_teams_frame()
-        metadata = current_teams().set_index("team_abbr")
+        metadata = store.current_teams().set_index("team_abbr")
         ratings = ratings.copy()
         ratings["conference"] = ratings["team_abbr"].map(metadata["team_conf"])
         ratings["division"] = ratings["team_abbr"].map(metadata["team_division"])

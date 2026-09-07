@@ -6,6 +6,14 @@ import pandas as pd
 
 from backend.config import PROCESSED_DIR, RAW_DIR
 
+LEGACY_TEAM_NAMES = {
+    "Oakland Raiders",
+    "San Diego Chargers",
+    "St. Louis Rams",
+    "Washington Redskins",
+    "Washington Football Team",
+}
+
 
 def write_parquet(df: pd.DataFrame, path) -> None:
     """Atomic parquet write: tmp file then os.replace."""
@@ -50,8 +58,16 @@ def _read_seasons(
     return pd.concat(frames, ignore_index=True)
 
 
-def team_names() -> dict[str, str]:
+def current_teams() -> pd.DataFrame:
+    """One identity per current franchise, excluding normalized legacy rows."""
     teams = read_raw("teams.parquet")
+    return teams[~teams["team_name"].isin(LEGACY_TEAM_NAMES)].drop_duplicates(
+        "team_abbr"
+    )
+
+
+def team_names() -> dict[str, str]:
+    teams = current_teams()
     return dict(zip(teams["team_abbr"], teams["team_name"]))
 
 

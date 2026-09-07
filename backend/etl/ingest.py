@@ -7,32 +7,39 @@ from backend.etl.store import write_parquet
 from backend.nflverse import data
 
 
-def _published(season: int) -> bool:
+def _published(season: int, *, roster: bool = False) -> bool:
     """nflreadpy rejects seasons it has not opened yet; before the season
     starts that is expected, not a pipeline failure."""
-    return season <= nflreadpy.get_current_season()
+    return season <= nflreadpy.get_current_season(roster=roster)
 
 
 def ingest_season(season: int) -> list[str]:
     """Each source pulls independently so a season with no pbp yet (August)
     still gets depth charts and injuries. Returns per-source problems."""
-    if not _published(season):
-        print(f"note: {season} not yet published upstream")
-        return []
     sources = [
-        ("pbp", lambda: data.load_pbp([season]), RAW_DIR / "pbp"),
         (
             "depth_charts",
             lambda: data.load_depth_charts([season]),
             RAW_DIR / "depth_charts",
         ),
-        (
-            "injuries",
-            lambda: data.load_injuries([season]),
-            RAW_DIR / "injuries",
-        ),
     ]
-    if season >= 2018:
+    if not _published(season, roster=True):
+        print(f"note: {season} depth_charts not yet published upstream")
+        sources = []
+    if _published(season):
+        sources.extend(
+            [
+                ("pbp", lambda: data.load_pbp([season]), RAW_DIR / "pbp"),
+                (
+                    "injuries",
+                    lambda: data.load_injuries([season]),
+                    RAW_DIR / "injuries",
+                ),
+            ]
+        )
+    else:
+        print(f"note: {season} game data not yet published upstream")
+    if season >= 2018 and _published(season):
         sources.append(
             (
                 "pfr_pass",
@@ -68,7 +75,7 @@ def ingest_projection_inputs(season: int) -> list[str]:
     """Refresh only inputs that can change an unplayed game's projection."""
     write_parquet(data.load_schedules([season]), RAW_DIR / "schedules.parquet")
     write_parquet(data.load_teams(), RAW_DIR / "teams.parquet")
-    if not _published(season):
+    if not _published(season, roster=True):
         print(f"note: {season} depth_charts not yet published upstream")
         return []
     try:
