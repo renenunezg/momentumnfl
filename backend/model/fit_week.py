@@ -39,7 +39,6 @@ def compute_qb_adjustments(
     season: int,
     week: int,
     slate: pd.DataFrame,
-    games: pd.DataFrame,
     qb_games: pd.DataFrame,
     depth_charts: pd.DataFrame,
     config: JointScoringConfig,
@@ -48,19 +47,19 @@ def compute_qb_adjustments(
     """game_id -> (home_adj, away_adj) for the expected starters.
 
     QB values use career history across seasons (game_index); baselines use
-    only the current season's training window, matching the rating fit."""
+    the recent QB workload, falling back to the previous season in preseason."""
     game_index = store.game_index(list(range(HISTORY_START_SEASON, season + 1)))
     eligible = game_index[
         (game_index["season"] < season)
         | (game_index["season"].eq(season) & (game_index["model_week"] < week))
     ]
-    played_ids = games.loc[games["model_week"] < week, "game_id"]
     qb_history = qb_games[qb_games["game_id"].isin(set(eligible["game_id"]))]
-    span = layer_config.qb_span_dropbacks
-    values = qb_layer.qb_values(qb_history, eligible, span)
-    weights = recency_by_game(games, week, config)
-    baselines = qb_layer.team_baseline_values(values, qb_history, played_ids, weights)
-    latest, replacement = qb_layer.latest_qb_values(qb_history, eligible, span)
+    history = qb_layer.strength_history(
+        qb_history, eligible, layer_config.qb_span_dropbacks
+    )
+    context = qb_layer.context_before_week(
+        history, season, week, config.rating_half_life_weeks
+    )
     expected = qb_features.expected_starters(
         qb_history, eligible, depth_charts, season, week
     )
@@ -73,8 +72,9 @@ def compute_qb_adjustments(
             if passer is None:
                 sides.append(0.0)
                 continue
-            value = latest.get(passer, replacement)
-            sides.append(value - float(baselines.get(team, 0.0)))
+            sides.append(
+                context.adjustment(team, passer, layer_config.qb_adjustment_weight)
+            )
         adjustments[str(game.game_id)] = (sides[0], sides[1])
     return adjustments
 
@@ -131,7 +131,6 @@ def fit_and_project(
         season,
         week,
         slate,
-        games,
         qb_games,
         load_depth_charts(season),
         config,

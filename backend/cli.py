@@ -45,6 +45,16 @@ def main() -> None:
     preseason_parser.add_argument("--season", type=int, required=True)
 
     subparsers.add_parser("calibrate", help="walk-forward hyperparameter search")
+    subparsers.add_parser(
+        "validate-qb",
+        help="compare QB layers on frozen engine forecasts without writes",
+    )
+    qbs_parser = subparsers.add_parser(
+        "qbs", help="inspect quarterback strengths and starter/backup swap adjustments"
+    )
+    qbs_parser.add_argument("--season", type=int)
+    qbs_parser.add_argument("--week", type=int)
+    qbs_parser.add_argument("--team", required=True)
 
     odds_parser = subparsers.add_parser(
         "odds", help="snapshot Odds API offers for a week"
@@ -209,12 +219,10 @@ def run_preseason(args) -> None:
         return
     week1_fit = prior.week1_fit()
     qb_games = store.qb_games(list(range(HISTORY_START_SEASON, args.season)))
-    previous_games = store.season_games(args.season - 1)
     qb_adjustments = compute_qb_adjustments(
         args.season,
         1,
         slate,
-        previous_games.assign(model_week=0),
         qb_games,
         load_depth_charts(args.season),
         week1_fit.config,
@@ -231,7 +239,7 @@ def run_preseason(args) -> None:
     projections_df = pd.DataFrame(
         [projection.to_record() for projection in projections]
     )
-    projections_df["model_version"] = MODEL_VERSION
+    projections_df["model_version"] = f"{MODEL_VERSION}_qb_v2"
     _write_week(projections_df, "projections", args.season, 1)
     print(
         f"preseason {args.season}: {len(ratings_df)} ratings, "
@@ -273,6 +281,94 @@ def run_calibrate(args) -> None:
     print(summary["dev_honesty"].to_string())
     print("\n=== honesty report (holdout, untouched) ===")
     print(summary["holdout_honesty"].to_string())
+
+
+def run_validate_qb(args) -> None:
+    from dataclasses import replace
+
+    from backend.etl import store
+    from backend.model.calibration import (
+        apply_layers,
+        margin_log_loss,
+        rescore_qb_layer,
+        select_qb_layer,
+    )
+    from backend.model.projections import DEFAULT_MARKET_WEIGHT
+
+    frozen = store.read_processed("calibration", "predictions.parquet")
+    rescored = rescore_qb_layer(frozen)
+    selected = replace(select_qb_layer(rescored), market_weight=DEFAULT_MARKET_WEIGHT)
+    candidate = apply_layers(rescored, selected)
+    print(f"Development-selected QB layer: {selected}")
+    print("Conditional on actual starters; engine forecasts and artifacts unchanged.")
+    for label, frame in (("existing", frozen), ("candidate", candidate)):
+        for split, mask in (
+            ("development", frame["season"].between(2016, 2021)),
+            ("holdout", frame["season"].between(2022, 2025)),
+        ):
+            subset = frame[mask]
+            actual = subset["actual_margin"]
+            pure_mae = (actual - subset["pure_model_margin"]).abs().mean()
+            blended_mae = (actual - subset["model_margin"]).abs().mean()
+            market_mae = (actual - subset["market_margin"]).abs().mean()
+            print(
+                f"{label} {split}: {len(subset)} games, pure MAE {pure_mae:.4f}, "
+                f"blended MAE {blended_mae:.4f}, closing MAE {market_mae:.4f}, "
+                f"blended NLL {margin_log_loss(subset, 1.0, 7.0):.5f}"
+            )
+
+
+def run_qbs(args) -> None:
+    import pandas as pd
+
+    from backend.etl import store
+    from backend.features.qb import expected_starters
+    from backend.model.fit_week import load_depth_charts
+    from backend.model.joint_scoring import DEFAULT_CONFIG
+    from backend.model.projections import LayerConfig
+    from backend.model.qb_adjustment import context_before_week, strength_history
+
+    season, week = resolve_week(args)
+    team = args.team.upper()
+    index = store.game_index(list(range(HISTORY_START_SEASON, season + 1)))
+    games = store.qb_games(list(range(HISTORY_START_SEASON, season + 1)))
+    layer = LayerConfig()
+    context = context_before_week(
+        strength_history(games, index, layer.qb_span_dropbacks),
+        season,
+        week,
+        DEFAULT_CONFIG.rating_half_life_weeks,
+    )
+    depth = load_depth_charts(season)
+    if "pos_abb" not in depth or team not in depth["team"].values:
+        raise SystemExit("Current snapshot depth charts are required for this team")
+    roster = depth[depth["team"].eq(team) & depth["pos_abb"].eq("QB")]
+    roster = roster[roster["dt"].eq(roster["dt"].max())].sort_values("pos_rank")
+    starter = expected_starters(games, index, depth, season, week).get(team)
+    rows = []
+    for row in roster.itertuples():
+        if pd.isna(row.gsis_id):
+            continue
+        adjustment = context.adjustment(team, row.gsis_id, layer.qb_adjustment_weight)
+        rows.append(
+            {
+                "quarterback": row.player_name,
+                "gsis_id": row.gsis_id,
+                "starter": row.gsis_id == starter,
+                "strength": context.strengths.get(row.gsis_id, 0.0),
+                "team_baseline": context.baselines.get(team),
+                "adjustment": adjustment,
+                "change_from_starter": adjustment - context.adjustment(
+                    team, starter, layer.qb_adjustment_weight
+                ),
+            }
+        )
+    print(f"{team}, {season} week {week}; depth chart {roster['dt'].max()}")
+    print(
+        "Strength/baseline: raw points above replacement; "
+        f"adjustment = {layer.qb_adjustment_weight:g} * (strength - baseline)."
+    )
+    print(pd.DataFrame(rows).round(3).to_string(index=False))
 
 
 def run_odds(args) -> None:
@@ -474,6 +570,8 @@ COMMANDS = {
     "fit": run_fit,
     "preseason": run_preseason,
     "calibrate": run_calibrate,
+    "validate-qb": run_validate_qb,
+    "qbs": run_qbs,
     "odds": run_odds,
     "upcoming": run_upcoming,
     "publish": run_publish,

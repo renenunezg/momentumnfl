@@ -23,10 +23,11 @@ honesty benchmark, and `recommendation_status` is always `not_recommended`.
    and a fitted home-field parameter, with a Student-t score distribution.
    Before week 1 a preseason prior blends mean reversion of last season's
    final ratings with the season win-total market.
-4. **Layers.** Expected points get a QB adjustment (expected starter's rolling
-   EPA value versus what the team's training window already contains) and a
-   rest adjustment, then the published margin is shifted toward the market
-   line by a weight capped at 0.5. Ratings themselves never see the market.
+4. **Layers.** The QB adjustment is `0.75 * (selected QB strength - team QB baseline)`.
+   Both sides use current 500-dropback rolling EPA strengths on the same replacement-relative scale; the baseline weights every passer by recent dropbacks and the engine's time decay, carrying the previous season's mix into preseason.
+   This separates a QB's strength from the change applied to a team that already contains his contribution, and permits starter-to-backup substitutions without changing stored team ratings.
+   Expected points then receive the rest adjustment, and the published margin is shifted toward the market line by a weight capped at 0.5.
+   The QB span and 0.75 weight were selected using development-season pure-model log loss with the engine held fixed, before checking the 2022-2025 holdout.
 5. **Calibrate.** A walk-forward backtest over 2016 onward selects every
    hyperparameter on development seasons (2016 to 2021) and reports holdout
    seasons (2022 to 2025) untouched. The backtest is republished as the
@@ -99,6 +100,8 @@ game of the season has been played yet.
 | `fit [--season --week] [--projections-only]` | Fit ratings and unit ratings and project the week. |
 | `preseason --season` | Build the week-1 prior, ratings, and projections. |
 | `calibrate` | Run the walk-forward search and freeze the margin distribution. |
+| `validate-qb` | Select the QB layer on development seasons and report its holdout against the frozen engine forecasts, without changing artifacts. |
+| `qbs --season --week --team BUF` | Show current starter and backup strengths, the team QB baseline, and each lineup substitution's effect before the market blend. |
 | `odds [--season --week]` | Snapshot Odds API offers and price them against the projections. |
 | `upcoming --season [--hours]` | Exit 0 when an unplayed game kicks off within the window, 3 otherwise. |
 | `publish [--season --week] [--skip-backtest] [--projections-only]` | Write the week to the `nfl` schema. |

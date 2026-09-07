@@ -3,11 +3,12 @@ layers on expected points, then the market blend (total-invariant shift)."""
 
 from dataclasses import dataclass
 from datetime import datetime
+from math import isfinite
 
 import numpy as np
 import pandas as pd
 
-from backend.model.joint_scoring import MODEL_VERSION, JointScoringFit
+from backend.model.joint_scoring import JointScoringFit
 from backend.model.market_blend import blend_margin, capped_weight
 from backend.model.outputs import GameProjection
 
@@ -17,7 +18,11 @@ from backend.model.outputs import GameProjection
 REST_POINTS_PER_DAY = 0.0
 REST_CLIP_DAYS = 7.0
 DEFAULT_MARKET_WEIGHT = 0.5
-DEFAULT_QB_SPAN_DROPBACKS = 250.0
+# Selected on development seasons 2016-2021 with the engine held fixed.
+# The QB selection gate scores pure-model log loss before the market blend.
+DEFAULT_QB_SPAN_DROPBACKS = 500.0
+DEFAULT_QB_ADJUSTMENT_WEIGHT = 0.75
+MODEL_VERSION = "nfl_joint_scoring_qb_v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +33,13 @@ class LayerConfig:
     market_weight: float = DEFAULT_MARKET_WEIGHT
     rest_points_per_day: float = REST_POINTS_PER_DAY
     qb_span_dropbacks: float = DEFAULT_QB_SPAN_DROPBACKS
+    qb_adjustment_weight: float = DEFAULT_QB_ADJUSTMENT_WEIGHT
+
+    def __post_init__(self) -> None:
+        if not isfinite(self.qb_span_dropbacks) or self.qb_span_dropbacks <= 0:
+            raise ValueError("qb_span_dropbacks must be finite and positive")
+        if not 0 <= self.qb_adjustment_weight <= 1:
+            raise ValueError("qb_adjustment_weight must be between 0 and 1")
 
 
 def rest_adjustment(

@@ -24,7 +24,6 @@ from backend.config import (
 )
 from backend.etl import store
 from backend.model import qb_adjustment as qb_layer
-from backend.model.fit_week import recency_by_game
 from backend.model.joint_scoring import JointScoringConfig, fit_joint_scoring
 from backend.model.market_blend import (
     RESIDUAL_RANGE,
@@ -39,7 +38,7 @@ from backend.model.preseason import (
 from backend.model.projections import LayerConfig, rest_adjustment
 
 EVAL_SEASONS = tuple(DEVELOPMENT_SEASONS) + tuple(HOLDOUT_SEASONS)
-QB_SPANS = (150.0, 250.0)
+QB_SPANS = (250.0, 500.0, 1000.0)
 # Near-Gaussian degrees of freedom while the location parameters are being
 # selected; the tail shape is chosen last, on the winning configuration.
 SELECTION_DF = 500.0
@@ -48,7 +47,7 @@ DENSITY_FLOOR = 1e-300
 
 class WalkForwardData:
     """Config-independent inputs prepared once: game index, QB games,
-    starters, per-span entering QB values, and per-season win-total slopes."""
+    starters, per-span QB strength histories, and per-season win-total slopes."""
 
     def __init__(self, seasons: tuple[int, ...], qb_spans=QB_SPANS):
         history = list(range(HISTORY_START_SEASON, max(seasons) + 1))
@@ -59,13 +58,10 @@ class WalkForwardData:
             (row.game_id, row.team): row.passer_player_id
             for row in starters.itertuples()
         }
-        self.entering: dict[float, dict[tuple[str, str], float]] = {}
-        for span in qb_spans:
-            values = qb_layer.qb_values(self.qb_games, self.game_index, span)
-            self.entering[span] = {
-                (row.game_id, row.passer_player_id): row.value_points
-                for row in values.itertuples()
-            }
+        self.strength_history = {
+            span: qb_layer.strength_history(self.qb_games, self.game_index, span)
+            for span in qb_spans
+        }
         # One slope per season from a long-memory reference config; the map
         # from win totals to points is not an engine-selection question.
         reference = JointScoringConfig(
@@ -95,9 +91,7 @@ def generate_walk_forward(
     """One row per played game per forecast week: engine margin/total and
     everything the layers need to rescore."""
     data = data or WalkForwardData(seasons, qb_spans)
-    qb_games = data.qb_games
     starter_of = data.starter_of
-    entering = data.entering
 
     rows = []
     for season in seasons:
@@ -135,33 +129,15 @@ def generate_walk_forward(
                 except ValueError as error:
                     print(f"walk-forward {season} week {week} skipped: {error}")
                     continue
-            weights = recency_by_game(games, week, engine_config)
-            window = qb_games[
-                qb_games["game_id"].isin(
-                    set(games.loc[games["model_week"] < week, "game_id"])
+            contexts = {
+                span: qb_layer.context_before_week(
+                    data.strength_history[span],
+                    season,
+                    week,
+                    engine_config.rating_half_life_weeks,
                 )
-            ]
-            baselines: dict[float, pd.Series] = {}
-            for span in qb_spans:
-                values_frame = pd.DataFrame(
-                    [
-                        {
-                            "game_id": row.game_id,
-                            "passer_player_id": row.passer_player_id,
-                            "value_points": entering[span].get(
-                                (row.game_id, row.passer_player_id), 0.0
-                            ),
-                        }
-                        for row in window[window["started"]].itertuples()
-                    ]
-                )
-                baselines[span] = (
-                    qb_layer.team_baseline_values(
-                        values_frame, window, window["game_id"], weights
-                    )
-                    if not values_frame.empty
-                    else pd.Series(dtype=float)
-                )
+                for span in qb_spans
+            }
             for game in slate.itertuples():
                 game_id = str(game.game_id)
                 engine = fit.engine_projection(game)
@@ -206,11 +182,7 @@ def generate_walk_forward(
                         passer = starter_of.get((game_id, team))
                         if passer is None:
                             continue
-                        value = entering[span].get((game_id, passer))
-                        if value is None:
-                            continue
-                        baseline = float(baselines[span].get(team, 0.0))
-                        adj += sign * (value - baseline)
+                        adj += sign * contexts[span].adjustment(team, passer)
                     record[f"qb_adj_{int(span)}"] = adj
                 rows.append(record)
         if verbose:
@@ -226,7 +198,7 @@ def apply_layers(predictions: pd.DataFrame, config: LayerConfig) -> pd.DataFrame
         raise KeyError(f"{qb_column} not precomputed")
     pure = (
         out["engine_margin"]
-        + out[qb_column]
+        + config.qb_adjustment_weight * out[qb_column]
         + config.rest_points_per_day * out["rest_diff"]
     ).to_numpy()
     out["pure_model_margin"] = pure
@@ -277,9 +249,9 @@ ENGINE_GRID = [
 SD_GRID = list(itertools.product((0.85, 0.925, 1.0, 1.075), (7.0, 50.0, 500.0)))
 
 LAYER_GRID = [
-    LayerConfig(market_weight=w, rest_points_per_day=r, qb_span_dropbacks=s)
-    for w, r, s in itertools.product(
-        (0.0, 0.15, 0.25, 0.35, 0.5), (0.0, 0.04, 0.08), QB_SPANS
+    LayerConfig(market_weight=w, rest_points_per_day=r)
+    for w, r in itertools.product(
+        (0.0, 0.15, 0.25, 0.35, 0.5), (0.0, 0.04, 0.08)
     )
 ]
 
@@ -289,6 +261,56 @@ PRESEASON_GRID = [
 ]
 
 _lowest_loss = itemgetter(0)
+
+
+def select_qb_layer(predictions: pd.DataFrame) -> LayerConfig:
+    """Select QB stability and shrinkage on development pure-model log loss."""
+    development = predictions[predictions["season"].isin(DEVELOPMENT_SEASONS)]
+    if development.empty:
+        raise ValueError("QB selection requires development seasons")
+    candidates = []
+    for span, weight in itertools.product(QB_SPANS, (0.0, 0.25, 0.5, 0.75, 1.0)):
+        layer = LayerConfig(
+            market_weight=0.0,
+            qb_span_dropbacks=span,
+            qb_adjustment_weight=weight,
+        )
+        loss = margin_log_loss(apply_layers(development, layer), 1.0, 7.0)
+        candidates.append((loss, layer))
+    return min(candidates, key=_lowest_loss)[1]
+
+
+def rescore_qb_layer(predictions: pd.DataFrame) -> pd.DataFrame:
+    """Keep frozen engine forecasts and replace only their QB deltas.
+
+    Actual starters are supplied as lineup scenarios, as in the original
+    conditional backtest. This does not evaluate starter-availability forecasts.
+    """
+    seasons = list(range(HISTORY_START_SEASON, int(predictions["season"].max()) + 1))
+    index = store.game_index(seasons)
+    games = store.qb_games(seasons)
+    starters = {
+        (row.game_id, row.team): row.passer_player_id
+        for row in games[games["started"]].itertuples()
+    }
+    from backend.model.joint_scoring import DEFAULT_CONFIG
+
+    out = predictions.copy()
+    for span in QB_SPANS:
+        history = qb_layer.strength_history(games, index, span)
+        deltas = {}
+        for (season, week), slate in out.groupby(["season", "model_week"]):
+            context = qb_layer.context_before_week(
+                history, season, week, DEFAULT_CONFIG.rating_half_life_weeks
+            )
+            for game in slate.itertuples():
+                deltas[game.game_id] = context.adjustment(
+                    game.home_team, starters.get((game.game_id, game.home_team))
+                ) - context.adjustment(
+                    game.away_team, starters.get((game.game_id, game.away_team))
+                )
+        out[f"qb_adj_{int(span)}"] = out["game_id"].map(deltas)
+    return out
 
 
 def run_calibration(verbose: bool = True) -> dict:
@@ -335,8 +357,14 @@ def run_calibration(verbose: bool = True) -> dict:
     dev_predictions = generate_walk_forward(
         engine_config, development, use_prior_means, data=data
     )
+    qb_layer_config = select_qb_layer(dev_predictions)
     scored = []
     for layer in LAYER_GRID:
+        layer = replace(
+            layer,
+            qb_span_dropbacks=qb_layer_config.qb_span_dropbacks,
+            qb_adjustment_weight=qb_layer_config.qb_adjustment_weight,
+        )
         layered = apply_layers(dev_predictions, layer)
         loss = margin_log_loss(layered, 1.0, SELECTION_DF)
         mae = float((layered["actual_margin"] - layered["model_margin"]).abs().mean())
