@@ -17,40 +17,87 @@ from scipy.stats import t as student_t
 from backend.config import HISTORY_START_SEASON, STATIC_DIR
 from backend.etl import store
 from backend.features.drives import kickoff_utc
+from backend.model.distributions import student_t_scale
 from backend.model.fit_week import compute_qb_adjustments, load_depth_charts
 from backend.model.joint_scoring import JointScoringFit, fit_joint_scoring
 from backend.model.preseason import build_preseason_prior, load_win_totals
 from backend.model.projections import LayerConfig, assemble_projections
 
-MODEL_VERSION = "nfl_season_wins_v1"
+MODEL_VERSION = "nfl_season_wins_v2"
 SIMULATIONS = 100_000
 SEED = 20260907
 
 
-def regular_schedule(schedules: pd.DataFrame, season: int) -> pd.DataFrame:
+def regular_schedule(
+    schedules: pd.DataFrame,
+    season: int,
+    as_of: datetime | None = None,
+) -> pd.DataFrame:
     """Refuse partial or inconsistent schedules rather than publish short totals."""
-    if season < 2021:
-        raise ValueError("Season wins currently require the 17-game era (2021+)")
+    if season < 2015:
+        raise ValueError("Season wins require the supported 2015+ history")
+    games_per_team = 17 if season >= 2021 else 16
     games = schedules[
         schedules["season"].eq(season) & schedules["game_type"].eq("REG")
     ].copy()
+    # Restore the scheduled identity even when a final source omits it. The
+    # cancellation cannot affect a forecast before it was publicly known.
+    canceled_id = "2022_17_BUF_CIN"
+    if season == 2022 and canceled_id not in set(games["game_id"]):
+        games = pd.concat(
+            [
+                games,
+                pd.DataFrame(
+                    [
+                        {
+                            "game_id": canceled_id,
+                            "season": 2022,
+                            "week": 17,
+                            "game_type": "REG",
+                            "home_team": "CIN",
+                            "away_team": "BUF",
+                            "home_score": np.nan,
+                            "away_score": np.nan,
+                            "location": "Home",
+                            "gameday": "2023-01-02",
+                            "gametime": "20:30",
+                        }
+                    ]
+                ),
+            ],
+            ignore_index=True,
+        )
     if games[["game_id", "home_team", "away_team", "week"]].isna().any().any():
         raise ValueError("Incomplete regular-season game identity")
     appearances = pd.concat([games["home_team"], games["away_team"]]).value_counts()
     if (
-        len(games) != 272
+        len(games) != 16 * games_per_team
         or games["game_id"].duplicated().any()
         or len(appearances) != 32
-        or not appearances.eq(17).all()
+        or not appearances.eq(games_per_team).all()
         or games["home_team"].eq(games["away_team"]).any()
-        or not games["week"].between(1, 18).all()
+        or not games["week"].between(1, games_per_team + 1).all()
     ):
-        raise ValueError("Expected 272 unique regular-season games, 17 per team")
+        raise ValueError(
+            f"Expected {16 * games_per_team} unique regular-season games, "
+            f"{games_per_team} per team"
+        )
+    # NFL cancellation announced Jan 5 Eastern; conservatively available
+    # after that calendar day, Jan 6 05:00 UTC. Source is recorded in README.
+    if season == 2022:
+        canceled = games["game_id"].eq(canceled_id)
+        games.loc[canceled, ["home_score", "away_score"]] = np.nan
+        if as_of is None or as_of >= datetime(2023, 1, 6, 5, tzinfo=UTC):
+            games = games[~canceled].copy()
     home_score, away_score = games["home_score"], games["away_score"]
     if (home_score.notna() != away_score.notna()).any():
         raise ValueError("A game has only one reported score")
     scores = games[["home_score", "away_score"]].dropna().to_numpy(float)
-    if not np.isfinite(scores).all() or (scores < 0).any():
+    if (
+        not np.isfinite(scores).all()
+        or (scores < 0).any()
+        or (scores != np.floor(scores)).any()
+    ):
         raise ValueError("Invalid completed-game scores")
     games["neutral_site"] = games["location"].eq("Neutral")
     games["start_date"] = kickoff_utc(games)
@@ -78,7 +125,7 @@ def project_season(
         raise ValueError("as_of must be timezone-aware")
     if simulations < 1000:
         raise ValueError("At least 1000 season simulations are required")
-    games = regular_schedule(schedule, fit.season)
+    games = regular_schedule(schedule, fit.season, as_of)
     if set(fit.teams) != set(games["home_team"]) | set(games["away_team"]):
         raise ValueError("Fitted teams do not match the complete schedule")
     finished = games["home_score"].notna()
@@ -132,9 +179,9 @@ def project_season(
             raise ValueError("Invalid game residual variance")
         sd = np.sqrt(np.einsum("ij,jk,ik->i", design, covariance, design) + residual)
         margins = np.array([p.pure_home_margin for p in projections], dtype=float)
-        scale = np.array([p.margin_sd for p in projections]) * np.sqrt(
-            (fit.config.student_t_degrees_of_freedom - 2)
-            / fit.config.student_t_degrees_of_freedom
+        scale = student_t_scale(
+            np.array([p.margin_sd for p in projections]),
+            fit.config.student_t_degrees_of_freedom,
         )
         home_probability = student_t.cdf(
             margins / scale, fit.config.student_t_degrees_of_freedom
@@ -189,7 +236,11 @@ def project_season(
             "losses": actual[:, 1],
             "ties": actual[:, 2],
             "games_played": actual.sum(axis=1),
-            "games_remaining": 17 - actual.sum(axis=1),
+            "games_remaining": pd.concat([games["home_team"], games["away_team"]])
+            .value_counts()
+            .reindex(teams)
+            .to_numpy()
+            - actual.sum(axis=1),
             "projected_wins": expected,
             "remaining_expected_wins": expected - actual[:, 0],
             "wins_p10": bounds[0].astype(int),
@@ -206,7 +257,7 @@ def build_season_forecast(
     season: int, as_of: datetime | None = None
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     as_of = as_of or datetime.now(UTC)
-    schedules = regular_schedule(store.read_raw("schedules.parquet"), season)
+    schedules = regular_schedule(store.read_raw("schedules.parquet"), season, as_of)
     remaining = schedules[schedules["home_score"].isna()]
     scheduled_week = (
         int(remaining.sort_values("start_date")["week"].iloc[0])
@@ -219,10 +270,14 @@ def build_season_forecast(
     except FileNotFoundError:
         games = pd.DataFrame(columns=["model_week", "game_id"])
     training = games[games["model_week"].lt(scheduled_week)]
-    completed_ids = set(schedules.loc[schedules["home_score"].notna(), "game_id"])
-    if not set(training["game_id"]).issubset(completed_ids):
+    required_ids = set(
+        schedules.loc[
+            schedules.home_score.notna() & schedules.week.lt(scheduled_week), "game_id"
+        ]
+    )
+    if set(training["game_id"]) != required_ids:
         raise ValueError(
-            "Cached training games disagree with completed schedule results"
+            "Cached training games are incomplete or disagree with completed results"
         )
     if training.empty:
         fit = prior.week1_fit()
@@ -239,7 +294,7 @@ def build_season_forecast(
             pd.concat([training, catalog], ignore_index=True),
             scheduled_week,
             as_of,
-            strength_prior_means=prior.strength_prior_means(),
+            strength_prior=prior.week1_fit(),
         )
         through_week = int(training["model_week"].max())
         through_date = pd.to_datetime(training["start_date"], utc=True).max()
@@ -255,6 +310,7 @@ def build_season_forecast(
         charts,
         fit.config,
         LayerConfig(),
+        as_of=as_of,
     )
     frame, audit = project_season(
         fit, schedules, adjustments, store.team_names(), as_of

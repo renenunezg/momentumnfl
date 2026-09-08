@@ -20,12 +20,17 @@ def build_qb_games(pbp: pd.DataFrame) -> pd.DataFrame:
         )
         .rename(columns={"posteam": "team"})
     )
-    starters = qb.loc[
-        qb.groupby(["game_id", "team"])["dropbacks"].idxmax(),
-        ["game_id", "team", "passer_player_id"],
-    ].assign(started=True)
+    starters = (
+        dropbacks.sort_values(["game_id", "play_id"])
+        .drop_duplicates(["game_id", "posteam"])[
+            ["game_id", "posteam", "passer_player_id"]
+        ]
+        .rename(columns={"posteam": "team"})
+        .assign(started=True)
+    )
     qb = qb.merge(starters, on=["game_id", "team", "passer_player_id"], how="left")
     qb["started"] = qb["started"].notna() & qb["started"].eq(True)
+    qb["feature_version"] = 2
     return qb
 
 
@@ -36,12 +41,16 @@ def _overrides() -> pd.DataFrame:
 
 
 def _depth_chart_qb1(
-    depth_charts: pd.DataFrame, season: int, week: int
+    depth_charts: pd.DataFrame, season: int, week: int, as_of=None
 ) -> pd.Series | None:
     """team -> depth-chart QB1 gsis_id, handling both nflverse formats:
     the weekly format (through 2024: season/week/position/depth_team) and
     the snapshot format (2025+: dt/pos_abb/pos_rank)."""
     if "pos_abb" in depth_charts.columns:
+        if as_of is not None:
+            depth_charts = depth_charts[
+                pd.to_datetime(depth_charts["dt"], utc=True).le(as_of)
+            ]
         charts = depth_charts[
             depth_charts["pos_abb"].eq("QB") & depth_charts["gsis_id"].notna()
         ]
@@ -56,13 +65,17 @@ def _depth_chart_qb1(
     charts = depth_charts.rename(columns={"club_code": "team"})
     charts = charts[
         charts["season"].eq(season)
-        & charts["week"].eq(week)
+        & (charts["week"].lt(week) if as_of is not None else charts["week"].eq(week))
         & charts["position"].eq("QB")
     ]
     if "formation" in charts.columns:
         charts = charts[charts["formation"].eq("Offense")]
     if charts.empty or "depth_team" not in charts.columns:
         return None
+    if as_of is not None:
+        charts = charts[
+            charts["week"].eq(charts.groupby("team")["week"].transform("max"))
+        ]
     return (
         charts.assign(rank=pd.to_numeric(charts["depth_team"], errors="coerce"))
         .sort_values("rank")
@@ -78,6 +91,8 @@ def expected_starters(
     depth_charts: pd.DataFrame,
     season: int,
     week: int,
+    as_of=None,
+    use_overrides: bool = True,
 ) -> pd.Series:
     """team -> expected starter gsis_id for the given week.
 
@@ -91,28 +106,28 @@ def expected_starters(
         (qb_meta["season"] < season)
         | ((qb_meta["season"] == season) & (qb_meta["model_week"] < week))
     ]
-    # Dropback-weighted majority starter over each team's last 8 games, so a
-    # backup starting a meaningless late-season rest game is not mistaken for
-    # the incumbent.
+    if as_of is not None and "start_date" in game_index:
+        eligible_ids = game_index.loc[
+            pd.to_datetime(game_index["start_date"], utc=True).lt(as_of), "game_id"
+        ]
+        prior = prior[prior["game_id"].isin(eligible_ids)]
+    # Latest known starter is the fallback; current depth charts supersede it.
     prior_starts = prior[prior["started"]].sort_values(["season", "model_week"])
-    recent = prior_starts.groupby("team").tail(8)
-    result = (
-        recent.groupby(["team", "passer_player_id"])["dropbacks"]
-        .sum()
-        .sort_values()
-        .groupby("team")
-        .tail(1)
-        .reset_index()
-        .set_index("team")["passer_player_id"]
-    )
+    result = prior_starts.drop_duplicates("team", keep="last").set_index("team")[
+        "passer_player_id"
+    ]
 
-    qb1 = _depth_chart_qb1(depth_charts, season, week)
+    qb1 = _depth_chart_qb1(depth_charts, season, week, as_of)
     if qb1 is not None and not qb1.empty:
         # A named rookie starter has no NFL history yet. Keep that identity;
         # the projection layer supplies replacement value for an unseen QB.
         result = qb1.combine_first(result)
 
-    overrides = _overrides()
+    overrides = (
+        _overrides()
+        if use_overrides
+        else pd.DataFrame(columns=["season", "week", "team_abbr", "gsis_id"])
+    )
     overrides = overrides[overrides["season"].eq(season) & overrides["week"].eq(week)]
     for row in overrides.itertuples():
         result[row.team_abbr] = row.gsis_id

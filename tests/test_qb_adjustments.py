@@ -101,7 +101,8 @@ def test_starter_swap_changes_projection_without_double_counting(monkeypatch):
     # Half of a preseason prior already prices the new reference QB. A later
     # override must still move the forecast by the full calibrated QB gap.
     monkeypatch.setattr(
-        "backend.model.fit_week.load_qb_references", lambda season: {"A": "backup"}
+        "backend.model.fit_week.load_qb_references",
+        lambda season, as_of=None: {"A": "backup"},
     )
     overrides.drop(overrides.index, inplace=True)
     anchored_healthy = compute_qb_adjustments(
@@ -217,3 +218,39 @@ def test_backtest_and_production_qb_context_ignore_target_week_outcomes():
     assert built["passer_player_id"].tolist() == ["starter"]
     assert built["dropbacks"].tolist() == [2]
     assert built["epa"].tolist() == [5.0]
+    cutoff = datetime(2026, 9, 1, tzinfo=UTC)
+    charts = pd.DataFrame(
+        [
+            ("2026-08-31T12:00Z", "A", "starter", 1),
+            ("2026-09-10T12:00Z", "A", "future_backup", 1),
+        ],
+        columns=["dt", "team", "gsis_id", "pos_rank"],
+    ).assign(pos_abb="QB")
+    expected = qb_features.expected_starters(
+        logs, index, charts, 2026, 1, as_of=cutoff, use_overrides=False
+    )
+    assert expected["A"] == "starter"
+    assert qb_features.expected_starters(
+        logs, index, charts.iloc[:1], 2026, 1, as_of=cutoff, use_overrides=False
+    ).equals(expected)
+    # Weekly files have no publication clock. A chart from the target week
+    # cannot be treated as a verified pregame observation.
+    weekly = pd.DataFrame(
+        [
+            (2026, 1, "A", "known", "QB", "1"),
+            (2026, 2, "A", "future", "QB", "1"),
+        ],
+        columns=["season", "week", "team", "gsis_id", "position", "depth_team"],
+    )
+    assert (
+        qb_features.expected_starters(
+            logs,
+            index,
+            weekly,
+            2026,
+            2,
+            as_of=datetime(2026, 9, 14, tzinfo=UTC),
+            use_overrides=False,
+        )["A"]
+        == "known"
+    )

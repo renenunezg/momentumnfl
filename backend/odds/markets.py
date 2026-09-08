@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import t as student_t
 
+from backend.model.distributions import student_t_scale
 from backend.model.market_blend import cover_push_probabilities
 from backend.publish import MARKET_SNAPSHOTS_COLUMNS
 
@@ -152,8 +153,7 @@ def compare_priced_offers(
     offers: pd.DataFrame,
     margin_distribution: np.ndarray,
 ) -> pd.DataFrame:
-    """margin_distribution is the discrete residual distribution from
-    market_blend.fit_margin_residual_distribution (backtest residuals)."""
+    """Price using development-only actual-margin weights and matchup uncertainty."""
     rows = []
     for projection in projections.itertuples():
         game_offers = offers[offers["game_id"].eq(projection.game_id)].dropna(
@@ -164,8 +164,8 @@ def compare_priced_offers(
         ]
         executable = not eligible.empty
         candidate_offers = eligible if executable else game_offers
-        total_scale = projection.total_sd * np.sqrt(
-            (projection.degrees_of_freedom - 2.0) / projection.degrees_of_freedom
+        total_scale = student_t_scale(
+            projection.total_sd, projection.degrees_of_freedom
         )
         candidates = []
         for offer in candidate_offers.itertuples():
@@ -179,6 +179,8 @@ def compare_priced_offers(
                     projection.home_margin,
                     float(offer.point),
                     margin_distribution,
+                    projection.margin_sd,
+                    projection.degrees_of_freedom,
                 )
             elif offer.market == "spreads" and offer.selection == "away":
                 edge = -projection.home_margin + offer.point
@@ -187,6 +189,8 @@ def compare_priced_offers(
                     projection.home_margin,
                     -float(offer.point),
                     margin_distribution,
+                    projection.margin_sd,
+                    projection.degrees_of_freedom,
                 )
                 probability = 1.0 - home_cover - push_probability
             elif offer.market == "totals" and offer.selection == "over":

@@ -47,6 +47,7 @@ def compute_qb_adjustments(
     depth_charts: pd.DataFrame,
     config: JointScoringConfig,
     layer_config: LayerConfig,
+    as_of: datetime | None = None,
 ) -> dict[str, tuple[float, float]]:
     """game_id -> (home_adj, away_adj) for the expected starters.
 
@@ -57,16 +58,22 @@ def compute_qb_adjustments(
         (game_index["season"] < season)
         | (game_index["season"].eq(season) & (game_index["model_week"] < week))
     ]
+    as_of = as_of or datetime.now(UTC)
+    eligible = eligible[pd.to_datetime(eligible["start_date"], utc=True).lt(as_of)]
     qb_history = qb_games[qb_games["game_id"].isin(set(eligible["game_id"]))]
     history = qb_layer.strength_history(
         qb_history, eligible, layer_config.qb_span_dropbacks
     )
     context = qb_layer.context_before_week(
-        history, season, week, config.rating_half_life_weeks,
-        load_qb_references(season), WIN_TOTAL_BLEND,
+        history,
+        season,
+        week,
+        config.rating_half_life_weeks,
+        load_qb_references(season, as_of),
+        WIN_TOTAL_BLEND,
     )
     expected = qb_features.expected_starters(
-        qb_history, eligible, depth_charts, season, week
+        qb_history, eligible, depth_charts, season, week, as_of=as_of
     )
 
     adjustments: dict[str, tuple[float, float]] = {}
@@ -82,15 +89,6 @@ def compute_qb_adjustments(
             )
         adjustments[str(game.game_id)] = (sides[0], sides[1])
     return adjustments
-
-
-def build_prior_means(season: int) -> dict[str, tuple[float, float]] | None:
-    """Preseason prior means built fresh from the previous season, so runs
-    on a clean checkout carry the offseason prior without stored state."""
-    try:
-        return build_preseason_prior(season).strength_prior_means()
-    except FileNotFoundError:
-        return None
 
 
 def load_depth_charts(season: int) -> pd.DataFrame:
@@ -129,7 +127,10 @@ def fit_and_project(
     as_of = as_of or datetime.now(UTC)
     games = store.season_games(season)
     slate = week_slate(season, week)
-    fit = fit_joint_scoring(games, week, as_of, config, build_prior_means(season))
+    prior = build_preseason_prior(season, as_of=as_of, engine_config=config)
+    fit = fit_joint_scoring(
+        games, week, as_of, config, strength_prior=prior.week1_fit()
+    )
     team_names = store.team_names()
     qb_games = store.qb_games(list(range(HISTORY_START_SEASON, season + 1)))
     qb_adjustments = compute_qb_adjustments(
@@ -140,6 +141,7 @@ def fit_and_project(
         load_depth_charts(season),
         config,
         layer_config,
+        as_of=as_of,
     )
     projections = assemble_projections(
         fit,

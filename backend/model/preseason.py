@@ -3,6 +3,7 @@ blended with a rating implied by the Vegas season win-total market. The win
 total prices offseason change (QB moves, coaching, roster) that reversion
 cannot see."""
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -19,7 +20,7 @@ from backend.model.joint_scoring import (
 )
 from backend.model.outputs import TeamRating
 
-MODEL_VERSION = "nfl_preseason_v1"
+MODEL_VERSION = "nfl_preseason_v2"
 
 # Selected by the calibrate walk-forward on weeks 1-4 of dev seasons.
 CARRYOVER = 0.50
@@ -44,13 +45,18 @@ class PreseasonConfig:
     base_offseason_sd: float = BASE_OFFSEASON_SD
 
 
-def load_win_totals(season: int) -> pd.Series:
+def load_win_totals(season: int, as_of: datetime | None = None) -> pd.Series:
+    if as_of is not None:
+        sources = json.loads((STATIC_DIR / "win_total_sources.json").read_text())
+        date = pd.to_datetime(sources.get(str(season), {}).get("date"), utc=True)
+        if pd.notna(date) and date >= as_of:
+            return pd.Series(dtype=float)
     totals = pd.read_csv(STATIC_DIR / "win_totals.csv")
     totals = totals[totals["season"].eq(season)]
     return totals.set_index("team_abbr")["win_total"]
 
 
-def load_qb_references(season: int) -> dict[str, str]:
+def load_qb_references(season: int, as_of: datetime | None = None) -> dict[str, str]:
     """Fixed lineup associated with the preseason market input, never QB overrides.
 
     Missing references or totals leave the empirical QB baseline unchanged.
@@ -61,19 +67,25 @@ def load_qb_references(season: int) -> dict[str, str]:
         return {}
     references = pd.read_csv(path)
     references = references[references["season"].eq(season)]
+    if as_of is not None:
+        stamps = pd.to_datetime(references["source_as_of"], utc=True)
+        references = references[stamps.isna() | stamps.le(as_of)]
     if references["team_abbr"].duplicated().any():
         raise ValueError(f"Duplicate preseason QB references for {season}")
     if references[["team_abbr", "gsis_id"]].isna().any().any():
         raise ValueError(f"Incomplete preseason QB references for {season}")
-    available = load_win_totals(season).dropna().index
-    return references[references["team_abbr"].isin(available)].set_index("team_abbr")[
-        "gsis_id"
-    ].to_dict()
+    available = load_win_totals(season, as_of).dropna().index
+    return (
+        references[references["team_abbr"].isin(available)]
+        .set_index("team_abbr")["gsis_id"]
+        .to_dict()
+    )
 
 
 def points_per_win(
     previous_seasons: list[int],
     engine_config: JointScoringConfig = DEFAULT_CONFIG,
+    games_by_season: dict[int, pd.DataFrame] | None = None,
 ) -> float:
     """OLS slope of centered win totals onto same-season final power ratings,
     fit on history. Falls back to a fixed constant when degenerate."""
@@ -81,7 +93,11 @@ def points_per_win(
     for season in previous_seasons:
         try:
             totals = load_win_totals(season)
-            games = store.season_games(season)
+            games = (
+                store.season_games(season)
+                if games_by_season is None
+                else games_by_season[season]
+            )
         except (FileNotFoundError, KeyError):
             continue
         if totals.empty or games.empty:
@@ -125,16 +141,6 @@ class PreseasonPrior:
     previous_fit: JointScoringFit
     ratings_frame: pd.DataFrame  # team_abbr, power, environment, pace, sd, missing
     slope: float
-
-    def strength_prior_means(self) -> dict[str, tuple[float, float]]:
-        """team -> (offense_ppd, defense_ppd) prior means for in-season fits."""
-        means = {}
-        base = self.previous_fit.base_drives
-        for row in self.ratings_frame.itertuples():
-            offense_points = 0.5 * (row.power_rating + row.scoring_environment)
-            defense_points = 0.5 * (row.power_rating - row.scoring_environment)
-            means[row.team_abbr] = (offense_points / base, defense_points / base)
-        return means
 
     def week1_fit(self) -> JointScoringFit:
         """A synthetic engine fit for week-1 projections: preseason strengths
@@ -219,7 +225,7 @@ def build_preseason_prior(
     base = previous_fit.base_drives
 
     try:
-        win_totals = load_win_totals(season)
+        win_totals = load_win_totals(season, as_of)
     except (FileNotFoundError, KeyError):
         win_totals = pd.Series(dtype=float)
     win_total_missing = win_totals.empty

@@ -20,12 +20,13 @@ from backend.nflverse import data
 def missing_core_seasons(through_season: int) -> list[int]:
     """Historical seasons missing either required cached feature table."""
     required = range(HISTORY_START_SEASON, through_season + 1)
-    team_games = set(store.processed_names("team_games"))
-    qb_games = set(store.processed_names("qb_games"))
     return [
         season
         for season in required
-        if str(season) not in team_games or str(season) not in qb_games
+        if not all(
+            store.core_features_current(directory, season)
+            for directory in ("team_games", "qb_games")
+        )
     ]
 
 

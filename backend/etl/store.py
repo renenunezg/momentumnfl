@@ -3,6 +3,7 @@
 import os
 
 import pandas as pd
+import pyarrow.parquet as pq
 
 from backend.config import PROCESSED_DIR, RAW_DIR
 
@@ -26,8 +27,8 @@ def write_parquet(df: pd.DataFrame, path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def read_raw(*parts: str) -> pd.DataFrame:
-    return pd.read_parquet(RAW_DIR.joinpath(*parts))
+def read_raw(*parts: str, columns: list[str] | None = None) -> pd.DataFrame:
+    return pd.read_parquet(RAW_DIR.joinpath(*parts), columns=columns)
 
 
 def write_processed(df: pd.DataFrame, *parts: str) -> None:
@@ -44,6 +45,14 @@ def processed_names(*parts: str) -> list[str]:
     if not directory.is_dir():
         return []
     return sorted(path.stem for path in directory.glob("*.parquet"))
+
+
+def core_features_current(directory: str, season: int) -> bool:
+    path = PROCESSED_DIR / directory / f"{season}.parquet"
+    if not path.exists() or "feature_version" not in pq.read_schema(path).names:
+        return False
+    versions = pd.read_parquet(path, columns=["feature_version"])
+    return not versions.empty and versions["feature_version"].eq(2).all()
 
 
 def _read_seasons(
@@ -76,7 +85,12 @@ def season_games(season: int) -> pd.DataFrame:
 
 
 def qb_games(seasons: list[int]) -> pd.DataFrame:
-    return _read_seasons("qb_games", seasons)
+    games = _read_seasons("qb_games", seasons)
+    if "feature_version" not in games or not games.feature_version.eq(2).all():
+        raise ValueError(
+            "Rebuild QB features: first-dropback starter schema v2 required"
+        )
+    return games
 
 
 def game_index(seasons: list[int]) -> pd.DataFrame:

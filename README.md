@@ -36,10 +36,10 @@ honesty benchmark, and `recommendation_status` is always `not_recommended`.
    `qbs --context` additionally fits separate QB, team-season, and opposing-defense effects, including hit/sack exposure and the QB's own tendency to invite pressure.
    Its conditional parameter uncertainty reflects limited recent samples and ambiguity between player and supporting cast; it is not a calibrated interval for game scores or an identified causal player value.
    These context estimates remain diagnostics because development testing did not support adding their means or uncertainty to published spreads.
-5. **Calibrate.** A walk-forward backtest over 2016 onward selects every
-   hyperparameter on development seasons (2016 to 2021) and reports holdout
-   seasons (2022 to 2025) untouched. The backtest is republished as the
-   model's track record.
+5. **Calibrate.**
+   A chronological search selects engine and output parameters on development seasons 2016-2021.
+   Seasons 2022-2025 are repeatedly inspected retrospective validation, not a fresh holdout.
+   Historical closing lines form a conditional closing-line benchmark, not a replay of early-week market availability.
 6. **Publish.** Weekly outputs in the `nfl` schema, written in one transaction.
    The column lists in `backend/publish.py` are the contract with the
    frontend and are checked against `sql/` by a test.
@@ -116,7 +116,9 @@ game of the season has been played yet.
 | `fit [--season --week] [--projections-only]` | Fit ratings and unit ratings and project the week. |
 | `preseason --season` | Build the week-1 prior, ratings, and projections. |
 | `season-wins --season` | Project full regular-season wins for all 32 teams and write a per-game probability audit. |
-| `calibrate` | Run the walk-forward search and freeze the margin distribution. |
+| `calibrate [--read-only --rebuild --uncertainty-only]` | Search development seasons; optionally rebuild in memory and suppress all artifact writes. |
+| `validate-model [--seasons ... --rebuild --details]` | Read-only per-season spread errors, log loss, and interval coverage. |
+| `validate-season-wins [--seasons ... --weeks 1 9 --simulations 10000 --rebuild --details]` | Read-only chronological preseason and midseason forecasts, metrics, and optional team audit. |
 | `validate-qb [--memory] [--context]` | Reproduce the development memory search, select the QB layer, report retrospective validation, and optionally test the context promotion gate, without changing artifacts. |
 | `qbs --season --week --team BUF [--context]` | Inspect starter/backup strengths, recorded and effective samples, and substitutions; optionally show context effects and model uncertainty. |
 | `odds [--season --week]` | Snapshot Odds API offers and price them against the projections. |
@@ -140,21 +142,60 @@ The sportsbook source and date live in `backend/data_static/win_total_sources.js
 
 Expected wins are completed wins plus the sum of remaining Student-t win probabilities.
 Completed ties contribute zero wins; future ties are not simulated.
-The command requires 272 unique games and 17 appearances per team (2021 onward), so incomplete schedules fail closed.
-Canceled games require explicit schedule support before a shortened season can be published.
+The command requires 256 games and 16 appearances per team through 2020, or 272 games and 17 appearances from 2021.
+The explicitly recorded 2022 Buffalo-Cincinnati cancellation is applied only after its announcement, using a conservative availability cutoff of January 6, 2023 at 05:00 UTC.
+The [NFL cancellation announcement](https://www.nfl.com/news/week-17-buffalo-cincinnati-game-will-not-be-resumed-neutral-afc-championship-gam) is the source for that exception.
+Other missing games fail schedule validation; completed ties count as zero wins.
 
 The 10th, 50th, and 90th percentiles come from 100,000 reproducible season draws using seed 20260907.
 A Gaussian copula combines shared draws from the engine's team-strength/HFA covariance with independent game residuals, preserving each game's Student-t win probability without counting parameter uncertainty twice.
 Current strength means and expected QBs stay fixed through the remaining schedule; future injuries, roster changes, and strength evolution are not modeled.
 The season ranges have not been coverage-calibrated and are not calibrated confidence intervals for the mean.
-Every draw awards exactly one win per remaining game, and analytic league expected wins equal 272 minus completed tied games.
-A retrospective preseason replay of 2023-2025 (96 team-seasons) had 2.53 wins MAE versus 2.39 for the frozen sportsbook input, with 81.25% of actual win totals inside the nominal 80% ranges.
-This is a descriptive check, not a tuning step or evidence of an independent market edge.
+Every draw awards exactly one win per remaining game, and analytic league expected wins equal the eligible schedule length minus completed tied games.
+Use the chronological validator below to regenerate results for the current code instead of relying on older replay statistics.
 
 `nfl.season_win_totals` contains the latest 32-team snapshot for each season, replaced in the same transaction as game projections.
 Apply `sql/003_season_win_totals.sql` before publishing this contract.
 The weekly and projection-refresh workflows regenerate season wins before publication.
 The `/nfl/season-wins` frontend reads only that schema and displays completed records, full-season expected wins, remaining wins, model ranges, and the dated sportsbook comparison.
+
+## Chronological validation and distribution contract
+
+```bash
+poetry run python -m backend validate-model --rebuild
+poetry run python -m backend validate-season-wins --rebuild --weeks 1 9
+poetry run python -m backend calibrate --read-only --rebuild --uncertainty-only
+```
+
+These commands rebuild version-2 features in memory from cached raw PBP without overwriting stored forecasts, rating artifacts, or the database.
+Without `--rebuild`, matching version-2 core caches are required.
+`bootstrap-history` also detects obsolete cache schemas; incremental feature updates rebuild the full active season when its schema is obsolete.
+The rebuilt competitive scoring and EPA targets use complete possessions classified by their first scrimmage play, with matching denominators.
+Full-game scoring and full-game drive counts separately determine the score environment, pace, and outcome residuals.
+This retains garbage-time protection without attributing final scores to a reduced number of possessions.
+Weekly fits carry preseason strength means and covariance together, in consistent point units.
+
+Published `margin_sd` and `total_sd` are standard deviations everywhere.
+All Student-t consumers use the shared conversion `scale = sd * sqrt((df - 2) / df)`.
+The selected calibration multiplier is applied exactly once, and development and validation artifacts use the same units.
+The September 8, 2026 uncertainty-only development search selected SD scale 1.0 and seven degrees of freedom, keeping the existing mean-model settings.
+The broader engine/QB retune remains unpromoted because it gave back spread accuracy relative to the corrected existing model.
+Actual-margin key-number multipliers are learned from development seasons only, then applied to each matchup's continuous location and uncertainty before integer-outcome pricing.
+`calibrate` writes `margin_distribution_v2.csv`; the obsolete residual histogram is never used as a fallback.
+Missing version-2 pricing calibration prevents offer pricing until that artifact has been regenerated and reviewed.
+
+Historical starter identities use timestamped depth-chart snapshots at the forecast cutoff, or conservatively use an earlier weekly chart and prior-game starter fallback.
+Target-week outcomes and undated manual overrides never supply historical forecast starters.
+A recorded starter is the first QB to take a dropback, not the passer with the most eventual dropbacks.
+Historical weekly depth charts remain availability proxies because they have no publication timestamp.
+The season validator suppresses future scores and conservatively assumes results become available 24 hours after actual kickoff unless a result-availability timestamp is supplied.
+Postponed games remain unplayed until that cutoff admits their actual result.
+The historical schedule is reconstructed from final game records, so revised kickoff dates and corrected PBP remain explicit reconstruction limitations.
+
+The season validator reports every requested season and cutoff, win MAE, nominal 80% interval coverage and width, and the frozen preseason sportsbook comparison.
+It excludes undated sportsbook totals from forecast inputs; dated preseason totals used in the prior make their comparison market-dependent.
+`--details` includes all team forecasts, expected QB identities, completed and remaining wins, source provenance, and assumptions.
+Intervals still omit future QB changes, strength evolution, and future ties; this evaluation does not automatically tune or publish the model.
 
 ## Production
 

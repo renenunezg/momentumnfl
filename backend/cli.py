@@ -48,8 +48,27 @@ def main() -> None:
         "season-wins", help="project full regular-season wins"
     )
     season_wins_parser.add_argument("--season", type=int, required=True)
+    for name in ("validate-model", "validate-season-wins"):
+        validation = subparsers.add_parser(name, help="read-only chronological replay")
+        validation.add_argument(
+            "--seasons", nargs="+", type=int, default=list(range(2016, 2026))
+        )
+        validation.add_argument(
+            "--rebuild",
+            action="store_true",
+            help="rebuild features in memory from cached raw PBP",
+        )
+        validation.add_argument("--details", action="store_true")
+        if name == "validate-season-wins":
+            validation.add_argument("--weeks", nargs="+", type=int, default=[1, 9])
+            validation.add_argument("--simulations", type=int, default=10_000)
 
-    subparsers.add_parser("calibrate", help="walk-forward hyperparameter search")
+    calibrate = subparsers.add_parser(
+        "calibrate", help="walk-forward hyperparameter search"
+    )
+    calibrate.add_argument("--read-only", action="store_true")
+    calibrate.add_argument("--rebuild", action="store_true")
+    calibrate.add_argument("--uncertainty-only", action="store_true")
     validate_qb_parser = subparsers.add_parser(
         "validate-qb",
         help="compare QB layers on frozen engine forecasts without writes",
@@ -252,7 +271,7 @@ def run_preseason(args) -> None:
     projections_df = pd.DataFrame(
         [projection.to_record() for projection in projections]
     )
-    projections_df["model_version"] = f"{MODEL_VERSION}_qb_v3"
+    projections_df["model_version"] = f"{MODEL_VERSION}_qb_v4"
     _write_week(projections_df, "projections", args.season, 1)
     print(
         f"preseason {args.season}: {len(ratings_df)} ratings, "
@@ -302,9 +321,18 @@ def run_upcoming(args) -> None:
 
 
 def run_calibrate(args) -> None:
-    from backend.model.calibration import run_calibration
+    from backend.model.calibration import (
+        EVAL_SEASONS,
+        WalkForwardData,
+        run_calibration,
+        run_uncertainty_calibration,
+    )
 
-    summary = run_calibration()
+    data = WalkForwardData(EVAL_SEASONS, rebuild=args.rebuild)
+    calibrate = (
+        run_uncertainty_calibration if args.uncertainty_only else run_calibration
+    )
+    summary = calibrate(data=data, write_artifacts=not args.read_only)
     print("\n=== selected configuration ===")
     print(summary["engine_config"])
     print(summary["layer_config"])
@@ -313,9 +341,13 @@ def run_calibrate(args) -> None:
     print(f"dev margin log loss: {summary['dev_margin_log_loss']:.4f}")
     print(f"holdout margin log loss: {summary['holdout_margin_log_loss']:.4f}")
     print(f"holdout coverage: {summary['holdout_coverage']}")
+    print(
+        f"key-number log loss: {summary['holdout_discrete_nll']:.4f}; "
+        f"smooth discrete: {summary['holdout_smooth_discrete_nll']:.4f}"
+    )
     print("\n=== honesty report (dev) ===")
     print(summary["dev_honesty"].to_string())
-    print("\n=== honesty report (holdout, untouched) ===")
+    print("\n=== honesty report (retrospective validation) ===")
     print(summary["holdout_honesty"].to_string())
 
 
@@ -346,7 +378,9 @@ def run_validate_qb(args) -> None:
     print("Conditional on majority-dropback QBs; engine/artifacts unchanged.")
     print("Historical market QB references include weekly lineup proxies.")
     for label, frame in (
-        ("frozen", frozen), ("unanchored", previous), ("candidate", candidate)
+        ("frozen", frozen),
+        ("unanchored", previous),
+        ("candidate", candidate),
     ):
         for split, mask in (
             ("development", frame["season"].between(2016, 2021)),
@@ -388,7 +422,8 @@ def run_qbs(args) -> None:
     layer = LayerConfig()
     eligible_ids = index.loc[
         (index["season"] < season)
-        | (index["season"].eq(season) & (index["model_week"] < week)), "game_id"
+        | (index["season"].eq(season) & (index["model_week"] < week)),
+        "game_id",
     ]
     prior_games = games[games["game_id"].isin(eligible_ids)]
     dropbacks = prior_games.groupby("passer_player_id")["dropbacks"].sum()
@@ -426,9 +461,8 @@ def run_qbs(args) -> None:
                 "strength": context.strengths.get(row.gsis_id, 0.0),
                 "team_baseline": context.baselines.get(team),
                 "adjustment": adjustment,
-                "change_from_starter": adjustment - context.adjustment(
-                    team, starter, layer.qb_adjustment_weight
-                ),
+                "change_from_starter": adjustment
+                - context.adjustment(team, starter, layer.qb_adjustment_weight),
             }
         )
     print(f"{team}, {season} week {week}; depth chart {roster['dt'].max()}")
@@ -450,19 +484,20 @@ def run_qbs(args) -> None:
             contrast = {row.gsis_id: 1.0}
             if starter is not None:
                 contrast[starter] = contrast.get(starter, 0.0) - 1.0
-            comparisons.append({
-                "quarterback": row.player_name,
-                "context_vs_average": fitted.strengths.get(row.gsis_id, 0.0),
-                "supporting_cast": fitted.supporting_cast.get(row.gsis_id),
-                "opponents": fitted.opponents.get(row.gsis_id),
-                "hit_sack_pct": 100 * fitted.hit_sack_rates.get(
-                    row.gsis_id, float("nan")
-                ),
-                "swap_vs_starter": sum(
-                    w * fitted.strengths.get(q, 0.0) for q, w in contrast.items()
-                ),
-                "swap_model_sd": fitted.contrast_sd([contrast])[0],
-            })
+            comparisons.append(
+                {
+                    "quarterback": row.player_name,
+                    "context_vs_average": fitted.strengths.get(row.gsis_id, 0.0),
+                    "supporting_cast": fitted.supporting_cast.get(row.gsis_id),
+                    "opponents": fitted.opponents.get(row.gsis_id),
+                    "hit_sack_pct": 100
+                    * fitted.hit_sack_rates.get(row.gsis_id, float("nan")),
+                    "swap_vs_starter": sum(
+                        w * fitted.strengths.get(q, 0.0) for q, w in contrast.items()
+                    ),
+                    "swap_model_sd": fitted.contrast_sd([contrast])[0],
+                }
+            )
         print("Context diagnostics only; not used in published spreads.")
         print("Positive context means a helpful environment; hits/sacks are a proxy.")
         print("Model SD is parameter uncertainty, not a game prediction interval.")
@@ -515,8 +550,8 @@ def run_odds(args) -> None:
     )
     _write_week(offers, "market_offers", season, week)
     _write_week(consensus_lines(offers, projections), "market_snapshots", season, week)
-    distribution = pd.read_csv(STATIC_DIR / "margin_distribution.csv")[
-        "probability"
+    distribution = pd.read_csv(STATIC_DIR / "margin_distribution_v2.csv")[
+        "weight"
     ].to_numpy()
     comparisons = compare_priced_offers(projections, offers, distribution)
     _write_week(comparisons, "market_comparisons", season, week)
@@ -625,6 +660,11 @@ def run_features(args) -> None:
             if args.incremental:
                 existing_ids = []
                 for directory in ("team_games", "qb_games", "unit_games"):
+                    if directory != "unit_games" and not store.core_features_current(
+                        directory, season
+                    ):
+                        existing_ids.append(set())
+                        continue
                     try:
                         existing = store.read_processed(
                             directory,
@@ -683,6 +723,76 @@ def run_features(args) -> None:
     _exit_on_problems(problems)
 
 
+def run_validation(args) -> None:
+    import json
+
+    from backend.model.calibration import (
+        WalkForwardData,
+        apply_layers,
+        coverage_report,
+        generate_walk_forward,
+        honesty_report,
+        margin_log_loss,
+    )
+    from backend.model.joint_scoring import DEFAULT_CONFIG
+    from backend.model.projections import LayerConfig
+    from backend.model.validation import validate_season_wins
+
+    seasons = tuple(sorted(set(args.seasons)))
+    data = WalkForwardData(seasons, rebuild=args.rebuild)
+    if args.command == "validate-season-wins":
+        report, audit = validate_season_wins(
+            data, seasons, tuple(sorted(set(args.weeks))), args.simulations
+        )
+        print(report.to_string(index=False))
+        print(
+            "Assumptions: final schedule reconstruction; results available after "
+            "24h; dated QB snapshots or prior-week chart proxies; current QB "
+            "fixed; future ties omitted. Undated sportsbook totals are "
+            "comparison-only. Dated totals used in priors make that comparison "
+            "market-dependent. Previously inspected seasons are retrospective."
+        )
+        if args.details:
+            print(audit.to_csv(index=False))
+    else:
+        from backend.config import DEVELOPMENT_SEASONS
+
+        predictions = apply_layers(
+            generate_walk_forward(DEFAULT_CONFIG, seasons, data=data), LayerConfig()
+        )
+        print(honesty_report(predictions).to_string())
+        for label, mask in (
+            ("development", predictions.season.isin(DEVELOPMENT_SEASONS)),
+            ("retrospective_validation", ~predictions.season.isin(DEVELOPMENT_SEASONS)),
+        ):
+            part = predictions[mask]
+            if part.empty:
+                continue
+            metrics = {
+                "split": label,
+                "games": len(part),
+                "margin_nll": margin_log_loss(part, 1, 7),
+                **coverage_report(part, 1, 7),
+            }
+            for name, column in (
+                ("engine", "engine_margin"),
+                ("pure", "pure_model_margin"),
+                ("blend", "model_margin"),
+                ("closing", "market_margin"),
+            ):
+                metrics[f"{name}_mae"] = float(
+                    (part.actual_margin - part[column]).abs().mean()
+                )
+            print(json.dumps(metrics))
+        print(
+            "Closing-line conditional benchmark, not an early-week market "
+            "replay. QB inputs use dated or prior-week proxies. Historical "
+            "preseason sportsbook inputs are market-dependent."
+        )
+        if args.details:
+            print(predictions.to_csv(index=False))
+
+
 COMMANDS = {
     "ingest": run_ingest,
     "bootstrap-history": run_bootstrap_history,
@@ -692,6 +802,8 @@ COMMANDS = {
     "preseason": run_preseason,
     "calibrate": run_calibrate,
     "season-wins": run_season_wins,
+    "validate-model": run_validation,
+    "validate-season-wins": run_validation,
     "validate-qb": run_validate_qb,
     "qbs": run_qbs,
     "odds": run_odds,

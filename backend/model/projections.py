@@ -23,7 +23,7 @@ DEFAULT_MARKET_WEIGHT = 0.5
 # The QB selection gate scores pure-model log loss before the market blend.
 DEFAULT_QB_SPAN_DROPBACKS = DEFAULT_SPAN_DROPBACKS
 DEFAULT_QB_ADJUSTMENT_WEIGHT = 1.0
-MODEL_VERSION = "nfl_joint_scoring_qb_v3"
+MODEL_VERSION = "nfl_joint_scoring_qb_v4"
 
 
 @dataclass(frozen=True, slots=True)

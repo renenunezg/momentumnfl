@@ -1,6 +1,8 @@
 """Season acceptance: a complete league, completed results, and QB substitutions."""
 
+from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -8,7 +10,8 @@ import pandas as pd
 import pytest
 
 from backend.model.joint_scoring import DEFAULT_CONFIG, JointScoringFit
-from backend.model.season_wins import project_season
+from backend.model.season_wins import project_season, regular_schedule
+from backend.model.validation import schedule_at_cutoff
 
 
 def test_season_forecast_preserves_schedule_and_completed_results():
@@ -115,3 +118,41 @@ def test_season_forecast_preserves_schedule_and_completed_results():
         fit.engine_projection(game).margin_sd ** 2,
         variance * DEFAULT_CONFIG.score_covariance_scale**2,
     )
+    old_schedule = (
+        schedule[schedule.week.le(16)]
+        .copy()
+        .assign(season=2020, home_score=np.nan, away_score=np.nan)
+    )
+    old_fit = replace(fit, season=2020)
+    old_totals, old_audit = project_season(
+        old_fit, old_schedule, {}, {}, as_of, simulations=1000
+    )
+    assert len(old_audit) == 256 and old_totals.games_remaining.eq(16).all()
+    assert old_totals.projected_wins.eq(8).all()
+    # Future scores do not leak into an earlier reconstruction, and a
+    # postponed game remains pending until its actual completion is available.
+    historical = pd.read_parquet(
+        Path(__file__).parent / "fixtures" / "schedule_2022_regular.parquet"
+    )
+    cutoff = datetime(2022, 11, 3, tzinfo=UTC)
+    before = schedule_at_cutoff(historical, 2022, cutoff)
+    future_ids = set(before.loc[before.home_score.isna(), "game_id"])
+    poisoned = historical.copy()
+    poisoned.loc[poisoned.game_id.isin(future_ids), ["home_score", "away_score"]] = [
+        99,
+        0,
+    ]
+    pd.testing.assert_frame_equal(before, schedule_at_cutoff(poisoned, 2022, cutoff))
+    postponed = historical.copy()
+    postponed.loc[0, "gameday"] = "2022-12-01"
+    delayed = schedule_at_cutoff(postponed, 2022, cutoff).set_index("game_id")
+    assert pd.isna(delayed.loc[postponed.iloc[0].game_id, "home_score"])
+    before_cancellation = regular_schedule(historical, 2022, cutoff)
+    after_cancellation = regular_schedule(
+        historical, 2022, datetime(2023, 1, 7, tzinfo=UTC)
+    )
+    assert len(before_cancellation) == 272 and len(after_cancellation) == 271
+    assert "2022_17_BUF_CIN" not in set(after_cancellation.game_id)
+    # Only the explicitly recorded cancellation can explain a missing game.
+    with pytest.raises(ValueError, match="272 unique"):
+        regular_schedule(historical.iloc[1:], 2022, cutoff)

@@ -16,8 +16,8 @@ def test_history_cache_skips_complete_seasons(monkeypatch):
     }
     monkeypatch.setattr(
         pipeline.store,
-        "processed_names",
-        lambda directory: present[directory],
+        "core_features_current",
+        lambda directory, season: str(season) in present[directory],
     )
 
     assert pipeline.missing_core_seasons(2016) == [2016]

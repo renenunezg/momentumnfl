@@ -1,15 +1,15 @@
 """Walk-forward calibration. Every week of every evaluation season is refit
 and projected strictly out-of-sample. Engine hyperparameters, output-layer
 parameters, the preseason prior, and the score-distribution scale are
-selected in sequence on development-season margin log loss; holdout seasons
-are reported untouched.
+selected in sequence on development-season margin log loss; previously
+inspected validation seasons are labeled retrospective.
 
 The expensive pass (generate_walk_forward) produces per-game engine numbers;
 layer parameters rescore those vectorially without refitting."""
 
 import itertools
 from dataclasses import asdict, replace
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from operator import itemgetter
 
 import numpy as np
@@ -23,12 +23,16 @@ from backend.config import (
     STATIC_DIR,
 )
 from backend.etl import store
+from backend.features.qb import expected_starters
 from backend.model import qb_adjustment as qb_layer
+from backend.model.distributions import student_t_scale
+from backend.model.fit_week import load_depth_charts
 from backend.model.joint_scoring import JointScoringConfig, fit_joint_scoring
 from backend.model.market_blend import (
-    RESIDUAL_RANGE,
+    MARGINS,
     blend_margin,
-    fit_margin_residual_distribution,
+    fit_margin_distribution,
+    integer_margin_probabilities,
 )
 from backend.model.preseason import (
     PreseasonConfig,
@@ -50,15 +54,24 @@ class WalkForwardData:
     """Config-independent inputs prepared once: game index, QB games,
     starters, per-span QB strength histories, and per-season win-total slopes."""
 
-    def __init__(self, seasons: tuple[int, ...], qb_spans=QB_SPANS):
+    def __init__(self, seasons: tuple[int, ...], qb_spans=QB_SPANS, rebuild=False):
         history = list(range(HISTORY_START_SEASON, max(seasons) + 1))
-        self.game_index = store.game_index(history)
-        self.qb_games = store.qb_games(history)
-        starters = self.qb_games[self.qb_games["started"]]
-        self.starter_of = {
-            (row.game_id, row.team): row.passer_player_id
-            for row in starters.itertuples()
-        }
+        if rebuild:
+            from backend.model.validation import rebuild_history
+
+            all_games, self.qb_games = rebuild_history(history)
+        else:
+            all_games = {s: store.season_games(s) for s in history}
+            self.qb_games = store.qb_games(history)
+        self.all_games = all_games
+        self.game_index = pd.concat(
+            [
+                g[["game_id", "season", "model_week", "start_date"]]
+                for g in all_games.values()
+            ],
+            ignore_index=True,
+        )
+        self.depth_charts = {s: load_depth_charts(s) for s in seasons}
         self.strength_history = {
             span: qb_layer.strength_history(self.qb_games, self.game_index, span)
             for span in qb_spans
@@ -71,13 +84,38 @@ class WalkForwardData:
             student_t_degrees_of_freedom=SELECTION_DF,
         )
         self.slopes = {
-            season: points_per_win(list(range(HISTORY_START_SEASON, season)), reference)
+            season: points_per_win(
+                list(range(HISTORY_START_SEASON, season)), reference, all_games
+            )
             for season in seasons
         }
-        self.season_games = {season: store.season_games(season) for season in seasons}
-        self.previous_games = {
-            season: store.season_games(season - 1) for season in seasons
-        }
+        self.season_games = {season: all_games[season] for season in seasons}
+        self.previous_games = {season: all_games[season - 1] for season in seasons}
+        self.forecast_inputs = {}
+        self.contexts = {}
+
+    def forecast_inputs_at(self, season, week, slate):
+        key = season, week
+        if key not in self.forecast_inputs:
+            cutoff = pd.to_datetime(slate.start_date, utc=True).min() - timedelta(
+                seconds=1
+            )
+            eligible = self.game_index[
+                pd.to_datetime(self.game_index.start_date, utc=True).le(
+                    cutoff - timedelta(days=1)
+                )
+            ]
+            expected = expected_starters(
+                self.qb_games,
+                eligible,
+                self.depth_charts[season],
+                season,
+                week,
+                as_of=cutoff,
+                use_overrides=False,
+            )
+            self.forecast_inputs[key] = cutoff.to_pydatetime(), eligible, expected
+        return self.forecast_inputs[key]
 
 
 def generate_walk_forward(
@@ -92,56 +130,73 @@ def generate_walk_forward(
     """One row per played game per forecast week: engine margin/total and
     everything the layers need to rescore."""
     data = data or WalkForwardData(seasons, qb_spans)
-    starter_of = data.starter_of
 
     rows = []
     for season in seasons:
         games = data.season_games[season]
         previous_games = data.previous_games[season]
         final_week = int(previous_games["model_week"].max()) + 1
+        preseason_cutoff = pd.to_datetime(games.start_date, utc=True).min() - timedelta(
+            seconds=1
+        )
         previous_fit = fit_joint_scoring(
             previous_games,
             final_week,
-            datetime.now(UTC),
+            preseason_cutoff.to_pydatetime(),
             engine_config,
         )
         prior = build_preseason_prior(
             season,
-            as_of=datetime.now(UTC),
+            as_of=preseason_cutoff.to_pydatetime(),
             config=preseason_config,
             engine_config=engine_config,
             previous_fit=previous_fit,
             slope=data.slopes[season],
         )
-        prior_means = prior.strength_prior_means() if use_prior_means else None
         qb_references = load_qb_references(season)
         weeks = sorted(games["model_week"].unique())
         for week in weeks:
             slate = games[games["model_week"].eq(week)]
+            as_of, eligible, expected = data.forecast_inputs_at(season, week, slate)
             if week == weeks[0]:
                 fit = prior.week1_fit()
+                fit.as_of = as_of
             else:
-                as_of = pd.to_datetime(
-                    slate["start_date"], utc=True
-                ).min().to_pydatetime() - timedelta(seconds=1)
-                try:
-                    fit = fit_joint_scoring(
-                        games, week, as_of, engine_config, prior_means
-                    )
-                except ValueError as error:
-                    print(f"walk-forward {season} week {week} skipped: {error}")
-                    continue
-            contexts = {
-                span: qb_layer.context_before_week(
-                    data.strength_history[span],
-                    season,
+                available = games[
+                    games["game_id"].isin(eligible["game_id"])
+                    | games["model_week"].ge(week)
+                ]
+                fit = fit_joint_scoring(
+                    available,
                     week,
-                    engine_config.rating_half_life_weeks,
-                    qb_references,
-                    preseason_config.win_total_blend,
+                    as_of,
+                    engine_config,
+                    strength_prior=prior.week1_fit() if use_prior_means else None,
                 )
-                for span in qb_spans
-            }
+            context_key = (
+                season,
+                week,
+                engine_config.rating_half_life_weeks,
+                preseason_config.win_total_blend,
+                qb_spans,
+            )
+            if context_key not in data.contexts:
+                data.contexts[context_key] = {
+                    span: qb_layer.context_before_week(
+                        data.strength_history[span][
+                            data.strength_history[span]["game_id"].isin(
+                                eligible["game_id"]
+                            )
+                        ],
+                        season,
+                        week,
+                        engine_config.rating_half_life_weeks,
+                        qb_references,
+                        preseason_config.win_total_blend,
+                    )
+                    for span in qb_spans
+                }
+            contexts = data.contexts[context_key]
             for game in slate.itertuples():
                 game_id = str(game.game_id)
                 engine = fit.engine_projection(game)
@@ -152,6 +207,12 @@ def generate_walk_forward(
                     "season_type": game.season_type,
                     "game_id": game_id,
                     "neutral_site": bool(game.neutral_site),
+                    "forecast_cutoff": as_of,
+                    "home_expected_qb": expected.get(str(game.home_team)),
+                    "away_expected_qb": expected.get(str(game.away_team)),
+                    "market_input_basis": "closing_line_conditional_benchmark",
+                    "qb_input_basis": "dated_snapshot_or_prior_week_proxy",
+                    "model_version": "nfl_joint_scoring_qb_v4",
                     "engine_margin": engine.expected_home - engine.expected_away,
                     "engine_total": engine.expected_home + engine.expected_away,
                     "margin_sd": engine.margin_sd,
@@ -183,7 +244,7 @@ def generate_walk_forward(
                         (1.0, str(game.home_team)),
                         (-1.0, str(game.away_team)),
                     ):
-                        passer = starter_of.get((game_id, team))
+                        passer = expected.get(team)
                         if passer is None:
                             continue
                         adj += sign * contexts[span].adjustment(team, passer)
@@ -211,8 +272,10 @@ def apply_layers(predictions: pd.DataFrame, config: LayerConfig) -> pd.DataFrame
 
 
 def margin_log_loss(frame: pd.DataFrame, scale: float, df: float) -> float:
-    z = (frame["actual_margin"] - frame["model_margin"]) / (frame["margin_sd"] * scale)
-    density = student_t.pdf(z, df) / (frame["margin_sd"] * scale)
+    z = (frame["actual_margin"] - frame["model_margin"]) / student_t_scale(
+        frame["margin_sd"] * scale, df
+    )
+    density = student_t.pdf(z, df) / student_t_scale(frame["margin_sd"] * scale, df)
     return float(-np.mean(np.log(np.maximum(density, DENSITY_FLOOR))))
 
 
@@ -230,7 +293,9 @@ def honesty_report(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def coverage_report(frame: pd.DataFrame, scale: float, df: float) -> dict[str, float]:
-    z = (frame["actual_margin"] - frame["model_margin"]) / (frame["margin_sd"] * scale)
+    z = (frame["actual_margin"] - frame["model_margin"]) / student_t_scale(
+        frame["margin_sd"] * scale, df
+    )
     out = {}
     for level in (0.5, 0.8, 0.95):
         bound = student_t.ppf(0.5 + level / 2, df)
@@ -250,13 +315,13 @@ ENGINE_GRID = [
     )
 ]
 
-SD_GRID = list(itertools.product((0.85, 0.925, 1.0, 1.075), (7.0, 50.0, 500.0)))
+SD_GRID = list(
+    itertools.product((0.85, 0.925, 1.0, 1.075, 1.15, 1.25), (7.0, 50.0, 500.0))
+)
 
 LAYER_GRID = [
     LayerConfig(market_weight=w, rest_points_per_day=r)
-    for w, r in itertools.product(
-        (0.0, 0.15, 0.25, 0.35, 0.5), (0.0, 0.04, 0.08)
-    )
+    for w, r in itertools.product((0.0, 0.15, 0.25, 0.35, 0.5), (0.0, 0.04, 0.08))
 ]
 
 PRESEASON_GRID = [
@@ -285,23 +350,21 @@ def select_qb_layer(predictions: pd.DataFrame) -> LayerConfig:
 
 
 def rescore_qb_layer(
-    predictions: pd.DataFrame, anchor_preseason: bool = True,
+    predictions: pd.DataFrame,
+    anchor_preseason: bool = True,
     qb_spans: tuple[float, ...] = QB_SPANS,
     calendar_half_life: float = qb_layer.CALENDAR_HALF_LIFE_WEEKS,
     prior_dropbacks: float = qb_layer.SHRINK_DROPBACKS,
 ) -> pd.DataFrame:
     """Keep frozen engine forecasts and replace only their QB deltas.
 
-    Actual starters are supplied as lineup scenarios, as in the original
-    conditional backtest. This does not evaluate starter-availability forecasts.
+    Starter identities must come from the original forecast cutoff. Legacy
+    artifacts with outcome-derived starters must be regenerated first.
     """
     seasons = list(range(HISTORY_START_SEASON, int(predictions["season"].max()) + 1))
     index = store.game_index(seasons)
     games = store.qb_games(seasons)
-    starters = {
-        (row.game_id, row.team): row.passer_player_id
-        for row in games[games["started"]].itertuples()
-    }
+    starters = frozen_starters(predictions)
     from backend.model.joint_scoring import DEFAULT_CONFIG
 
     out = predictions.copy()
@@ -315,9 +378,18 @@ def rescore_qb_layer(
         )
         deltas = {}
         for (season, week), slate in out.groupby(["season", "model_week"]):
+            cutoff = pd.to_datetime(slate["forecast_cutoff"], utc=True).min()
             context = qb_layer.context_before_week(
-                history, season, week, DEFAULT_CONFIG.rating_half_life_weeks,
-                references[season], PreseasonConfig().win_total_blend,
+                history[
+                    pd.to_datetime(history.start_date, utc=True).le(
+                        cutoff - timedelta(days=1)
+                    )
+                ],
+                season,
+                week,
+                DEFAULT_CONFIG.rating_half_life_weeks,
+                references[season],
+                PreseasonConfig().win_total_blend,
             )
             for game in slate.itertuples():
                 deltas[game.game_id] = context.adjustment(
@@ -329,6 +401,21 @@ def rescore_qb_layer(
     return out
 
 
+def frozen_starters(predictions: pd.DataFrame) -> dict:
+    required = {"forecast_cutoff", "home_expected_qb", "away_expected_qb"}
+    if not required.issubset(predictions.columns):
+        raise ValueError("Regenerate forecasts with cutoff-safe QB identities")
+    return {
+        (row.game_id, getattr(row, f"{side}_team")): (
+            None
+            if pd.isna(getattr(row, f"{side}_expected_qb"))
+            else getattr(row, f"{side}_expected_qb")
+        )
+        for row in predictions.itertuples()
+        for side in ("home", "away")
+    }
+
+
 def select_qb_memory(predictions: pd.DataFrame) -> dict:
     """Reproduce the memory search on development data at a fixed 500-DB span."""
     development = predictions[predictions["season"].isin(DEVELOPMENT_SEASONS)]
@@ -337,7 +424,9 @@ def select_qb_memory(predictions: pd.DataFrame) -> dict:
         (52.0, 104.0, 208.0), (50.0, 100.0, 200.0)
     ):
         rescored = rescore_qb_layer(
-            development, qb_spans=(500.0,), calendar_half_life=calendar,
+            development,
+            qb_spans=(500.0,),
+            calendar_half_life=calendar,
             prior_dropbacks=prior,
         )
         for weight in (0.5, 0.75, 1.0):
@@ -347,8 +436,12 @@ def select_qb_memory(predictions: pd.DataFrame) -> dict:
             loss = margin_log_loss(apply_layers(rescored, layer), 1.0, 7.0)
             choices.append((loss, calendar, prior, weight))
     loss, calendar, prior, weight = min(choices, key=_lowest_loss)
-    return {"calendar_half_life": calendar, "prior_dropbacks": prior,
-            "qb_weight": weight, "development_pure_nll": loss}
+    return {
+        "calendar_half_life": calendar,
+        "prior_dropbacks": prior,
+        "qb_weight": weight,
+        "development_pure_nll": loss,
+    }
 
 
 def evaluate_qb_context(predictions: pd.DataFrame) -> dict:
@@ -362,10 +455,7 @@ def evaluate_qb_context(predictions: pd.DataFrame) -> dict:
     index = store.game_index(seasons)
     layer = LayerConfig()
     history = qb_layer.strength_history(games, index, layer.qb_span_dropbacks)
-    starters = {
-        (r.game_id, r.team): r.passer_player_id
-        for r in games[games["started"]].itertuples()
-    }
+    starters = frozen_starters(predictions)
     references = {s: load_qb_references(s) for s in predictions["season"].unique()}
     raw = rescore_qb_layer(predictions)
     raw_delta = raw[f"qb_adj_{int(layer.qb_span_dropbacks)}"]
@@ -376,8 +466,13 @@ def evaluate_qb_context(predictions: pd.DataFrame) -> dict:
         for (season, week), slate in raw.groupby(["season", "model_week"]):
             fitted = fit_context(observations, season, week, qb_penalty, team_penalty)
             context = qb_layer.context_before_week(
-                history, season, week, 6.0, references[season],
-                PreseasonConfig().win_total_blend, fitted.strengths,
+                history,
+                season,
+                week,
+                6.0,
+                references[season],
+                PreseasonConfig().win_total_blend,
+                fitted.strengths,
             )
             contrasts = []
             for game in slate.itertuples():
@@ -391,7 +486,7 @@ def evaluate_qb_context(predictions: pd.DataFrame) -> dict:
                     w * fitted.strengths.get(q, 0.0) for q, w in contrast.items()
                 )
                 contrasts.append(contrast)
-            variances.update(zip(slate["game_id"], fitted.contrast_sd(contrasts)**2))
+            variances.update(zip(slate["game_id"], fitted.contrast_sd(contrasts) ** 2))
         context_delta = raw["game_id"].map(deltas)
         variance = raw["game_id"].map(variances)
         for share in (0.0, 0.25, 0.5, 0.75, 1.0):
@@ -405,30 +500,37 @@ def evaluate_qb_context(predictions: pd.DataFrame) -> dict:
             candidates.append((loss, share, qb_penalty, team_penalty, frame, variance))
     loss, share, qp, tp, frame, variance = min(candidates, key=_lowest_loss)
     frame["model_margin"] = blend_margin(
-        frame["pure_model_margin"].to_numpy(), frame["market_margin"].to_numpy(),
+        frame["pure_model_margin"].to_numpy(),
+        frame["market_margin"].to_numpy(),
         layer.market_weight,
     )
     market_weight = np.where(frame["market_margin"].notna(), layer.market_weight, 0)
     # Translate normal parameter variance into the Student-t scale convention.
     added_scale = (
-        (5 / 7) * (1 - market_weight)**2 * layer.qb_adjustment_weight**2 * variance
+        (5 / 7) * (1 - market_weight) ** 2 * layer.qb_adjustment_weight**2 * variance
     )
     scores = []
     for weight in (0.0, 0.25, 0.5, 1.0, 2.0, 4.0):
         trial = frame.copy()
-        trial["margin_sd"] = np.sqrt(frame["margin_sd"]**2 + weight * added_scale)
+        trial["margin_sd"] = np.sqrt(frame["margin_sd"] ** 2 + weight * added_scale)
         scores.append((margin_log_loss(trial[development], 1.0, 7.0), weight, trial))
     _, variance_weight, selected = min(scores, key=_lowest_loss)
     return {
-        "context_share": share, "variance_weight": variance_weight,
-        "qb_penalty": qp, "team_penalty": tp,
+        "context_share": share,
+        "variance_weight": variance_weight,
+        "qb_penalty": qp,
+        "team_penalty": tp,
         "development_pure_nll": loss,
         "development_blended_nll": margin_log_loss(selected[development], 1.0, 7.0),
         "holdout_blended_nll": margin_log_loss(selected[~development], 1.0, 7.0),
     }
 
 
-def run_calibration(verbose: bool = True) -> dict:
+def run_calibration(
+    verbose: bool = True,
+    data: WalkForwardData | None = None,
+    write_artifacts: bool = True,
+) -> dict:
     development = tuple(DEVELOPMENT_SEASONS)
     results = []
 
@@ -436,7 +538,7 @@ def run_calibration(verbose: bool = True) -> dict:
         if verbose:
             print(message)
 
-    data = WalkForwardData(EVAL_SEASONS)
+    data = data or WalkForwardData(EVAL_SEASONS)
     log("prepared walk-forward inputs")
 
     # Stage 1: engine core + prior-means flag, scored on dev margin log loss
@@ -542,40 +644,108 @@ def run_calibration(verbose: bool = True) -> dict:
     log(f"selected preseason: {preseason_config}")
 
     holdout_predictions = generate_walk_forward(
-        engine_config,
+        replace(engine_config, score_covariance_scale=1.0),
         tuple(HOLDOUT_SEASONS),
         use_prior_means,
         preseason_config,
         data=data,
     )
     holdout = apply_layers(holdout_predictions, layer_config)
+    return finish_calibration(
+        dev_layered,
+        holdout,
+        engine_config,
+        layer_config,
+        preseason_config,
+        use_prior_means,
+        results,
+        write_artifacts,
+    )
+
+
+def run_uncertainty_calibration(data: WalkForwardData, write_artifacts=False) -> dict:
+    """Repair uncertainty calibration with the existing mean model held fixed."""
+    from backend.model.joint_scoring import DEFAULT_CONFIG
+
+    engine = replace(DEFAULT_CONFIG, score_covariance_scale=1.0)
+    layer, preseason = LayerConfig(), PreseasonConfig()
+    predictions = apply_layers(
+        generate_walk_forward(engine, EVAL_SEASONS, data=data), layer
+    )
+    development = predictions[predictions.season.isin(DEVELOPMENT_SEASONS)]
+    holdout = predictions[predictions.season.isin(HOLDOUT_SEASONS)]
+    choices = [
+        (margin_log_loss(development, scale, df), scale, df) for scale, df in SD_GRID
+    ]
+    _, scale, df = min(choices)
+    results = [
+        {"stage": "uncertainty", "margin_log_loss": loss, "scale": scale, "df": df}
+        for loss, scale, df in choices
+    ]
+    return finish_calibration(
+        development,
+        holdout,
+        replace(engine, score_covariance_scale=scale, student_t_degrees_of_freedom=df),
+        layer,
+        preseason,
+        True,
+        results,
+        write_artifacts,
+    )
+
+
+def finish_calibration(
+    development,
+    validation,
+    engine_config,
+    layer_config,
+    preseason_config,
+    use_prior_means,
+    results,
+    write_artifacts,
+):
+    """Both inputs have unscaled SDs; scale once before scoring or persisting."""
+    scale, df = (
+        engine_config.score_covariance_scale,
+        engine_config.student_t_degrees_of_freedom,
+    )
+    dev_layered, holdout = development.copy(), validation.copy()
+    for frame in (dev_layered, holdout):
+        frame[["margin_sd", "total_sd"]] *= scale
     summary = {
         "engine_config": engine_config,
         "layer_config": layer_config,
         "preseason_config": preseason_config,
         "use_prior_means": use_prior_means,
-        "dev_margin_log_loss": margin_log_loss(dev_layered, scale, df),
-        "holdout_margin_log_loss": margin_log_loss(holdout, scale, df),
-        "holdout_coverage": coverage_report(holdout, scale, df),
+        "dev_margin_log_loss": margin_log_loss(dev_layered, 1.0, df),
+        "holdout_margin_log_loss": margin_log_loss(holdout, 1.0, df),
+        "holdout_coverage": coverage_report(holdout, 1.0, df),
         "dev_honesty": honesty_report(dev_layered),
         "holdout_honesty": honesty_report(holdout),
+        "validation_basis": "retrospective; closing-line conditional benchmark",
     }
-    store.write_processed(
-        pd.DataFrame(results), "calibration", "search_history.parquet"
-    )
     combined = pd.concat([dev_layered, holdout], ignore_index=True)
-    store.write_processed(combined, "calibration", "predictions.parquet")
-
-    # Freeze the discrete margin residual distribution as a small committed
-    # artifact so cover/push pricing works on clean checkouts (CI) without
-    # the full calibration output.
-    distribution = fit_margin_residual_distribution(
-        (combined["actual_margin"] - combined["model_margin"]).to_numpy()
-    )
-    pd.DataFrame(
-        {
-            "margin_offset": np.arange(-RESIDUAL_RANGE, RESIDUAL_RANGE + 1),
-            "probability": distribution,
-        }
-    ).to_csv(STATIC_DIR / "margin_distribution.csv", index=False)
+    # Calibrate actual-margin key numbers on development only. The held-back
+    # seasons never train this pricing layer.
+    distribution = fit_margin_distribution(dev_layered, df)
+    for name, weights in (
+        ("discrete", distribution),
+        ("smooth_discrete", np.ones(len(MARGINS))),
+    ):
+        probabilities = integer_margin_probabilities(
+            holdout.model_margin.to_numpy(), holdout.margin_sd.to_numpy(), df, weights
+        )
+        actual = np.clip(holdout.actual_margin.to_numpy(int), MARGINS[0], MARGINS[-1])
+        density = probabilities[np.arange(len(holdout)), actual - MARGINS[0]]
+        summary[f"holdout_{name}_nll"] = float(
+            -np.log(np.maximum(density, 1e-300)).mean()
+        )
+    if write_artifacts:
+        store.write_processed(
+            pd.DataFrame(results), "calibration", "search_history.parquet"
+        )
+        store.write_processed(combined, "calibration", "predictions.parquet")
+        pd.DataFrame({"actual_margin": MARGINS, "weight": distribution}).to_csv(
+            STATIC_DIR / "margin_distribution_v2.csv", index=False
+        )
     return summary

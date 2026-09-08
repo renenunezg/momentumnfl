@@ -13,7 +13,7 @@ import pandas as pd
 
 from backend.model.outputs import TeamRating
 
-MODEL_VERSION = "nfl_joint_scoring_v1"
+MODEL_VERSION = "nfl_joint_scoring_v2"
 PACE_PRIOR_SD = 1.0
 HFA_PRIOR_POINTS = 2.0
 HFA_PRIOR_SD_POINTS = 1.0
@@ -46,14 +46,15 @@ class JointScoringConfig:
             raise ValueError("score_covariance_scale must be positive")
 
 
-# Selected by the calibrate walk-forward on development seasons 2016-2021
-# (margin log loss); holdout 2022-2025 untouched. See calibration.py.
+# Existing mean-model settings retained after the 2026-09-08 audit.
+# SD recalibrated on 2016-2021 with corrected features and one SD contract;
+# 2022-2025 is retrospective validation, not an untouched holdout.
 DEFAULT_CONFIG = JointScoringConfig(
     rating_half_life_weeks=6.0,
     strength_prior_sd_ppd=0.25,
     covariance_shrinkage=0.1,
     student_t_degrees_of_freedom=7.0,
-    score_covariance_scale=0.85,
+    score_covariance_scale=1.0,
 )
 
 
@@ -63,10 +64,15 @@ def solve_ridge(
     weights: np.ndarray,
     prior_mean: np.ndarray,
     prior_sd: np.ndarray,
+    prior_covariance: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    precision = 1.0 / np.square(prior_sd)
-    normal = design.T @ (weights[:, None] * design) + np.diag(precision)
-    rhs = design.T @ (weights * target) + precision * prior_mean
+    precision = (
+        np.diag(1.0 / np.square(prior_sd))
+        if prior_covariance is None
+        else np.linalg.inv(prior_covariance)
+    )
+    normal = design.T @ (weights[:, None] * design) + precision
+    rhs = design.T @ (weights * target) + precision @ prior_mean
     covariance = np.linalg.inv(normal)
     return covariance @ rhs, covariance
 
@@ -205,13 +211,9 @@ def fit_joint_scoring(
     forecast_week: int,
     as_of: datetime,
     config: JointScoringConfig = DEFAULT_CONFIG,
-    strength_prior_means: dict[str, tuple[float, float]] | None = None,
+    strength_prior: JointScoringFit | None = None,
 ) -> JointScoringFit:
-    """Fit ratings using only games strictly before the requested model week.
-
-    strength_prior_means optionally maps team -> (offense_ppd, defense_ppd)
-    prior means (e.g. from the preseason prior), so early-season fits start
-    from carried-over beliefs instead of zero. Missing teams default to 0."""
+    """Fit on prior model weeks, carrying preseason means and covariance together."""
     if as_of.tzinfo is None or as_of.utcoffset() is None:
         raise ValueError("as_of must be timezone-aware")
     training = games[games["model_week"] < forecast_week].copy()
@@ -243,9 +245,13 @@ def fit_joint_scoring(
         if not bool(game.neutral_site):
             design[home_row, -1] = 0.5
             design[away_row, -1] = -0.5
+        if getattr(game, "feature_version", None) != 2:
+            raise ValueError(
+                "Rebuild team features: competitive drive schema v2 required"
+            )
         points_per_drive[[home_row, away_row]] = [
-            game.home_points / game.game_drives,
-            game.away_points / game.game_drives,
+            game.home_competitive_points / game.competitive_drives,
+            game.away_competitive_points / game.competitive_drives,
         ]
         epa_per_drive[[home_row, away_row]] = [
             game.home_epa_per_drive,
@@ -272,15 +278,31 @@ def fit_joint_scoring(
     target = 0.5 * (centered_points + process_points)
     base_drives = float(np.average(training["game_drives"]))
     prior_mean = np.zeros(2 * n_teams + 1)
-    if strength_prior_means:
-        for team, (offense_prior, defense_prior) in strength_prior_means.items():
-            if team in team_index:
-                prior_mean[team_index[team]] = offense_prior
-                prior_mean[n_teams + team_index[team]] = defense_prior
     prior_mean[-1] = HFA_PRIOR_POINTS / base_drives
     prior_sd = np.full(2 * n_teams + 1, config.strength_prior_sd_ppd)
     prior_sd[-1] = HFA_PRIOR_SD_POINTS / base_drives
-    parameters, covariance = solve_ridge(design, target, recency, prior_mean, prior_sd)
+    prior_covariance = None
+    if strength_prior is not None:
+        if set(teams) != set(strength_prior.teams):
+            raise ValueError("Preseason covariance must cover the fitted team catalog")
+        order = [strength_prior.team_index[t] for t in teams]
+        positions = order + [len(teams) + i for i in order] + [2 * len(teams)]
+        factor = strength_prior.base_drives / base_drives
+        prior_covariance = (
+            strength_prior.parameter_covariance[np.ix_(positions, positions)]
+            * factor**2
+        )
+        prior_mean = (
+            np.r_[
+                strength_prior.offense_ppd[order],
+                strength_prior.defense_ppd[order],
+                strength_prior.hfa_ppd,
+            ]
+            * factor
+        )
+    parameters, covariance = solve_ridge(
+        design, target, recency, prior_mean, prior_sd, prior_covariance
+    )
     paired_residuals = np.column_stack(
         [centered_points - design @ parameters, process_points - design @ parameters]
     )
@@ -299,7 +321,7 @@ def fit_joint_scoring(
         / information
     )
     parameters, covariance = solve_ridge(
-        design, target, recency * information, prior_mean, prior_sd
+        design, target, recency * information, prior_mean, prior_sd, prior_covariance
     )
 
     offense = parameters[:n_teams]
@@ -308,7 +330,20 @@ def fit_joint_scoring(
     defense_mean = float(defense.mean())
     offense = offense - offense_mean
     defense = defense - defense_mean
-    base_ppd += offense_mean - defense_mean
+    # Competitive possessions estimate strength. Full outcomes determine the
+    # final-score environment, so extrapolating competitive scoring rates does
+    # not inflate totals when late-game scoring slows down.
+    base_ppd = (
+        float(
+            np.average(
+                (training["home_points"] + training["away_points"])
+                / (2 * training["game_drives"]),
+                weights=recency[::2],
+            )
+        )
+        + offense_mean
+        - defense_mean
+    )
     centering = np.eye(n_teams) - np.full((n_teams, n_teams), 1.0 / n_teams)
     covariance_transform = np.zeros_like(covariance)
     covariance_transform[:n_teams, :n_teams] = centering
@@ -353,11 +388,18 @@ def fit_joint_scoring(
             training["away_points"].to_numpy(float) - predicted_away,
         ]
     )
-    score_covariance = _regularized_covariance(
-        score_residuals,
-        floor=4.0,
-        shrinkage=config.covariance_shrinkage,
-    )
+    if n_games < 2:
+        if strength_prior is None:
+            raise ValueError(
+                "At least two games or preseason score covariance required"
+            )
+        score_covariance = strength_prior.score_residual_covariance.copy()
+    else:
+        score_covariance = _regularized_covariance(
+            score_residuals,
+            floor=4.0,
+            shrinkage=config.covariance_shrinkage,
+        )
     return JointScoringFit(
         season=int(training["season"].iloc[-1]),
         week=forecast_week,

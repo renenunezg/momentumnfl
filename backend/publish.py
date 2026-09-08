@@ -387,6 +387,10 @@ def fallback_market_comparisons(projections: pd.DataFrame) -> pd.DataFrame:
 
 def build_backtest_frame(floor_season: int) -> pd.DataFrame:
     predictions = store.read_processed("calibration", "predictions.parquet")
+    if not {"forecast_cutoff", "home_expected_qb", "away_expected_qb"}.issubset(
+        predictions.columns
+    ):
+        raise ValueError("Regenerate legacy backtests with forecast-time QB inputs")
     predictions = predictions[predictions["season"].ge(floor_season)].copy()
     return pd.DataFrame(
         {
