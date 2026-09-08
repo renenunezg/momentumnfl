@@ -244,6 +244,7 @@ def test_recommendation_qb_freshness_uses_the_selected_player(tmp_path, monkeypa
                 home_team="Home",
                 away_team="Away",
                 pure_home_margin=8.0,
+                home_margin=8.0,
                 model_total=45.0,
                 margin_sd=10.0,
                 total_sd=10.0,

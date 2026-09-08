@@ -299,8 +299,8 @@ def test_recommendation_publication_settlement_and_filtered_history(database):
                 model_version="test",
                 home_team="Home",
                 away_team="Away",
-                pure_home_margin=8.0,
-                home_margin=-8.0,
+                pure_home_margin=-8.0,
+                home_margin=8.0,
                 model_total=55.0,
                 margin_sd=10.0,
                 total_sd=10.0,
@@ -353,7 +353,7 @@ def test_recommendation_publication_settlement_and_filtered_history(database):
             )
         ]
     )
-    forecasts.loc[48, "pure_home_margin"] = -8.0
+    forecasts.loc[48, "home_margin"] = -8.0
     forecasts.loc[50, "model_total"] = 35.0
     offers.loc[offers.game_id.eq("pick-049") & offers.market.eq("spreads"), "point"] = (
         0.0
@@ -373,7 +373,7 @@ def test_recommendation_publication_settlement_and_filtered_history(database):
     weights = np.ones(len(MARGINS))
     decisions = build_recommendations(forecasts, offers, weights, decision_at=now)
     assert len(decisions) == 159 and decisions.status.eq("recommended").all()
-    # A blended margin with the opposite sign must not price recommendations.
+    # Sides price from the blended margin; an opposite-sign pure margin is ignored.
     assert (
         decisions[decisions.market.eq("spreads") & ~decisions.game_id.eq("pick-048")]
         .side.eq("home")

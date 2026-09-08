@@ -12,7 +12,7 @@ from backend.model.distributions import student_t_scale
 from backend.model.market_blend import cover_push_probabilities
 from backend.odds.markets import _american_profit
 
-POLICY_VERSION = "nfl-picks-v1"
+POLICY_VERSION = "nfl-picks-v2"
 MIN_PROBABILITY_EDGE = 0.045
 MAX_OFFER_AGE = timedelta(hours=1)
 MAX_FORECAST_AGE = timedelta(days=7)
@@ -82,11 +82,15 @@ def _timestamp(value):
 
 
 def _probabilities(projection, offer, distribution):
-    """Pure NFL probabilities, retaining key-number mass and returned ties."""
+    """Blended-margin NFL probabilities, retaining key-number mass and returned ties.
+
+    Sides use the published margin (pure model shrunk toward the pre-decision
+    market line); totals have no market blend and stay pure.
+    """
     if offer["market"] in ("spreads", "h2h"):
         point = 0.0 if offer["market"] == "h2h" else offer["point"]
         home, push = cover_push_probabilities(
-            projection.pure_home_margin,
+            projection.home_margin,
             point if offer["side"] == "home" else -point,
             distribution,
             projection.margin_sd,
@@ -202,10 +206,12 @@ def _offer_reason(offer, paired, now, start):
 def build_recommendations(projections, offers, distribution, *, decision_at=None):
     """One best eligible side per game and market, or an explicit No Play.
 
-    Selection uses the pure model marginal. Historical calibration is diagnostic
-    and never gates forward recommendations or replaces their probabilities.
-    The 4.5 percentage-point gate is a versioned starting policy, not a fit
-    to live-season outcomes. Stakes are always one unit, with no compounding.
+    Sides use the blended (published) margin so an edge is measured after
+    shrinking toward the market being bet into; totals stay pure. Historical
+    calibration is diagnostic and never gates forward recommendations or
+    replaces their probabilities. The 4.5 percentage-point gate is a versioned
+    starting policy, not a fit to live-season outcomes. Stakes are always one
+    unit, with no compounding.
     """
     now = _timestamp(decision_at or datetime.now(UTC))
     groups = (
@@ -227,7 +233,7 @@ def build_recommendations(projections, offers, distribution, *, decision_at=None
         elif (
             not np.isfinite(
                 [
-                    projection.pure_home_margin,
+                    projection.home_margin,
                     projection.model_total,
                     projection.margin_sd,
                     projection.total_sd,
@@ -294,7 +300,7 @@ def build_recommendations(projections, offers, distribution, *, decision_at=None
                 reason=reason,
                 stake_units=0.0,
                 execution_eligibility_verified=False,
-                model_home_margin=projection.pure_home_margin,
+                model_home_margin=projection.home_margin,
                 pricing_weights=list(map(float, distribution)),
             )
             priced = [c for c in candidates if c["market"] == market]
