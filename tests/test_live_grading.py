@@ -373,6 +373,11 @@ def test_recommendation_publication_settlement_and_filtered_history(database):
     weights = np.ones(len(MARGINS))
     decisions = build_recommendations(forecasts, offers, weights, decision_at=now)
     assert len(decisions) == 159 and decisions.status.eq("recommended").all()
+    # Totals price from the model total blended toward the posted total.
+    totals = decisions[decisions.market.eq("totals")]
+    assert totals.market_total.eq(45.0).all()
+    assert totals[~totals.game_id.eq("pick-050")].model_total.eq(50.0).all()
+    assert totals[totals.game_id.eq("pick-050")].model_total.eq(40.0).all()
     # Sides price from the blended margin; an opposite-sign pure margin is ignored.
     assert (
         decisions[decisions.market.eq("spreads") & ~decisions.game_id.eq("pick-048")]

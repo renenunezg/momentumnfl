@@ -14,8 +14,11 @@ The prospective recommendation ledger uses the separately versioned policy below
 
 `nfl-picks-v2` selects one eligible side per game and market across moneylines, spreads, and totals.
 It requires at least 4.5 percentage points above the recorded price's break-even probability, conditional on no push or moneyline tie, and positive estimated EV.
-Moneyline and spread probabilities use the published margin, the pure model shrunk toward the pre-decision market line at the configured market weight, with discrete key-number mass; totals have no market blend and use pure integer-score Student-t totals. Stakes are a flat one unit with no additional exposure cap.
-`nfl-picks-v1` priced sides from the pure margin; its frozen picks keep that policy version.
+Moneyline and spread probabilities use the published margin, the pure model shrunk toward the pre-decision market line at the configured market weight, with discrete key-number mass.
+Totals use the model total shrunk at the same weight toward the median posted total across the decision-time offers, priced as integer-score Student-t totals; each pick records that market total in `market_total`.
+Stakes are a flat one unit with no additional exposure cap.
+`nfl-picks-v1` priced sides and totals from the pure model; its frozen picks keep that policy version.
+Apply `sql/008_recommendation_market_total.sql` before publishing under `nfl-picks-v2`.
 Calibration and backtests are diagnostics, not publication gates; estimated EV does not establish a real betting advantage.
 
 Bookmaker availability must be explicitly configured through `ODDS_API_BOOKMAKERS`; the existing NFL `execution_eligibility_verified` flag is required, and an unverified regional-feed quote remains No Play.

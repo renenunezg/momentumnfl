@@ -9,7 +9,8 @@ import pandas as pd
 from scipy.stats import t as student_t
 
 from backend.model.distributions import student_t_scale
-from backend.model.market_blend import cover_push_probabilities
+from backend.model.market_blend import blend_margin, cover_push_probabilities
+from backend.model.projections import DEFAULT_MARKET_WEIGHT
 from backend.odds.markets import _american_profit
 
 POLICY_VERSION = "nfl-picks-v2"
@@ -52,6 +53,7 @@ RECOMMENDATION_COLUMNS = [
     "stake_units",
     "model_home_margin",
     "model_total",
+    "market_total",
     "margin_sd",
     "total_sd",
     "degrees_of_freedom",
@@ -82,10 +84,11 @@ def _timestamp(value):
 
 
 def _probabilities(projection, offer, distribution):
-    """Blended-margin NFL probabilities, retaining key-number mass and returned ties.
+    """Blended NFL probabilities, retaining key-number mass and returned ties.
 
     Sides use the published margin (pure model shrunk toward the pre-decision
-    market line); totals have no market blend and stay pure.
+    market line). Totals use the model total shrunk toward the median posted
+    total across the decision-time offers, supplied on the projection.
     """
     if offer["market"] in ("spreads", "h2h"):
         point = 0.0 if offer["market"] == "h2h" else offer["point"]
@@ -111,6 +114,16 @@ def _probabilities(projection, offer, distribution):
     if offer["side"] == "under":
         win, loss = loss, win
     return win, push, loss
+
+
+def _consensus_total(game_offers):
+    """Median posted total across a game's offers, or NaN without one."""
+    if game_offers.empty or "market" not in game_offers:
+        return float("nan")
+    points = pd.to_numeric(
+        game_offers.loc[game_offers["market"].eq("totals"), "point"], errors="coerce"
+    ).dropna()
+    return float(points.median()) if len(points) else float("nan")
 
 
 def priced_candidates(projection, offers):
@@ -206,8 +219,9 @@ def _offer_reason(offer, paired, now, start):
 def build_recommendations(projections, offers, distribution, *, decision_at=None):
     """One best eligible side per game and market, or an explicit No Play.
 
-    Sides use the blended (published) margin so an edge is measured after
-    shrinking toward the market being bet into; totals stay pure. Historical
+    Sides use the blended (published) margin and totals the model total blended
+    toward the median posted total, so every edge is measured after shrinking
+    toward the market being bet into. Each pick records that market total. Historical
     calibration is diagnostic and never gates forward recommendations or
     replaces their probabilities. The 4.5 percentage-point gate is a versioned
     starting policy, not a fit to live-season outcomes. Stakes are always one
@@ -270,6 +284,14 @@ def build_recommendations(projections, offers, distribution, *, decision_at=None
             continue
         game_offers = groups.get(projection.game_id, offers.iloc[:0])
         candidates = priced_candidates(projection, game_offers)
+        market_total = _consensus_total(game_offers)
+        priced_projection = projection
+        if np.isfinite(market_total) and np.isfinite(projection.model_total):
+            priced_projection = projection._replace(
+                model_total=blend_margin(
+                    projection.model_total, market_total, DEFAULT_MARKET_WEIGHT
+                )
+            )
         for market in MARKETS:
             row = {
                 key: getattr(projection, key, None)
@@ -301,6 +323,8 @@ def build_recommendations(projections, offers, distribution, *, decision_at=None
                 stake_units=0.0,
                 execution_eligibility_verified=False,
                 model_home_margin=projection.home_margin,
+                model_total=priced_projection.model_total,
+                market_total=market_total if np.isfinite(market_total) else None,
                 pricing_weights=list(map(float, distribution)),
             )
             priced = [c for c in candidates if c["market"] == market]
@@ -312,7 +336,9 @@ def build_recommendations(projections, offers, distribution, *, decision_at=None
                     candidate["point"] * 2
                 ):
                     continue
-                win, push, loss = _probabilities(projection, candidate, distribution)
+                win, push, loss = _probabilities(
+                    priced_projection, candidate, distribution
+                )
                 profit = _american_profit(candidate["price"])
                 edge = (
                     win / (win + loss) - 1 / (profit + 1)
