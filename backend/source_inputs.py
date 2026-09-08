@@ -31,7 +31,7 @@ def archive_source(path: Path, *, refresh=False) -> dict:
             return previous
     now = datetime.now(UTC)
     name = now.strftime("%Y%m%dT%H%M%S%fZ")
-    snapshot = directory / f"{name}{path.suffix or '.bin'}"
+    snapshot = directory / f"{name}.source{path.suffix or '.bin'}"
     snapshot.write_bytes(content)
     receipt = dict(
         observed_at=now.isoformat(),

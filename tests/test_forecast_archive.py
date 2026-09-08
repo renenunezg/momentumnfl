@@ -11,6 +11,21 @@ import pytest
 from backend import forecast_archive as archive
 
 
+def test_json_source_receipt_preserves_sportsbook_payload(tmp_path, monkeypatch):
+    from backend import source_inputs
+
+    processed = tmp_path / "processed"
+    monkeypatch.setattr(source_inputs, "PROCESSED_DIR", processed)
+    monkeypatch.setattr(source_inputs, "ARCHIVE", processed / "source_archive")
+    source = tmp_path / "win_total_sources.json"
+    payload = '{"2026":{"source":"BetMGM","date":"2026-09-01"}}'
+    source.write_text(payload)
+    receipt = source_inputs.archive_source(source)
+    assert (processed / receipt["archive"]).read_text() == payload
+    assert source_inputs.receipt_for(source) == receipt
+    assert source_inputs.archive_source(source) == receipt
+
+
 def test_replay_restores_frozen_inputs_and_refuses_missing_late_or_corrupt_bytes(
     tmp_path, monkeypatch
 ):
