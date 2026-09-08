@@ -20,7 +20,6 @@ from backend.config import (
     DEVELOPMENT_SEASONS,
     HISTORY_START_SEASON,
     HOLDOUT_SEASONS,
-    STATIC_DIR,
 )
 from backend.etl import store
 from backend.features.qb import expected_starters
@@ -741,11 +740,15 @@ def finish_calibration(
             -np.log(np.maximum(density, 1e-300)).mean()
         )
     if write_artifacts:
-        store.write_processed(
-            pd.DataFrame(results), "calibration", "search_history.parquet"
-        )
+        if results:
+            store.write_processed(
+                pd.DataFrame(results), "calibration", "search_history.parquet"
+            )
         store.write_processed(combined, "calibration", "predictions.parquet")
+        from backend.model.artifacts import PRICING_PATH
+
+        PRICING_PATH.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame({"actual_margin": MARGINS, "weight": distribution}).to_csv(
-            STATIC_DIR / "margin_distribution_v2.csv", index=False
+            PRICING_PATH, index=False
         )
     return summary

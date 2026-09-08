@@ -1,0 +1,29 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pipx install poetry
+      - run: poetry sync --no-interaction
+      - run: poetry run ruff check backend tests
+      - name: Verify forecast and publication contracts without production credentials
+        run: >-
+          poetry run pytest -q
+          tests/test_awards.py tests/test_team_games.py tests/test_publish_contract.py
+          tests/test_leakage_guard.py tests/test_qb_adjustments.py
+          tests/test_market_blend.py tests/test_season_wins.py
+          tests/test_pipeline.py tests/test_database_write_guard.py

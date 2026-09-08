@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from backend import publish
+from backend.awards.pipeline import BOARD_COLUMNS, META_COLUMNS
 from backend.etl import store
 from backend.grading import RESULT_COLUMNS
 
@@ -25,6 +26,8 @@ CONTRACTS = {
     "market_snapshots": publish.MARKET_SNAPSHOTS_COLUMNS,
     "season_win_totals": publish.SEASON_WIN_TOTALS_COLUMNS,
     "game_results": RESULT_COLUMNS,
+    "award_boards": BOARD_COLUMNS,
+    "award_model_meta": META_COLUMNS,
 }
 
 

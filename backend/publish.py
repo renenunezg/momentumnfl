@@ -439,3 +439,83 @@ def grade_season(engine, results: pd.DataFrame, season: int) -> dict:
             .mappings()
             .one()
         )
+
+
+def publish_awards(engine, season: int, week: int) -> dict:
+    """Publish all seven award states and their matching boards atomically."""
+    import json
+
+    import numpy as np
+    from sqlalchemy.dialects.postgresql import JSONB
+
+    from backend.awards import AWARDS, MODEL_VERSION
+    from backend.awards.pipeline import BOARD_COLUMNS, META_COLUMNS
+
+    board = store.read_processed("awards", "boards", f"{season}_{week:02d}.parquet")
+    meta = store.read_processed("awards", "meta", f"{season}_{week:02d}.parquet")
+    if len(meta) != len(AWARDS) or set(meta.award) != set(AWARDS):
+        raise ValueError("Publication requires a status for all seven awards")
+    for frame in (meta, board):
+        if not (
+            frame.season.eq(season)
+            & frame.week.eq(week)
+            & frame.model_version.eq(MODEL_VERSION)
+        ).all():
+            raise ValueError("Mixed award artifact versions or cutoffs")
+    if meta.as_of.nunique() != 1 or (
+        not board.empty and not board.as_of.eq(meta.as_of.iloc[0]).all()
+    ):
+        raise ValueError("Mixed award snapshot timestamps")
+    for row in meta.itertuples():
+        pool = board[board.award.eq(row.award)]
+        years = json.loads(row.training_seasons)
+        if any(not isinstance(year, int) or year >= season for year in years):
+            raise ValueError("Award training must exclude the forecast season")
+        if row.status in {"ready", "watchlist"} and (
+            len(pool) != row.candidate_count or pool.empty
+        ):
+            raise ValueError(f"Incomplete {row.award} candidate board")
+        if row.status not in {"ready", "watchlist"} and not pool.empty:
+            raise ValueError("Unavailable award contains predictions")
+        if row.status == "watchlist" and (
+            pool.predicted_rank.notna().any()
+            or pool.win_probability.notna().any()
+            or pool.context_source.fillna("").eq("").any()
+            or pool.context_reason.fillna("").eq("").any()
+        ):
+            raise ValueError("Watchlists require context and cannot claim forecasts")
+        if pool.candidate_id.duplicated().any():
+            raise ValueError("Duplicate award candidate")
+        if row.status == "ready" and sorted(pool.predicted_rank.tolist()) != list(
+            range(1, len(pool) + 1)
+        ):
+            raise ValueError("Award ranks must cover the complete candidate pool")
+        if pool.win_probability.notna().any():
+            report = json.loads(row.validation)
+            if (
+                not report.get("probabilities_publishable")
+                or pool.win_probability.isna().any()
+                or not np.isclose(pool.win_probability.sum(), 1)
+                or not pool.win_probability.between(0, 1).all()
+            ):
+                raise ValueError("Unvalidated or incomplete award probabilities")
+    with engine.begin() as conn:
+        for table, frame, columns, json_columns in (
+            ("award_boards", board, BOARD_COLUMNS, ["projected_stats", "drivers"]),
+            (
+                "award_model_meta",
+                meta,
+                META_COLUMNS,
+                ["training_seasons", "validation", "provenance"],
+            ),
+        ):
+            conn.execute(
+                text(f"DELETE FROM nfl.{table} WHERE season=:season AND week=:week"),
+                {"season": season, "week": week},
+            )
+            prepared = _prepare(frame, columns)
+            for column in json_columns:
+                prepared[column] = prepared[column].map(json.loads)
+            if not prepared.empty:
+                _append(prepared, table, conn, dtype={c: JSONB for c in json_columns})
+    return {"award_boards": len(board), "award_model_meta": len(meta)}

@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 
 import pandas as pd
 
-from backend.config import HISTORY_START_SEASON
+from backend.config import HISTORY_START_SEASON, RAW_DIR
 from backend.etl import store
 from backend.features.drives import build_team_games, kickoff_utc
 from backend.features.qb import build_qb_games
@@ -39,13 +39,16 @@ def bootstrap_history(through_season: int) -> list[int]:
 
     schedules = data.load_schedules(missing)
     for season in missing:
-        pbp = data.load_pbp([season])
+        raw_path = RAW_DIR / "pbp" / f"{season}.parquet"
+        pbp = (
+            pd.read_parquet(raw_path) if raw_path.exists() else data.load_pbp([season])
+        )
         season_schedules = schedules[schedules["season"].eq(season)]
         team_games = build_team_games(pbp, season_schedules)
         model_games = build_model_games(team_games, season_schedules)
         store.write_processed(model_games, "team_games", f"{season}.parquet")
         store.write_processed(build_qb_games(pbp), "qb_games", f"{season}.parquet")
-        print(f"bootstrapped {season}: {len(model_games)} games; raw PBP discarded")
+        print(f"bootstrapped {season}: {len(model_games)} games; no raw PBP written")
     return missing
 
 

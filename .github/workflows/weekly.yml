@@ -108,6 +108,25 @@ jobs:
         with:
           path: backend/data/processed/unit_games
           key: ${{ steps.unit-cache.outputs.cache-primary-key }}
+      - name: Restore approved model artifacts
+        if: steps.context.outputs.active == 'true'
+        uses: actions/cache@v4
+        with:
+          path: backend/data/processed/calibration
+          key: nfl-artifacts-${{ runner.os }}-${{ hashFiles('backend/model/**/*.py', 'backend/features/**/*.py', 'backend/etl/**/*.py', 'backend/data_static/*', 'backend/config.py', 'pyproject.toml') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            nfl-artifacts-${{ runner.os }}-${{ hashFiles('backend/model/**/*.py', 'backend/features/**/*.py', 'backend/etl/**/*.py', 'backend/data_static/*', 'backend/config.py', 'pyproject.toml') }}-
+      - name: Build or verify fixed-model pricing and backtest artifacts
+        if: steps.context.outputs.active == 'true'
+        run: poetry run python -m backend production-artifacts
+      - name: Retain reviewable model artifacts
+        if: steps.context.outputs.active == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nfl-production-artifacts
+          path: backend/data/processed/calibration
+          retention-days: 90
+          if-no-files-found: error
       - name: Fit ratings and project next week
         if: steps.context.outputs.active == 'true'
         run: >-
@@ -119,6 +138,7 @@ jobs:
           poetry run python -m backend season-wins
           --season ${{ steps.context.outputs.season }}
       - name: Odds snapshot
+        id: odds
         if: steps.context.outputs.active == 'true'
         run: >-
           poetry run python -m backend odds
@@ -126,10 +146,13 @@ jobs:
         continue-on-error: true
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      - name: Report unavailable priced markets
+        if: steps.odds.outcome == 'failure'
+        run: echo "::warning::Odds refresh failed. Publishing model forecasts without a fresh priced-market snapshot."
       - name: Publish
         if: steps.context.outputs.active == 'true'
         run: >-
-          poetry run python -m backend publish --skip-backtest
+          poetry run python -m backend publish
           --season ${{ steps.context.outputs.season }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

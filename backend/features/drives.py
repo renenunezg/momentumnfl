@@ -26,6 +26,26 @@ def kickoff_utc(schedules: pd.DataFrame) -> pd.Series:
     ).dt.tz_convert("UTC")
 
 
+def competitive_drive_mask(pbp: pd.DataFrame) -> pd.Series:
+    """Keep whole drives classified at the first valid scrimmage play."""
+    starts = (
+        pbp[
+            pbp.posteam.notna()
+            & pbp.epa.notna()
+            & pbp.play_type.isin(SCRIMMAGE_PLAY_TYPES)
+        ]
+        .sort_values(["game_id", "play_id"])
+        .drop_duplicates(["game_id", "fixed_drive"])
+    )
+    selected = pd.MultiIndex.from_frame(
+        starts.loc[competitive_plays(starts), ["game_id", "fixed_drive"]]
+    )
+    return pd.Series(
+        pd.MultiIndex.from_frame(pbp[["game_id", "fixed_drive"]]).isin(selected),
+        index=pbp.index,
+    )
+
+
 def build_team_games(pbp: pd.DataFrame, schedules: pd.DataFrame) -> pd.DataFrame:
     """One row per played game with home/away points, drives, and EPA."""
     pbp = pbp.sort_values(["game_id", "play_id"]).copy()
@@ -36,17 +56,9 @@ def build_team_games(pbp: pd.DataFrame, schedules: pd.DataFrame) -> pd.DataFrame
     ]
     # Classify whole possessions by their first scrimmage play. Once a drive
     # qualifies, retain its finish, including kicks and defensive scores.
-    starts = plays.drop_duplicates(["game_id", "fixed_drive"])
-    selected = pd.MultiIndex.from_frame(
-        starts.loc[competitive_plays(starts), ["game_id", "fixed_drive"]]
-    )
-    competitive = pd.MultiIndex.from_frame(pbp[["game_id", "fixed_drive"]]).isin(
-        selected
-    )
+    competitive = competitive_drive_mask(pbp)
     full_drives = plays.groupby(["game_id", "posteam"])["fixed_drive"].nunique()
-    plays = plays.loc[
-        pd.MultiIndex.from_frame(plays[["game_id", "fixed_drive"]]).isin(selected)
-    ]
+    plays = plays.loc[competitive.loc[plays.index]]
     grouped = (
         plays.groupby(["game_id", "posteam"])
         .agg(

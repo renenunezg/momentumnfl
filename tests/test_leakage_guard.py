@@ -122,7 +122,11 @@ def test_calibration_uses_one_sd_contract_and_keeps_pricing_holdout_free(
     monkeypatch.setattr(c, "LAYER_GRID", [LayerConfig()])
     monkeypatch.setattr(c, "PRESEASON_GRID", [PreseasonConfig()])
     monkeypatch.setattr(c, "SD_GRID", [(0.85, 7)])
-    monkeypatch.setattr(c, "STATIC_DIR", tmp_path)
+    from backend.model import artifacts
+
+    monkeypatch.setattr(
+        artifacts, "PRICING_PATH", tmp_path / "margin_distribution_v2.csv"
+    )
     written = {}
     monkeypatch.setattr(
         c.store,

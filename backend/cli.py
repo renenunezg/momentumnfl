@@ -14,6 +14,9 @@ def main() -> None:
 
     ingest_parser = subparsers.add_parser("ingest", help="pull raw nflverse data")
     ingest_parser.add_argument("--seasons", nargs="+", type=int, default=SEASONS)
+    subparsers.add_parser(
+        "production-artifacts", help="build fixed-model pricing and backtest artifacts"
+    )
 
     history_parser = subparsers.add_parser(
         "bootstrap-history", help="build missing cached historical core features"
@@ -48,6 +51,19 @@ def main() -> None:
         "season-wins", help="project full regular-season wins"
     )
     season_wins_parser.add_argument("--season", type=int, required=True)
+    awards_ingest = subparsers.add_parser(
+        "awards-ingest", help="cache public awards inputs"
+    )
+    awards_ingest.add_argument("--seasons", nargs="+", type=int, required=True)
+    awards_ingest.add_argument("--refresh", action="store_true")
+    for name in ("awards", "validate-awards", "publish-awards"):
+        award_parser = subparsers.add_parser(
+            name, help="independent AP award forecasts"
+        )
+        award_parser.add_argument("--season", type=int, required=True)
+        award_parser.add_argument("--week", type=int, required=True)
+        if name == "awards":
+            award_parser.add_argument("--as-of")
     for name in ("validate-model", "validate-season-wins"):
         validation = subparsers.add_parser(name, help="read-only chronological replay")
         validation.add_argument(
@@ -509,9 +525,9 @@ def run_odds(args) -> None:
 
     import pandas as pd
 
-    from backend.config import STATIC_DIR
     from backend.etl import store
     from backend.features.drives import kickoff_utc
+    from backend.model.artifacts import load_pricing
     from backend.odds.client import OddsAPIClient
     from backend.odds.markets import (
         compare_priced_offers,
@@ -536,6 +552,7 @@ def run_odds(args) -> None:
             "away_team": slate["away_team"].map(names),
         }
     )
+    distribution = load_pricing()
     client = OddsAPIClient()
     window_from = pd.to_datetime(slate["start_date"]).min().to_pydatetime()
     window_to = pd.to_datetime(slate["start_date"]).max().to_pydatetime() + timedelta(
@@ -550,9 +567,6 @@ def run_odds(args) -> None:
     )
     _write_week(offers, "market_offers", season, week)
     _write_week(consensus_lines(offers, projections), "market_snapshots", season, week)
-    distribution = pd.read_csv(STATIC_DIR / "margin_distribution_v2.csv")[
-        "weight"
-    ].to_numpy()
     comparisons = compare_priced_offers(projections, offers, distribution)
     _write_week(comparisons, "market_comparisons", season, week)
     print(
@@ -793,7 +807,51 @@ def run_validation(args) -> None:
             print(predictions.to_csv(index=False))
 
 
+def run_awards(args) -> None:
+    from backend.awards import AWARDS, ingest, pipeline
+
+    if args.command == "awards-ingest":
+        ingest.ingest(args.seasons, args.refresh)
+    elif args.command == "validate-awards":
+        import json
+
+        from backend.awards.model import calibration_report
+
+        _, evaluations = pipeline.history_for(args.season, args.week, list(AWARDS))
+        for award, history in evaluations.items():
+            print(award, json.dumps(calibration_report(history)))
+            if not history.empty:
+                print(history.to_csv(index=False))
+    elif args.command == "publish-awards":
+        from backend.db import engine
+        from backend.publish import publish_awards
+
+        print(publish_awards(engine, args.season, args.week))
+    else:
+        board, meta, _ = pipeline.build(args.season, args.week, args.as_of)
+        print(meta[["award", "status", "candidate_count"]].to_string(index=False))
+        if not board.empty:
+            print(
+                board[board.predicted_rank.le(3)][
+                    ["award", "candidate_name", "predicted_rank", "probability_status"]
+                ].to_string(index=False)
+            )
+
+
+def run_production_artifacts(args) -> None:
+    import json
+
+    from backend.model.artifacts import ensure
+
+    print(json.dumps(ensure(), indent=2))
+
+
 COMMANDS = {
+    "production-artifacts": run_production_artifacts,
+    "awards-ingest": run_awards,
+    "awards": run_awards,
+    "validate-awards": run_awards,
+    "publish-awards": run_awards,
     "ingest": run_ingest,
     "bootstrap-history": run_bootstrap_history,
     "refresh-inputs": run_refresh_inputs,
