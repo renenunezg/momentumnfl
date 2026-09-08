@@ -12,6 +12,16 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -20,10 +30,19 @@ jobs:
       - run: pipx install poetry
       - run: poetry sync --no-interaction
       - run: poetry run ruff check backend tests
+      - name: Prepare disposable database roles
+        env:
+          PGPASSWORD: postgres
+        run: >-
+          psql -X -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1
+          -c 'create role anon; create role authenticated; create role service_role;'
       - name: Verify forecast and publication contracts without production credentials
+        env:
+          NFL_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
         run: >-
           poetry run pytest -q
           tests/test_awards.py tests/test_team_games.py tests/test_publish_contract.py
           tests/test_leakage_guard.py tests/test_qb_adjustments.py
           tests/test_market_blend.py tests/test_season_wins.py
           tests/test_pipeline.py tests/test_database_write_guard.py
+          tests/test_live_grading.py tests/test_forecast_archive.py

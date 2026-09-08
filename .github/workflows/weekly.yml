@@ -5,8 +5,9 @@
 # saving historical raw play-by-play.
 name: weekly
 on:
-  schedule:
-    - cron: "0 16 * * 2"
+  # Supabase pg_cron: nfl-weekly-dispatch, Tuesdays at 16:00 UTC.
+  repository_dispatch:
+    types: [nfl-weekly]
   workflow_dispatch: {}
 
 concurrency:
@@ -163,5 +164,13 @@ jobs:
         with:
           name: nfl-source-receipts
           path: backend/data/processed/source_archive
+          retention-days: 90
+          if-no-files-found: ignore
+      - name: Retain immutable forecast replay bundles
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nfl-forecast-archive-${{ github.run_id }}
+          path: backend/data/processed/forecast_archive
           retention-days: 90
           if-no-files-found: ignore

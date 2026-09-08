@@ -42,6 +42,22 @@ def main() -> None:
     fit_parser.add_argument("--week", type=int)
     fit_parser.add_argument("--projections-only", action="store_true")
 
+    replay_parser = subparsers.add_parser(
+        "replay-forecast",
+        help="reproduce a frozen forecast offline from archived inputs",
+    )
+    replay_parser.add_argument("archive", type=str)
+    download_parser = subparsers.add_parser(
+        "download-forecast",
+        help="export an archived DB input bundle for offline replay",
+    )
+    download_parser.add_argument("run_id")
+    download_parser.add_argument("destination")
+    prospective_parser = subparsers.add_parser(
+        "validate-prospective", help="read-only live forecast error and calibration"
+    )
+    prospective_parser.add_argument("--season", type=int, required=True)
+
     preseason_parser = subparsers.add_parser(
         "preseason", help="build the week-1 prior, ratings, and projections"
     )
@@ -183,9 +199,12 @@ def resolve_week(args) -> tuple[int, int]:
 
 
 def _write_week(frame, directory: str, season: int, week: int) -> None:
-    from backend.etl import store
+    import os
 
-    if directory == "projections":
+    from backend.etl import store
+    from backend.forecast_archive import REPLAY_CUTOFF
+
+    if directory == "projections" and not os.getenv(REPLAY_CUTOFF):
         from backend.source_inputs import attach_sources
 
         frame = attach_sources(frame)
@@ -203,6 +222,9 @@ def run_fit(args) -> None:
     from backend.model.unit_ratings import fit_unit_ratings
 
     args.season, args.week = resolve_week(args)
+    from backend.forecast_archive import finish, prepare
+
+    prepare(args)
     # Before any current-season game has been played there is nothing to fit;
     # the preseason prior is the correct producer for that window, so the
     # weekly cron stays valid across the season boundary.
@@ -211,11 +233,14 @@ def run_fit(args) -> None:
         run_preseason(args)
         return
 
-    fit, ratings, projections = fit_and_project(args.season, args.week)
+    fit, ratings, projections = fit_and_project(
+        args.season, args.week, as_of=args.forecast_cutoff
+    )
     projections_df = pd.DataFrame(
         [projection.to_record() for projection in projections]
     )
     _write_week(projections_df, "projections", args.season, args.week)
+    finish(args, projections_df)
     if args.projections_only:
         print(
             f"projected {args.season} week {args.week}: "
@@ -251,6 +276,7 @@ def run_preseason(args) -> None:
     import pandas as pd
 
     from backend.etl import store
+    from backend.forecast_archive import finish, prepare
     from backend.model.fit_week import (
         compute_qb_adjustments,
         load_depth_charts,
@@ -260,7 +286,8 @@ def run_preseason(args) -> None:
     from backend.model.preseason import MODEL_VERSION, build_preseason_prior
     from backend.model.projections import LayerConfig, assemble_projections
 
-    prior = build_preseason_prior(args.season)
+    prepare(args)
+    prior = build_preseason_prior(args.season, as_of=args.forecast_cutoff)
     team_names = store.team_names()
     ratings = prior.ratings(team_names)
     ratings_df = pd.DataFrame([rating.to_record() for rating in ratings])
@@ -285,6 +312,7 @@ def run_preseason(args) -> None:
         load_depth_charts(args.season),
         week1_fit.config,
         LayerConfig(),
+        as_of=prior.as_of,
     )
     projections = assemble_projections(
         week1_fit,
@@ -299,6 +327,7 @@ def run_preseason(args) -> None:
     )
     projections_df["model_version"] = f"{MODEL_VERSION}_qb_v4"
     _write_week(projections_df, "projections", args.season, 1)
+    finish(args, projections_df)
     print(
         f"preseason {args.season}: {len(ratings_df)} ratings, "
         f"{len(projections_df)} week-1 projections, "
@@ -651,6 +680,7 @@ def run_publish(args) -> None:
         )
     import pandas as pd
 
+    from backend.forecast_archive import publication_bundle
     from backend.model.artifacts import load_pricing
     from backend.recommendations import build_recommendations
 
@@ -663,6 +693,7 @@ def run_publish(args) -> None:
         season,
         week,
         recommendations=decisions,
+        archive_bundle=publication_bundle(season, week, projections),
         ratings=ratings,
         unit_ratings=unit_ratings,
         projections=projections,
@@ -878,7 +909,33 @@ def run_production_artifacts(args) -> None:
     print(json.dumps(ensure(), indent=2))
 
 
+def run_replay_forecast(args) -> None:
+    import json
+    from pathlib import Path
+
+    from backend.forecast_archive import replay
+
+    print(json.dumps(replay(Path(args.archive)), indent=2))
+
+
+def run_validate_prospective(args) -> None:
+    import json
+
+    from backend.prospective import report
+
+    print(json.dumps(report(args.season), indent=2))
+
+
+def run_download_forecast(args) -> None:
+    from backend.forecast_archive import download
+
+    print(download(args.run_id, args.destination))
+
+
 COMMANDS = {
+    "replay-forecast": run_replay_forecast,
+    "validate-prospective": run_validate_prospective,
+    "download-forecast": run_download_forecast,
     "production-artifacts": run_production_artifacts,
     "awards-ingest": run_awards,
     "awards": run_awards,

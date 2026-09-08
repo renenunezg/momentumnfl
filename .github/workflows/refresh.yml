@@ -5,8 +5,9 @@
 # current-game projections are refreshed.
 name: refresh
 on:
-  schedule:
-    - cron: "0 10 * 1,2,8-12 *"
+  # Supabase pg_cron: nfl-refresh-dispatch, daily at 10:00 UTC.
+  repository_dispatch:
+    types: [nfl-refresh]
   workflow_dispatch:
     inputs:
       force:
@@ -158,5 +159,13 @@ jobs:
         with:
           name: nfl-source-receipts
           path: backend/data/processed/source_archive
+          retention-days: 90
+          if-no-files-found: ignore
+      - name: Retain immutable forecast replay bundles
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nfl-forecast-archive-${{ github.run_id }}
+          path: backend/data/processed/forecast_archive
           retention-days: 90
           if-no-files-found: ignore

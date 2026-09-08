@@ -56,6 +56,43 @@ def database(request):
         admin.dispose()
 
 
+def test_forecast_input_bundles_are_immutable_and_deduplicated(
+    database, tmp_path, monkeypatch
+):
+    import hashlib
+
+    from backend import forecast_archive
+
+    content = b"frozen source revision"
+    digest = hashlib.sha256(content).hexdigest()
+    (tmp_path / "objects").mkdir()
+    (tmp_path / "objects" / digest).write_bytes(content)
+    monkeypatch.setattr(forecast_archive, "ARCHIVE", tmp_path)
+    manifest = dict(
+        season=2026,
+        week=1,
+        cutoff="2026-01-01T00:00:00Z",
+        files={"source": dict(present=True, sha256=digest)},
+    )
+    with database.begin() as conn:
+        forecast_archive.persist(conn, manifest)
+        forecast_archive.persist(conn, manifest)
+        assert (
+            conn.execute(text("select count(*) from nfl.forecast_input_runs")).scalar()
+            == 1
+        )
+        assert (
+            conn.execute(
+                text("select count(*) from nfl.forecast_input_objects")
+            ).scalar()
+            == 1
+        )
+    for table in ("forecast_input_runs", "forecast_input_objects"):
+        for verb in ("delete from", "truncate"):
+            with pytest.raises(DBAPIError), database.begin() as conn:
+                conn.execute(text(f"{verb} nfl.{table}"))
+
+
 @pytest.mark.parametrize("database", [True], indirect=True)
 def test_migration_seeds_existing_pregame_forecasts_in_one_transaction(database):
     with database.connect() as conn:

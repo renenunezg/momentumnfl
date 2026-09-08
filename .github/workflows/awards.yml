@@ -1,7 +1,8 @@
 name: awards
 on:
-  schedule:
-    - cron: "0 18 * 1,9-12 3"
+  # Supabase pg_cron: nfl-awards-dispatch, Wednesdays at 18:00 UTC.
+  repository_dispatch:
+    types: [nfl-awards]
   workflow_dispatch:
     inputs:
       season:
@@ -96,7 +97,7 @@ jobs:
           retention-days: 90
           if-no-files-found: error
       - name: Publish explicitly requested award snapshot
-        if: inputs.publish || github.event_name == 'schedule'
+        if: inputs.publish || github.event_name == 'repository_dispatch'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           AWARD_SEASON: ${{ steps.context.outputs.season }}

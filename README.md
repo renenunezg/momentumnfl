@@ -248,6 +248,12 @@ concurrency group:
 Both workflows grade completed games immediately after refreshing schedules, even when no upcoming kickoff requires new projections.
 Grading uses `DATABASE_URL` and the same production write guard as publication.
 
+Supabase `pg_cron` owns the NFL schedules; GitHub Actions executes the dispatched jobs.
+After deploying the `repository_dispatch` workflows, apply `ops/install_nfl_crons.sql` to install or update the three named jobs using the existing Vault `github_dispatch_pat`.
+Refresh runs at 10:00 UTC daily in January, February, and August through December; weekly runs at 16:00 UTC Tuesday in those months; awards runs at 18:00 UTC Wednesday in January and September through December.
+The GitHub schedule triggers are removed to avoid duplicate runs.
+Dispatch removes GitHub's scheduled-event delay, but runner queues and the shared `nfl-production` concurrency group can still delay execution.
+
 Apply `sql/004_live_forecasts.sql` before deploying the forecast archive publisher or the frontend live history/performance views.
 Each accepted pregame publication appends an immutable `nfl.forecast_snapshots` revision using database receipt time.
 The database blocks stale revisions, post-kickoff replacements, backdated late first publications, and deletions of published projections.
@@ -265,6 +271,25 @@ The local cluster needs the `anon` and `authenticated` roles used by the migrati
 The test creates and removes its own database and refuses non-loopback hosts.
 
 Secrets: `DATABASE_URL`, `ODDS_API_KEY`.
+
+## Prospective source replay
+
+Apply `sql/007_forecast_replay.sql` before publishing with the replay-enabled backend.
+Each forecast captures its exact model source, dependency versions, historical feature bytes, schedule, depth charts, preseason sportsbook files, and the presence or absence of QB overrides before assigning its cutoff.
+Publication stores compressed, content-addressed inputs and the forecast manifest in immutable database tables in the same transaction as the forecasts.
+The database archive does not expire; the 90-day Actions artifact is a supplementary copy.
+No historical source timestamps are invented, and existing forecast revisions remain unchanged.
+
+`poetry run python -m backend replay-forecast PATH_TO_MANIFEST` restores only those archived bytes in a temporary workspace and checks that all forecast values reproduce.
+The replay uses the archived Python source, requires matching numerical package versions, blocks network connections, and has no production credentials.
+Missing schedule/depth-chart receipts, inputs captured after cutoff, changed hashes, and missing timestamped expected-QB coverage fail explicitly rather than substituting historical lineup or schedule proxies.
+Use `download-forecast RUN_ID DESTINATION` to export a durable database bundle, then pass its returned manifest path to `replay-forecast`.
+The download reads the database without modifying it and writes only the requested local export.
+
+`poetry run python -m backend validate-prospective --season 2026` reads frozen database forecasts and confirmed results, reporting paired pure/blended/closing-line MAE plus home-win Brier score, log loss, and calibration bins by model version.
+The early-week cohort is each game's first eligible publication; the closing cohort is its last eligible pregame publication, with actual lead time reported rather than claiming an exact kickoff capture.
+Home-win probability evaluation excludes ties, and forecast/source-archive coverage remains explicit.
+Until games finish, errors and probability scores are unavailable rather than zero.
 
 ## Data sources
 

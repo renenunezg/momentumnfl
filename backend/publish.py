@@ -268,6 +268,7 @@ def publish_week(
     market_snapshot: pd.DataFrame | None = None,
     season_win_totals: pd.DataFrame | None = None,
     recommendations: pd.DataFrame | None = None,
+    archive_bundle: dict | None = None,
 ) -> dict[str, int]:
     """One transaction; read-back counts returned for the caller to print.
     ratings=None (the projections-only refresh) leaves teams and both ratings
@@ -366,6 +367,10 @@ def publish_week(
             )
         if recommendations is not None:
             publish_recommendations(conn, recommendations)
+        if archive_bundle is not None:
+            from backend.forecast_archive import persist
+
+            persist(conn, archive_bundle)
         for table in TABLES:
             counts[table] = conn.execute(
                 text(f"SELECT COUNT(*) FROM {SCHEMA}.{table}")
