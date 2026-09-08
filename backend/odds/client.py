@@ -63,7 +63,7 @@ class OddsAPIClient:
             raise ValueError("odds query timestamps must be timezone-aware")
         params = {
             "apiKey": self.api_key,
-            "markets": "spreads,totals",
+            "markets": "h2h,spreads,totals",
             "oddsFormat": "american",
             "dateFormat": "iso",
             # The API rejects "+00:00" offsets; it requires the trailing Z form.

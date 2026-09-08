@@ -67,6 +67,7 @@ def flatten_offers(
     offer_columns = [
         "game_id",
         "odds_api_event_id",
+        "provider_start_date",
         "provider_key",
         "provider",
         "market",
@@ -95,10 +96,10 @@ def flatten_offers(
         for bookmaker in event.get("bookmakers") or []:
             for market in bookmaker.get("markets") or []:
                 market_key = market.get("key")
-                if market_key not in {"spreads", "totals"}:
+                if market_key not in {"h2h", "spreads", "totals"}:
                     continue
                 for outcome in market.get("outcomes") or []:
-                    if market_key == "spreads":
+                    if market_key in {"spreads", "h2h"}:
                         if outcome.get("name") == home_team:
                             selection = "home"
                         elif outcome.get("name") == away_team:
@@ -113,6 +114,7 @@ def flatten_offers(
                         {
                             "game_id": game_id,
                             "odds_api_event_id": event.get("id"),
+                            "provider_start_date": event.get("commence_time"),
                             "provider_key": bookmaker.get("key"),
                             "provider": bookmaker.get("title"),
                             "market": market_key,

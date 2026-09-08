@@ -189,6 +189,14 @@ TABLES = (
 
 _TIMESTAMP_COLUMNS = {
     "source_fetched_at",
+    "decision_at",
+    "forecast_as_of",
+    "market_fetched_at",
+    "provider_last_update",
+    "provider_start_date",
+    "graded_at",
+    "result_source_at",
+    "observed_at",
     "as_of",
     "start_date",
     "model_as_of",
@@ -259,6 +267,7 @@ def publish_week(
     backtest: pd.DataFrame | None,
     market_snapshot: pd.DataFrame | None = None,
     season_win_totals: pd.DataFrame | None = None,
+    recommendations: pd.DataFrame | None = None,
 ) -> dict[str, int]:
     """One transaction; read-back counts returned for the caller to print.
     ratings=None (the projections-only refresh) leaves teams and both ratings
@@ -355,6 +364,8 @@ def publish_week(
                 conn,
                 chunksize=1000,
             )
+        if recommendations is not None:
+            publish_recommendations(conn, recommendations)
         for table in TABLES:
             counts[table] = conn.execute(
                 text(f"SELECT COUNT(*) FROM {SCHEMA}.{table}")
@@ -519,3 +530,108 @@ def publish_awards(engine, season: int, week: int) -> dict:
             if not prepared.empty:
                 _append(prepared, table, conn, dtype={c: JSONB for c in json_columns})
     return {"award_boards": len(board), "award_model_meta": len(meta)}
+
+
+def publish_recommendations(conn, decisions):
+    """Freeze a qualifying pick on first publication, atomically with forecasts."""
+    import json
+
+    from backend.recommendations import RECOMMENDATION_COLUMNS
+
+    if decisions.empty:
+        return
+    frozen = set(
+        conn.execute(
+            text(
+                "select game_id, market from nfl.recommendations "
+                "where game_id = any(:ids) and (status = 'recommended' "
+                "or outcome <> 'pending' or start_date <= clock_timestamp())"
+            ),
+            {"ids": decisions.game_id.unique().tolist()},
+        ).all()
+    )
+    decisions = decisions.loc[
+        [(r.game_id, r.market) not in frozen for r in decisions.itertuples()]
+    ]
+    if decisions.empty:
+        return
+    table = Table("recommendations", MetaData(), schema=SCHEMA, autoload_with=conn)
+    rows = _prepare(decisions, RECOMMENDATION_COLUMNS).to_dict("records")
+    for row in rows:
+        for key in ("source_timestamps", "data_flags", "pricing_weights"):
+            if isinstance(row[key], str):
+                row[key] = json.loads(row[key])
+            if row[key] is None:
+                row[key] = [] if key == "pricing_weights" else {}
+    statement = insert(table).values(rows)
+    statement = statement.on_conflict_do_update(
+        index_elements=["game_id", "market"],
+        set_={
+            c: statement.excluded[c]
+            for c in RECOMMENDATION_COLUMNS
+            if c not in ("game_id", "market")
+        },
+        where=(table.c.status == "no_play")
+        & (table.c.outcome == "pending")
+        & (table.c.start_date > text("clock_timestamp()"))
+        & (statement.excluded.decision_at > table.c.decision_at),
+    )
+    conn.execute(statement)
+
+
+def grade_picks(engine, schedule, season):
+    """Use monotonic schedule receipts and update only pending decisions."""
+    from backend.recommendations import SETTLEMENT_COLUMNS, grade_recommendations
+
+    with engine.begin() as conn:
+        table = Table(
+            "recommendation_schedule", MetaData(), schema=SCHEMA, autoload_with=conn
+        )
+        if not schedule.empty:
+            statement = insert(table).values(
+                _prepare(schedule, list(schedule.columns)).to_dict("records")
+            )
+            conn.execute(
+                statement.on_conflict_do_update(
+                    index_elements=["game_id"],
+                    set_={
+                        c: statement.excluded[c]
+                        for c in schedule.columns
+                        if c != "game_id"
+                    },
+                    where=statement.excluded.observed_at > table.c.observed_at,
+                )
+            )
+        picks = pd.read_sql_query(
+            text(
+                "select * from nfl.recommendations where season = :season "
+                "and outcome = 'pending' for update"
+            ),
+            conn,
+            params={"season": season},
+        )
+        games = pd.read_sql_query(
+            text(
+                "select *, observed_at as source_fetched_at "
+                "from nfl.recommendation_schedule where season = :season"
+            ),
+            conn,
+            params={"season": season},
+        )
+        grades = grade_recommendations(picks, games)
+        if not grades.empty:
+            columns = [
+                c
+                for c in SETTLEMENT_COLUMNS
+                if c not in ("game_id", "market", "decision_at")
+            ]
+            conn.execute(
+                text(
+                    "update nfl.recommendations set "
+                    + ", ".join(f"{c} = :{c}" for c in columns)
+                    + " where game_id = :game_id and market = :market "
+                    "and decision_at = :decision_at and outcome = 'pending'"
+                ),
+                _prepare(grades, SETTLEMENT_COLUMNS).to_dict("records"),
+            )
+        return len(grades)

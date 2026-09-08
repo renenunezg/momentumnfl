@@ -74,3 +74,33 @@ def result_frame(schedules, season, names, fetched_at) -> pd.DataFrame:
     games["source"] = "nflverse schedules"
     games["source_fetched_at"] = fetched_at
     return _prepare(games, RESULT_COLUMNS)
+
+
+def recommendation_schedule(schedules, season, names, fetched_at):
+    """All observed fixtures, including pending and explicit schedule changes.
+
+    nflverse does not consistently provide cancellation status. Absent games
+    remain pending; only an explicit status or changed known kickoff can void.
+    """
+    finals = result_frame(schedules, season, names, fetched_at).set_index("game_id")
+    games = schedules[schedules.season.eq(season)].copy()
+    games["start_date"] = kickoff_utc(games).where(games.gametime.notna())
+    rows = []
+    for game in games.itertuples():
+        final = finals.loc[game.game_id] if game.game_id in finals.index else None
+        status = str(getattr(game, "game_status", "scheduled")).lower()
+        rows.append(
+            dict(
+                game_id=game.game_id,
+                season=season,
+                start_date=game.start_date,
+                home_team=names[game.home_team],
+                away_team=names[game.away_team],
+                game_status=status,
+                completed=final is not None,
+                home_points=None if final is None else int(final.home_points),
+                away_points=None if final is None else int(final.away_points),
+                observed_at=fetched_at,
+            )
+        )
+    return pd.DataFrame(rows)

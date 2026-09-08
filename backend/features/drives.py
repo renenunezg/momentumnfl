@@ -19,7 +19,7 @@ def kickoff_utc(schedules: pd.DataFrame) -> pd.Series:
     stamp = pd.to_datetime(
         schedules["gameday"] + " " + schedules["gametime"].fillna("13:00"),
         errors="coerce",
-        format="%Y-%m-%d %H:%M",
+        format="mixed",
     )
     return stamp.dt.tz_localize(
         "America/New_York", nonexistent="shift_forward", ambiguous=True

@@ -6,9 +6,44 @@ fused with points per drive) with a conjugate-Gaussian ridge, adjusted for
 starting-quarterback changes and rest, blended with the market at a capped
 weight, and published to a Postgres schema that a separate web frontend reads.
 
-The model is not a betting product. Published spreads always carry the pure
-model number alongside the blended one, the closing line is reported as the
-honesty benchmark, and `recommendation_status` is always `not_recommended`.
+Published spreads retain the pure-model number alongside the market-blended forecast, with the closing line as a separate accuracy benchmark.
+Legacy `market_comparisons` remain review diagnostics: their four-point materiality threshold and `not_recommended` status do not define wagers.
+The prospective recommendation ledger uses the separately versioned policy below.
+
+## Prospective recommendations
+
+`nfl-picks-v1` selects one eligible side per game and market across moneylines, spreads, and totals.
+It requires at least 4.5 percentage points above the recorded price's break-even probability, conditional on no push or moneyline tie, and positive estimated EV.
+It uses pure NFL discrete key-number margins and integer-score Student-t totals, with a flat one-unit stake and no additional exposure cap.
+Calibration and backtests are diagnostics, not publication gates; estimated EV does not establish a real betting advantage.
+
+Bookmaker availability must be explicitly configured through `ODDS_API_BOOKMAKERS`; the existing NFL `execution_eligibility_verified` flag is required, and an unverified regional-feed quote remains No Play.
+An offer needs an opposing quote from the same event, bookmaker, and observation, an exact kickoff match, match confidence of at least 0.95, and a price update within one hour.
+Forecasts must be at most seven days old, schedule receipts at most 24 hours old, and depth-chart receipts at most 48 hours old.
+All required receipts must precede the forecast, and both expected QBs must be identified from current depth charts or explicit overrides.
+The underlying QB chart date or override receipt must precede the forecast and fall within 48 hours of publication; fetching an old chart again does not make its contents current.
+Other injuries are not modeled and remain explicitly flagged; no CFB missing-injury-count exception is imported.
+Missing coverage produces No Play, never a fabricated source timestamp or historical recommendation.
+Source bytes and receipts are retained under `backend/data/processed/source_archive`; each pick retains their hashes, timestamps, input flags, and the pricing weights used.
+
+`publish` freezes the first qualifying recommendation, while an unstarted No Play can be reconsidered.
+The database rejects late insertion, changes to frozen picks, incorrect settlement arithmetic, and changes to settled results.
+`grade` uses confirmed nflverse final scores with the frozen line and price; spread/total pushes return the stake and moneyline ties are void.
+Explicit cancellations, postponements, and changed kickoffs void the original contract; an absent fixture without confirmed status stays pending.
+Wins plus losses define win rate; ROI divides profit by settled stakes including pushes and excluding pending picks and voids.
+History windows use decision dates in UTC and include pending games.
+
+## Deployment order for recommendation parity
+
+1. Obtain current-conversation approval before pushing, deploying, or publishing production recommendations.
+2. Apply `sql/006_recommendations.sql` after migrations 001 through 005, before the backend or dependent frontend release.
+   The migration creates an empty ledger and does not backfill old recommendations or alter existing forecast results.
+3. Deploy the backend, refresh schedule/depth-chart receipts, verify fixed-model pricing artifacts, and generate fresh forecasts.
+   Configure the approved available bookmakers in `ODDS_API_BOOKMAKERS` for the scheduled jobs.
+   The odds request now includes moneylines in addition to spreads and totals; budget that expanded market request before activation.
+4. Run the approved prospective publish and grading commands, then verify the ledger, frozen source fields, and public aggregate functions.
+5. Deploy the shared frontend, verify CI and deployment completion, and check live Performance/History filters, records, pagination, and mobile layout.
+   A branch push alone does not complete these steps.
 
 ## How it works
 

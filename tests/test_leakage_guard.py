@@ -1,6 +1,6 @@
 """The fit must refuse to train on games at or after as_of."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -152,3 +152,111 @@ def test_calibration_uses_one_sd_contract_and_keeps_pricing_holdout_free(
     assert artifact.weight.to_numpy() == pytest.approx(
         c.fit_margin_distribution(development, 7)
     )
+
+
+def test_source_receipts_preserve_bytes_and_refuse_later_revisions(
+    tmp_path, monkeypatch
+):
+    """A receipt timestamp cannot be substituted with a source's own date."""
+    import json
+
+    import pandas as pd
+
+    from backend import source_inputs
+
+    monkeypatch.setattr(source_inputs, "PROCESSED_DIR", tmp_path)
+    monkeypatch.setattr(source_inputs, "ARCHIVE", tmp_path / "archive")
+    path = tmp_path / "depth.parquet"
+    path.write_bytes(b"original expected QB")
+    assert source_inputs.receipt_for(path) is None
+    first = source_inputs.archive_source(path)
+    cutoff = pd.Timestamp.now(tz="UTC")
+    assert source_inputs.archive_source(path) == first
+    path.write_bytes(b"revised expected QB")
+    assert source_inputs.receipt_for(path) is None
+    second = source_inputs.archive_source(path)
+    assert second["observed_at"] > first["observed_at"]
+    assert (tmp_path / first["archive"]).read_bytes() == b"original expected QB"
+    (tmp_path / second["archive"]).write_bytes(b"corrupted archive")
+    assert source_inputs.receipt_for(path) is None
+    repaired = source_inputs.archive_source(path)
+    assert repaired["observed_at"] > second["observed_at"]
+    assert (tmp_path / repaired["archive"]).read_bytes() == path.read_bytes()
+    sources = {
+        name: first
+        for name in (
+            "schedule",
+            "depth_charts",
+            "qb_overrides",
+            "win_totals",
+            "win_total_sources",
+            "preseason_qbs",
+        )
+    }
+    assert source_inputs.source_reason(json.dumps(sources), cutoff, cutoff) is None
+    sources["win_total_sources"] = second
+    assert (
+        source_inputs.source_reason(
+            json.dumps(sources), cutoff, pd.Timestamp.now(tz="UTC")
+        )
+        == "source_after_forecast"
+    )
+
+
+def test_recommendation_qb_freshness_uses_the_selected_player(tmp_path, monkeypatch):
+    """A fresh empty QB row must not clear an older selected starter."""
+    import json
+
+    from backend import source_inputs
+    from backend.model.market_blend import MARGINS
+    from backend.recommendations import build_recommendations
+
+    now = pd.Timestamp.now(tz="UTC")
+    monkeypatch.setattr(source_inputs, "RAW_DIR", tmp_path)
+    monkeypatch.setattr(source_inputs, "receipt_for", lambda path: None)
+    monkeypatch.setattr(
+        source_inputs,
+        "_overrides",
+        lambda: pd.DataFrame(columns=["season", "week", "team_abbr", "gsis_id"]),
+    )
+    (tmp_path / "depth_charts").mkdir()
+    pd.DataFrame(
+        [
+            dict(team=team, dt=stamp, pos_abb="QB", pos_rank=1, gsis_id=player)
+            for team in ("H", "A")
+            for stamp, player in (
+                (now - timedelta(days=4), "old-qb"),
+                (now - timedelta(minutes=10), None),
+            )
+        ]
+    ).to_parquet(tmp_path / "depth_charts" / "2026.parquet")
+    frame = pd.DataFrame(
+        [
+            dict(
+                game_id="fresh-empty-chart",
+                season=2026,
+                week=1,
+                as_of=now,
+                start_date=now + timedelta(days=1),
+                model_version="test",
+                home_team_abbr="H",
+                away_team_abbr="A",
+                home_team="Home",
+                away_team="Away",
+                pure_home_margin=8.0,
+                model_total=45.0,
+                margin_sd=10.0,
+                total_sd=10.0,
+                degrees_of_freedom=7.0,
+            )
+        ]
+    )
+    attached = source_inputs.attach_sources(frame)
+    assert attached.home_missing_input_count.iloc[0] == 1
+    flags = json.loads(attached.data_flags.iloc[0])
+    assert pd.Timestamp(flags["home_qb_source_at"]) == now - timedelta(days=4)
+    decisions = build_recommendations(
+        attached, pd.DataFrame(), np.ones(len(MARGINS)), decision_at=now
+    )
+    assert decisions.status.eq("no_play").all()
+    assert decisions.reason.eq("missing_model_inputs").all()

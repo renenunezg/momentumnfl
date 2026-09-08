@@ -185,10 +185,17 @@ def resolve_week(args) -> tuple[int, int]:
 def _write_week(frame, directory: str, season: int, week: int) -> None:
     from backend.etl import store
 
+    if directory == "projections":
+        from backend.source_inputs import attach_sources
+
+        frame = attach_sources(frame)
     store.write_processed(frame, directory, f"{season}_{week:02d}.parquet")
 
 
 def run_fit(args) -> None:
+    from backend.source_inputs import capture_static_inputs
+
+    capture_static_inputs()
     import pandas as pd
 
     from backend.etl import store
@@ -238,6 +245,9 @@ def run_fit(args) -> None:
 
 
 def run_preseason(args) -> None:
+    from backend.source_inputs import capture_static_inputs
+
+    capture_static_inputs()
     import pandas as pd
 
     from backend.etl import store
@@ -581,11 +591,17 @@ def run_grade(args) -> None:
 
     from backend import db
     from backend.etl import store
-    from backend.grading import result_frame
+    from backend.grading import recommendation_schedule, result_frame
     from backend.publish import grade_season
+    from backend.source_inputs import receipt_for
 
-    fetched_at = datetime.fromtimestamp(
-        (store.RAW_DIR / "schedules.parquet").stat().st_mtime, UTC
+    receipt = receipt_for(store.RAW_DIR / "schedules.parquet")
+    fetched_at = (
+        datetime.fromisoformat(receipt["observed_at"])
+        if receipt
+        else datetime.fromtimestamp(
+            (store.RAW_DIR / "schedules.parquet").stat().st_mtime, UTC
+        )
     )
     results = result_frame(
         store.read_raw("schedules.parquet"),
@@ -594,6 +610,12 @@ def run_grade(args) -> None:
         fetched_at,
     )
     print(grade_season(db.engine, results, args.season))
+    from backend.publish import grade_picks
+
+    schedule = recommendation_schedule(
+        store.read_raw("schedules.parquet"), args.season, store.team_names(), fetched_at
+    )
+    print({"recommendations_graded": grade_picks(db.engine, schedule, args.season)})
 
 
 def run_publish(args) -> None:
@@ -627,10 +649,20 @@ def run_publish(args) -> None:
             if args.skip_backtest
             else publish.build_backtest_frame(BACKTEST_PUBLISH_FLOOR)
         )
+    import pandas as pd
+
+    from backend.model.artifacts import load_pricing
+    from backend.recommendations import build_recommendations
+
+    offers = read_optional("market_offers")
+    decisions = build_recommendations(
+        projections, offers if offers is not None else pd.DataFrame(), load_pricing()
+    )
     counts = publish.publish_week(
         db.engine,
         season,
         week,
+        recommendations=decisions,
         ratings=ratings,
         unit_ratings=unit_ratings,
         projections=projections,

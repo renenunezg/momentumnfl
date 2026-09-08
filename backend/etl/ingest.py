@@ -3,8 +3,15 @@
 import nflreadpy
 
 from backend.config import RAW_DIR
-from backend.etl.store import write_parquet
+from backend.etl.store import write_parquet as _write_parquet
 from backend.nflverse import data
+from backend.source_inputs import archive_source
+
+
+def write_parquet(frame, path):
+    _write_parquet(frame, path)
+    if path.name == "schedules.parquet" or path.parent.name == "depth_charts":
+        archive_source(path, refresh=True)
 
 
 def _published(season: int, *, roster: bool = False) -> bool:

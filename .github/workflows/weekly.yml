@@ -146,6 +146,7 @@ jobs:
         continue-on-error: true
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          ODDS_API_BOOKMAKERS: ${{ vars.ODDS_API_BOOKMAKERS }}
       - name: Report unavailable priced markets
         if: steps.odds.outcome == 'failure'
         run: echo "::warning::Odds refresh failed. Publishing model forecasts without a fresh priced-market snapshot."
@@ -156,3 +157,11 @@ jobs:
           --season ${{ steps.context.outputs.season }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      - name: Retain prospective source receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nfl-source-receipts
+          path: backend/data/processed/source_archive
+          retention-days: 90
+          if-no-files-found: ignore
