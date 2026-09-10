@@ -301,6 +301,7 @@ def test_recommendation_publication_settlement_and_filtered_history(database):
                 away_team="Away",
                 pure_home_margin=-8.0,
                 home_margin=8.0,
+                market_home_spread=-20.0,
                 model_total=55.0,
                 margin_sd=10.0,
                 total_sd=10.0,

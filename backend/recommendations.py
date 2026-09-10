@@ -14,7 +14,7 @@ from backend.model.market_blend import blend_margin, cover_push_probabilities
 from backend.model.projections import DEFAULT_MARKET_WEIGHT
 from backend.odds.markets import _american_profit
 
-POLICY_VERSION = "nfl-picks-v3"
+POLICY_VERSION = "nfl-picks-v4"
 # Minimum points the priced line must sit beyond the offered price's
 # break-even line. Measured in margin or total points, the same yardstick for
 # favourites and underdogs, so a mispriced tail cannot clear the gate on one
@@ -28,6 +28,22 @@ MIN_EDGE_POINTS = 2.0
 # width, and it does not vary with the engine's per-game spread.
 PRICING_MARGIN_SD = 12.82
 PRICING_TOTAL_SD = 13.28
+# Weight of the pure model in the margin that prices a moneyline. On the
+# 2019 through 2025 replay (1,954 decided games) the pure model carries no
+# win/loss information beyond the pre-decision market line (logistic slope
+# per 10 points: pure -0.05 with se 0.17, market +1.50 with se 0.16), and
+# moneyline picks priced off the 0.5 blend won at the market-fair rate, not
+# the priced one (0.300 actual, 0.294 market-fair, 0.401 priced, 217 picks).
+# No curve shape beat the key-number Student-t out of sample, so only the
+# location changes. 0.2 matches the CFB policy and is the most model opinion
+# the evidence tolerates; spreads and totals keep the published blend.
+H2H_MODEL_WEIGHT = 0.2
+# Minimum recommended picks per decision batch (one model week). When the
+# edge gate leaves fewer, the highest-edge positive-EV offers are promoted
+# and recorded with FLOOR_REASON so the ledger separates gate picks from
+# floor picks. A product volume choice, not a calibration result.
+VOLUME_FLOOR = 5
+FLOOR_REASON = "volume_floor"
 EDGE_SEARCH_POINTS = 200.0
 MAX_OFFER_AGE = timedelta(hours=1)
 MAX_FORECAST_AGE = timedelta(days=7)
@@ -129,6 +145,23 @@ def _probabilities(projection, offer, distribution):
     if offer["side"] == "under":
         win, loss = loss, win
     return win, push, loss
+
+
+def _h2h_projection(projection):
+    """The projection re-anchored for moneyline pricing: the pre-decision
+    market margin moved H2H_MODEL_WEIGHT toward the pure model.
+
+    Returns None without a posted spread or pure margin, so a moneyline is
+    never priced from the blend or the pure model alone.
+    """
+    spread = getattr(projection, "market_home_spread", None)
+    pure = getattr(projection, "pure_home_margin", None)
+    if any(v is None or pd.isna(v) or not np.isfinite(v) for v in (spread, pure)):
+        return None
+    market = -float(spread)
+    return projection._replace(
+        home_margin=market + H2H_MODEL_WEIGHT * (float(pure) - market)
+    )
 
 
 def _edge_points(projection, offer, distribution, implied):
@@ -261,14 +294,17 @@ def build_recommendations(projections, offers, distribution, *, decision_at=None
     Sides use the blended (published) margin and totals the model total blended
     toward the median posted total, so every edge is measured after shrinking
     toward the market being bet into. Each pick records that market total.
-    Both are priced with the empirical dispersion around that blended line,
-    not the engine's wider predictive spread. An offer qualifies when the
-    priced line sits at least MIN_EDGE_POINTS beyond the price's break-even
-    line and expected value is positive; the best offer per market is the one
-    with the most points of edge, never the largest payout. Historical
-    calibration is diagnostic and never gates forward recommendations or
-    replaces their probabilities. Stakes are always one unit, with no
-    compounding.
+    Moneylines are priced from the pre-decision market margin moved
+    H2H_MODEL_WEIGHT toward the pure model. Everything is priced with the
+    empirical dispersion around the priced line, not the engine's wider
+    predictive spread. An offer qualifies when the priced line sits at least
+    MIN_EDGE_POINTS beyond the price's break-even line and expected value is
+    positive; the best offer per market is the one with the most points of
+    edge, never the largest payout. If fewer than VOLUME_FLOOR picks qualify
+    in the batch, the highest-edge positive-EV offers are promoted with
+    FLOOR_REASON. Historical calibration is diagnostic and never gates
+    forward recommendations or replaces their probabilities. Stakes are
+    always one unit, with no compounding.
     """
     now = _timestamp(decision_at or datetime.now(UTC))
     groups = (
@@ -337,7 +373,9 @@ def build_recommendations(projections, offers, distribution, *, decision_at=None
                     projection.model_total, market_total, DEFAULT_MARKET_WEIGHT
                 )
             )
+        h2h_projection = _h2h_projection(priced_projection)
         for market in MARKETS:
+            market_projection = h2h_projection if market == "h2h" else priced_projection
             row = {
                 key: getattr(projection, key, None)
                 for key in (
@@ -365,7 +403,12 @@ def build_recommendations(projections, offers, distribution, *, decision_at=None
                 reason=reason,
                 stake_units=0.0,
                 execution_eligibility_verified=False,
-                model_home_margin=projection.home_margin,
+                # The margin this market was actually priced from.
+                model_home_margin=(
+                    projection.home_margin
+                    if market_projection is None
+                    else market_projection.home_margin
+                ),
                 model_total=priced_projection.model_total,
                 market_total=market_total if np.isfinite(market_total) else None,
                 margin_sd=priced_projection.margin_sd,
@@ -373,8 +416,12 @@ def build_recommendations(projections, offers, distribution, *, decision_at=None
                 pricing_weights=list(map(float, distribution)),
             )
             priced = [c for c in candidates if c["market"] == market]
+            empty_reason = reason or "no_valid_price"
             if reason == "invalid_model_distribution":
                 priced = []
+            if market_projection is None:
+                priced = []
+                empty_reason = reason or "missing_market_spread"
             evaluated = []
             for candidate in priced:
                 if candidate["market"] != "h2h" and candidate["point"] * 2 != round(
@@ -382,14 +429,14 @@ def build_recommendations(projections, offers, distribution, *, decision_at=None
                 ):
                     continue
                 win, push, loss = _probabilities(
-                    priced_projection, candidate, distribution
+                    market_projection, candidate, distribution
                 )
                 profit = _american_profit(candidate["price"])
                 implied = 1 / (profit + 1)
                 edge = win / (win + loss) - implied if win + loss > 0 else float("nan")
                 ev = win * profit - loss
                 points = (
-                    _edge_points(priced_projection, candidate, distribution, implied)
+                    _edge_points(market_projection, candidate, distribution, implied)
                     if win + loss > 0
                     else float("nan")
                 )
@@ -439,9 +486,23 @@ def build_recommendations(projections, offers, distribution, *, decision_at=None
                     stake_units=1.0 if block is None else 0.0,
                 )
             else:
-                row["reason"] = reason or "no_valid_price"
+                row["reason"] = empty_reason
             rows.append(row)
-    return pd.DataFrame(rows, columns=RECOMMENDATION_COLUMNS)
+    decisions = pd.DataFrame(rows, columns=RECOMMENDATION_COLUMNS)
+    shortfall = VOLUME_FLOOR - int(decisions["status"].eq("recommended").sum())
+    if shortfall > 0:
+        eligible = decisions[
+            decisions["reason"].eq("below_edge_threshold")
+            & decisions["edge_points"].gt(0)
+            & decisions["expected_value_per_unit"].gt(0)
+        ]
+        promote = eligible.sort_values("edge_points", ascending=False).index[:shortfall]
+        decisions.loc[promote, ["status", "reason", "stake_units"]] = [
+            "recommended",
+            FLOOR_REASON,
+            1.0,
+        ]
+    return decisions
 
 
 def grade_recommendations(recommendations, games, *, graded_at=None):
