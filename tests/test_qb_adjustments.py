@@ -254,3 +254,28 @@ def test_backtest_and_production_qb_context_ignore_target_week_outcomes():
         )["A"]
         == "known"
     )
+    # A starter ruled Out before the cutoff yields to the next depth-chart
+    # rank; a report modified after the cutoff was not yet known. The 2025+
+    # feed has no timestamp and its target-week report counts as pregame.
+    ranked = pd.DataFrame(
+        [("A", "starter", 1), ("A", "backup", 2)],
+        columns=["team", "gsis_id", "pos_rank"],
+    ).assign(dt="2026-08-31T12:00Z", pos_abb="QB")
+
+    def report(modified):
+        return pd.DataFrame(
+            [dict(season=2026, week=1, gsis_id="starter", report_status="Out")]
+        ).assign(date_modified=modified)
+
+    gate = dict(as_of=cutoff, use_overrides=False)
+    for injuries, starter in (
+        (report("2026-08-31T18:00Z"), "backup"),
+        (report("2026-09-01T06:00Z"), "starter"),
+        (report(None).drop(columns="date_modified"), "backup"),
+    ):
+        assert (
+            qb_features.expected_starters(
+                logs, index, ranked, 2026, 1, injuries=injuries, **gate
+            )["A"]
+            == starter
+        )

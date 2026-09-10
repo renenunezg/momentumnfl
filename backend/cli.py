@@ -280,11 +280,16 @@ def run_preseason(args) -> None:
     from backend.model.fit_week import (
         compute_qb_adjustments,
         load_depth_charts,
+        load_injuries,
         market_home_spreads,
         week_slate,
     )
     from backend.model.preseason import MODEL_VERSION, build_preseason_prior
-    from backend.model.projections import LayerConfig, assemble_projections
+    from backend.model.projections import (
+        QB_LAYER_VERSION,
+        LayerConfig,
+        assemble_projections,
+    )
 
     prepare(args)
     prior = build_preseason_prior(args.season, as_of=args.forecast_cutoff)
@@ -313,6 +318,7 @@ def run_preseason(args) -> None:
         week1_fit.config,
         LayerConfig(),
         as_of=prior.as_of,
+        injuries=load_injuries(args.season),
     )
     projections = assemble_projections(
         week1_fit,
@@ -325,7 +331,7 @@ def run_preseason(args) -> None:
     projections_df = pd.DataFrame(
         [projection.to_record() for projection in projections]
     )
-    projections_df["model_version"] = f"{MODEL_VERSION}_qb_v4"
+    projections_df["model_version"] = f"{MODEL_VERSION}_{QB_LAYER_VERSION}"
     _write_week(projections_df, "projections", args.season, 1)
     finish(args, projections_df)
     print(
@@ -464,7 +470,7 @@ def run_qbs(args) -> None:
 
     from backend.etl import store
     from backend.features.qb import expected_starters
-    from backend.model.fit_week import load_depth_charts
+    from backend.model.fit_week import load_depth_charts, load_injuries
     from backend.model.joint_scoring import DEFAULT_CONFIG
     from backend.model.preseason import WIN_TOTAL_BLEND, load_qb_references
     from backend.model.projections import LayerConfig
@@ -495,7 +501,9 @@ def run_qbs(args) -> None:
         raise SystemExit("Current snapshot depth charts are required for this team")
     roster = depth[depth["team"].eq(team) & depth["pos_abb"].eq("QB")]
     roster = roster[roster["dt"].eq(roster["dt"].max())].sort_values("pos_rank")
-    starter = expected_starters(games, index, depth, season, week).get(team)
+    starter = expected_starters(
+        games, index, depth, season, week, injuries=load_injuries(season)
+    ).get(team)
     rows = []
     for row in roster.itertuples():
         if pd.isna(row.gsis_id):

@@ -48,6 +48,7 @@ def compute_qb_adjustments(
     config: JointScoringConfig,
     layer_config: LayerConfig,
     as_of: datetime | None = None,
+    injuries: pd.DataFrame | None = None,
 ) -> dict[str, tuple[float, float]]:
     """game_id -> (home_adj, away_adj) for the expected starters.
 
@@ -73,7 +74,13 @@ def compute_qb_adjustments(
         WIN_TOTAL_BLEND,
     )
     expected = qb_features.expected_starters(
-        qb_history, eligible, depth_charts, season, week, as_of=as_of
+        qb_history,
+        eligible,
+        depth_charts,
+        season,
+        week,
+        as_of=as_of,
+        injuries=injuries,
     )
 
     adjustments: dict[str, tuple[float, float]] = {}
@@ -96,6 +103,13 @@ def load_depth_charts(season: int) -> pd.DataFrame:
         return store.read_raw("depth_charts", f"{season}.parquet")
     except FileNotFoundError:
         return pd.DataFrame(columns=["season", "week", "position", "team", "gsis_id"])
+
+
+def load_injuries(season: int) -> pd.DataFrame:
+    try:
+        return store.read_raw("injuries", f"{season}.parquet")
+    except FileNotFoundError:
+        return pd.DataFrame(columns=["season", "week", "gsis_id", "report_status"])
 
 
 def week_slate(season: int, week: int) -> pd.DataFrame:
@@ -142,6 +156,7 @@ def fit_and_project(
         config,
         layer_config,
         as_of=as_of,
+        injuries=load_injuries(season),
     )
     projections = assemble_projections(
         fit,

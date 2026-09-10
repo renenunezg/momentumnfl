@@ -174,6 +174,7 @@ def validate_season_wins(data, seasons, weeks=(1, 9), simulations=10_000):
                 week,
                 as_of=cutoff,
                 use_overrides=False,
+                injuries=data.injuries[season],
             )
             context = qb_adjustment.context_before_week(
                 history[history.game_id.isin(eligible.game_id)],

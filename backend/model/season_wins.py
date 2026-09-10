@@ -18,7 +18,11 @@ from backend.config import HISTORY_START_SEASON, STATIC_DIR
 from backend.etl import store
 from backend.features.drives import kickoff_utc
 from backend.model.distributions import student_t_scale
-from backend.model.fit_week import compute_qb_adjustments, load_depth_charts
+from backend.model.fit_week import (
+    compute_qb_adjustments,
+    load_depth_charts,
+    load_injuries,
+)
 from backend.model.joint_scoring import JointScoringFit, fit_joint_scoring
 from backend.model.preseason import build_preseason_prior, load_win_totals
 from backend.model.projections import LayerConfig, assemble_projections
@@ -311,6 +315,7 @@ def build_season_forecast(
         fit.config,
         LayerConfig(),
         as_of=as_of,
+        injuries=load_injuries(season),
     )
     frame, audit = project_season(
         fit, schedules, adjustments, store.team_names(), as_of

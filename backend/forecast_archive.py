@@ -43,6 +43,7 @@ def prepare(args):
             "schedules.parquet",
             "teams.parquet",
             f"depth_charts/{args.season}.parquet",
+            f"injuries/{args.season}.parquet",
         )
     ]
     for directory in ("team_games", "qb_games"):
@@ -140,17 +141,20 @@ def replay(path: Path):
                 raise ValueError(f"Corrupt archived input: {name}")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
-        from backend.features.qb import _depth_chart_qb1
+        from backend.features.qb import depth_chart_starters, ruled_out
 
-        depth = pd.read_parquet(
-            workspace / f"backend/data/raw/depth_charts/{season}.parquet"
-        )
+        raw = workspace / "backend/data/raw"
+        depth = pd.read_parquet(raw / f"depth_charts/{season}.parquet")
         if not {"dt", "pos_abb"}.issubset(depth.columns):
             raise ValueError(
                 "Replay requires timestamped QB charts, not weekly proxies"
             )
-        qb1 = _depth_chart_qb1(depth, season, week, cutoff)
-        starters = {} if qb1 is None else qb1.to_dict()
+        injury_path = raw / f"injuries/{season}.parquet"
+        injuries = pd.read_parquet(injury_path) if injury_path.exists() else None
+        charted = depth_chart_starters(
+            depth, season, week, cutoff, ruled_out(injuries, season, week, cutoff)
+        )
+        starters = {} if charted is None else charted.to_dict()
         override_path = workspace / "overrides/qb_starters.csv"
         if override_path.exists():
             overrides = pd.read_csv(override_path)

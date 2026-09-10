@@ -19,11 +19,16 @@ from backend.model.qb_adjustment import DEFAULT_SPAN_DROPBACKS
 REST_POINTS_PER_DAY = 0.0
 REST_CLIP_DAYS = 7.0
 DEFAULT_MARKET_WEIGHT = 0.5
-# Selected on development seasons 2016-2021 with the engine held fixed.
-# The QB selection gate scores pure-model log loss before the market blend.
+# Selected on development seasons 2016-2021 with the engine held fixed and
+# injury-gated starter identification. The QB selection gate scores
+# pure-model log loss before the market blend; the 2022-2025 retrospective
+# window could not separate 0.25 from 0.75 and did not reject this choice.
 DEFAULT_QB_SPAN_DROPBACKS = DEFAULT_SPAN_DROPBACKS
-DEFAULT_QB_ADJUSTMENT_WEIGHT = 1.0
-MODEL_VERSION = "nfl_joint_scoring_qb_v4"
+DEFAULT_QB_ADJUSTMENT_WEIGHT = 0.25
+# The QB layer version names the starter-identification rule and its weight;
+# the preseason producer appends the same suffix to its own version.
+QB_LAYER_VERSION = "qb_v5"
+MODEL_VERSION = f"nfl_joint_scoring_{QB_LAYER_VERSION}"
 
 
 @dataclass(frozen=True, slots=True)

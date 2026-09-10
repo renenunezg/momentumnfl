@@ -25,6 +25,7 @@ Bookmaker availability must be explicitly configured through `ODDS_API_BOOKMAKER
 An offer needs an opposing quote from the same event, bookmaker, and observation, an exact kickoff match, match confidence of at least 0.95, and a price update within one hour.
 Forecasts must be at most seven days old, schedule receipts at most 24 hours old, and depth-chart receipts at most 48 hours old.
 All required receipts must precede the forecast, and both expected QBs must be identified from current depth charts or explicit overrides.
+A quarterback listed Out or Doubtful on the week's injury report yields to the next depth-chart rank.
 The underlying QB chart date or override receipt must precede the forecast and fall within 48 hours of publication; fetching an old chart again does not make its contents current.
 Other injuries are not modeled and remain explicitly flagged; no CFB missing-injury-count exception is imported.
 Missing coverage produces No Play, never a fabricated source timestamp or historical recommendation.
@@ -68,9 +69,11 @@ History windows use decision dates in UTC and include pending games.
    The team baseline weights every passer by recent dropbacks and the engine's time decay, carrying the previous season's mix into preseason.
    For a team that has not played yet, the win-total-funded share of that baseline uses the fixed preseason QB reference instead, so the market's offseason QB change is not added again.
    That reference stays fixed when a depth chart or manual starter override changes; an injury moves the pure spread by `backup strength - starter strength`.
+   The expected starter is a manual override if present, otherwise the highest depth-chart quarterback not listed Out or Doubtful on that week's injury report, otherwise the most recent actual starter who is not ruled out.
    This separates a QB's strength from the change applied to a team that already contains his contribution, and permits starter-to-backup substitutions without changing stored team ratings.
    Expected points then receive the rest adjustment, and the published margin is shifted toward the market line by a weight capped at 0.5.
-   QB memory and shrinkage were selected using development-season pure-model log loss with the engine held fixed; the subsequent layer search selected a 1.0 coefficient.
+   QB memory and shrinkage were selected using development-season pure-model log loss with the engine held fixed; the layer search on injury-gated starters selected a 0.25 coefficient at the 1,000-dropback span (`qb_v5`).
+   The retrospective 2022-2025 window could not separate coefficients between 0.25 and 0.75 and did not reject 0.25; the earlier 1.0 coefficient sat outside the development optimum.
    The 2022-2025 evaluation is a repeatedly inspected retrospective validation window, not a fresh prospective test of this revision.
    `qbs --context` additionally fits separate QB, team-season, and opposing-defense effects, including hit/sack exposure and the QB's own tendency to invite pressure.
    Its conditional parameter uncertainty reflects limited recent samples and ambiguity between player and supporting cast; it is not a calibrated interval for game scores or an identified causal player value.
@@ -150,7 +153,7 @@ game of the season has been played yet.
 | --- | --- |
 | `ingest --seasons` | Pull raw nflverse sources for the given seasons. |
 | `bootstrap-history --through` | Rebuild cached team-game and QB features for any missing historical season without keeping raw play-by-play. |
-| `refresh-inputs --season` | Pull only the inputs that can change an unplayed projection: schedules, teams, depth charts. |
+| `refresh-inputs --season` | Pull only the inputs that can change an unplayed projection: schedules, teams, depth charts, and injury reports once the season's game data is published. |
 | `features --seasons [--incremental --lookback-weeks N]` | Build feature parquet; incremental mode rebuilds only recent and missing games. |
 | `fit [--season --week] [--projections-only]` | Fit ratings and unit ratings and project the week. |
 | `preseason --season` | Build the week-1 prior, ratings, and projections. |
@@ -224,6 +227,7 @@ Actual-margin key-number multipliers are learned from development seasons only, 
 Missing version-2 pricing calibration prevents offer pricing until that artifact has been regenerated and reviewed.
 
 Historical starter identities use timestamped depth-chart snapshots at the forecast cutoff, or conservatively use an earlier weekly chart and prior-game starter fallback.
+An injury report rules a quarterback out only when its `date_modified` precedes the cutoff; the 2025 feed carries no timestamp, so its target-week report is treated as pregame because final game statuses are published before kickoff.
 Target-week outcomes and undated manual overrides never supply historical forecast starters.
 A recorded starter is the first QB to take a dropback, not the passer with the most eventual dropbacks.
 Historical weekly depth charts remain availability proxies because they have no publication timestamp.
@@ -279,7 +283,7 @@ Secrets: `DATABASE_URL`, `ODDS_API_KEY`.
 ## Prospective source replay
 
 Apply `sql/007_forecast_replay.sql` before publishing with the replay-enabled backend.
-Each forecast captures its exact model source, dependency versions, historical feature bytes, schedule, depth charts, preseason sportsbook files, and the presence or absence of QB overrides before assigning its cutoff.
+Each forecast captures its exact model source, dependency versions, historical feature bytes, schedule, depth charts, injury reports, preseason sportsbook files, and the presence or absence of QB overrides before assigning its cutoff.
 Publication stores compressed, content-addressed inputs and the forecast manifest in immutable database tables in the same transaction as the forecasts.
 The database archive does not expire; the 90-day Actions artifact is a supplementary copy.
 No historical source timestamps are invented, and existing forecast revisions remain unchanged.

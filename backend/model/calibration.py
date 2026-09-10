@@ -25,7 +25,7 @@ from backend.etl import store
 from backend.features.qb import expected_starters
 from backend.model import qb_adjustment as qb_layer
 from backend.model.distributions import student_t_scale
-from backend.model.fit_week import load_depth_charts
+from backend.model.fit_week import load_depth_charts, load_injuries
 from backend.model.joint_scoring import JointScoringConfig, fit_joint_scoring
 from backend.model.market_blend import (
     MARGINS,
@@ -39,7 +39,7 @@ from backend.model.preseason import (
     load_qb_references,
     points_per_win,
 )
-from backend.model.projections import LayerConfig, rest_adjustment
+from backend.model.projections import MODEL_VERSION, LayerConfig, rest_adjustment
 
 EVAL_SEASONS = tuple(DEVELOPMENT_SEASONS) + tuple(HOLDOUT_SEASONS)
 QB_SPANS = (250.0, 500.0, 1000.0)
@@ -71,6 +71,7 @@ class WalkForwardData:
             ignore_index=True,
         )
         self.depth_charts = {s: load_depth_charts(s) for s in seasons}
+        self.injuries = {s: load_injuries(s) for s in seasons}
         self.strength_history = {
             span: qb_layer.strength_history(self.qb_games, self.game_index, span)
             for span in qb_spans
@@ -112,6 +113,7 @@ class WalkForwardData:
                 week,
                 as_of=cutoff,
                 use_overrides=False,
+                injuries=self.injuries[season],
             )
             self.forecast_inputs[key] = cutoff.to_pydatetime(), eligible, expected
         return self.forecast_inputs[key]
@@ -211,7 +213,7 @@ def generate_walk_forward(
                     "away_expected_qb": expected.get(str(game.away_team)),
                     "market_input_basis": "closing_line_conditional_benchmark",
                     "qb_input_basis": "dated_snapshot_or_prior_week_proxy",
-                    "model_version": "nfl_joint_scoring_qb_v4",
+                    "model_version": MODEL_VERSION,
                     "engine_margin": engine.expected_home - engine.expected_away,
                     "engine_total": engine.expected_home + engine.expected_away,
                     "margin_sd": engine.margin_sd,

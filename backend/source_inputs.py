@@ -13,7 +13,12 @@ from pathlib import Path
 import pandas as pd
 
 from backend.config import PROCESSED_DIR, RAW_DIR, STATIC_DIR
-from backend.features.qb import OVERRIDES_PATH, _depth_chart_qb1, _overrides
+from backend.features.qb import (
+    OVERRIDES_PATH,
+    _overrides,
+    depth_chart_starters,
+    ruled_out,
+)
 
 ARCHIVE = PROCESSED_DIR / "source_archive"
 
@@ -119,6 +124,7 @@ def attach_sources(frame):
         for name, path in {
             "schedule": RAW_DIR / "schedules.parquet",
             "depth_charts": RAW_DIR / "depth_charts" / f"{season}.parquet",
+            "injuries": RAW_DIR / "injuries" / f"{season}.parquet",
             "qb_overrides": OVERRIDES_PATH,
             "win_totals": STATIC_DIR / "win_totals.csv",
             "win_total_sources": STATIC_DIR / "win_total_sources.json",
@@ -127,17 +133,21 @@ def attach_sources(frame):
     }
     depth_path = RAW_DIR / "depth_charts" / f"{season}.parquet"
     depth = pd.read_parquet(depth_path) if depth_path.exists() else pd.DataFrame()
+    injury_path = RAW_DIR / "injuries" / f"{season}.parquet"
+    injuries = pd.read_parquet(injury_path) if injury_path.exists() else None
     overrides = _overrides()
     overrides = overrides[overrides.season.eq(season) & overrides.week.eq(week)]
     flags = []
     missing = {"home": [], "away": []}
     for row in rows.itertuples():
         forecast = pd.to_datetime(row.as_of, utc=True)
-        qb1 = _depth_chart_qb1(depth, season, week, forecast)
-        expected = {} if qb1 is None else qb1.to_dict()
+        charted = depth_chart_starters(
+            depth, season, week, forecast, ruled_out(injuries, season, week, forecast)
+        )
+        expected = {} if charted is None else charted.to_dict()
         expected.update(dict(zip(overrides.team_abbr, overrides.gsis_id)))
         data = {
-            "availability_basis": "expected-QB depth chart and overrides",
+            "availability_basis": "expected-QB depth chart, injury report, overrides",
             "non_qb_injuries": "not modeled; no comprehensive injury clearance",
         }
         for side in ("home", "away"):

@@ -10,7 +10,10 @@ from backend.source_inputs import archive_source
 
 def write_parquet(frame, path):
     _write_parquet(frame, path)
-    if path.name == "schedules.parquet" or path.parent.name == "depth_charts":
+    if path.name == "schedules.parquet" or path.parent.name in (
+        "depth_charts",
+        "injuries",
+    ):
         archive_source(path, refresh=True)
 
 
@@ -82,14 +85,17 @@ def ingest_projection_inputs(season: int) -> list[str]:
     """Refresh only inputs that can change an unplayed game's projection."""
     write_parquet(data.load_schedules([season]), RAW_DIR / "schedules.parquet")
     write_parquet(data.load_teams(), RAW_DIR / "teams.parquet")
-    if not _published(season, roster=True):
+    sources = []
+    if _published(season, roster=True):
+        sources.append(("depth_charts", data.load_depth_charts))
+    else:
         print(f"note: {season} depth_charts not yet published upstream")
-        return []
-    try:
-        write_parquet(
-            data.load_depth_charts([season]),
-            RAW_DIR / "depth_charts" / f"{season}.parquet",
-        )
-    except Exception as error:  # noqa: BLE001 - caller reports all sources
-        return [f"{season} depth_charts: {error}"]
-    return []
+    if _published(season):
+        sources.append(("injuries", data.load_injuries))
+    problems = []
+    for name, loader in sources:
+        try:
+            write_parquet(loader([season]), RAW_DIR / name / f"{season}.parquet")
+        except Exception as error:  # noqa: BLE001 - caller reports all sources
+            problems.append(f"{season} {name}: {error}")
+    return problems

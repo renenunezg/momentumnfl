@@ -6,6 +6,8 @@ from backend.config import REPO_ROOT
 
 # Optional manual starter overrides: season, week, team_abbr, gsis_id.
 OVERRIDES_PATH = REPO_ROOT / "overrides" / "qb_starters.csv"
+# Injury-report statuses that remove a quarterback from the expected lineup.
+UNAVAILABLE_STATUSES = ("Out", "Doubtful")
 
 
 def build_qb_games(pbp: pd.DataFrame) -> pd.DataFrame:
@@ -40,12 +42,13 @@ def _overrides() -> pd.DataFrame:
     return pd.read_csv(OVERRIDES_PATH)
 
 
-def _depth_chart_qb1(
+def _depth_chart_qbs(
     depth_charts: pd.DataFrame, season: int, week: int, as_of=None
-) -> pd.Series | None:
-    """team -> depth-chart QB1 gsis_id, handling both nflverse formats:
-    the weekly format (through 2024: season/week/position/depth_team) and
-    the snapshot format (2025+: dt/pos_abb/pos_rank)."""
+) -> pd.DataFrame | None:
+    """(team, gsis_id) depth-chart quarterbacks in rank order, handling both
+    nflverse formats: the weekly format (through 2024:
+    season/week/position/depth_team) and the snapshot format (2025+:
+    dt/pos_abb/pos_rank)."""
     if "pos_abb" in depth_charts.columns:
         if as_of is not None:
             depth_charts = depth_charts[
@@ -57,9 +60,7 @@ def _depth_chart_qb1(
         if charts.empty:
             return None
         latest = charts[charts["dt"].eq(charts.groupby("team")["dt"].transform("max"))]
-        return (
-            latest.sort_values("pos_rank").groupby("team")["gsis_id"].first().dropna()
-        )
+        return latest.sort_values("pos_rank")[["team", "gsis_id"]]
     if "season" not in depth_charts.columns:
         return None
     charts = depth_charts.rename(columns={"club_code": "team"})
@@ -67,6 +68,7 @@ def _depth_chart_qb1(
         charts["season"].eq(season)
         & (charts["week"].lt(week) if as_of is not None else charts["week"].eq(week))
         & charts["position"].eq("QB")
+        & charts["gsis_id"].notna()
     ]
     if "formation" in charts.columns:
         charts = charts[charts["formation"].eq("Offense")]
@@ -79,10 +81,46 @@ def _depth_chart_qb1(
     return (
         charts.assign(rank=pd.to_numeric(charts["depth_team"], errors="coerce"))
         .sort_values("rank")
-        .groupby("team")["gsis_id"]
-        .first()
-        .dropna()
+        .drop_duplicates(["team", "gsis_id"])[["team", "gsis_id"]]
     )
+
+
+def ruled_out(
+    injuries: pd.DataFrame | None, season: int, week: int, as_of=None
+) -> set[str]:
+    """gsis_ids listed Out or Doubtful on the target week's injury report.
+
+    Week numbers are unique across regular-season and playoff game types, so
+    season and week identify the report. A report carrying date_modified
+    counts only when it was modified before as_of. The 2025+ feed has no
+    timestamp; its target-week report is treated as pregame because final
+    game statuses are published before kickoff by league rule.
+    """
+    if injuries is None or injuries.empty:
+        return set()
+    reports = injuries[
+        injuries["season"].eq(season)
+        & injuries["week"].eq(week)
+        & injuries["report_status"].isin(UNAVAILABLE_STATUSES)
+    ]
+    if as_of is not None and "date_modified" in reports.columns:
+        reports = reports[pd.to_datetime(reports["date_modified"], utc=True).lt(as_of)]
+    return set(reports["gsis_id"].dropna())
+
+
+def depth_chart_starters(
+    depth_charts: pd.DataFrame,
+    season: int,
+    week: int,
+    as_of=None,
+    unavailable: set[str] = frozenset(),
+) -> pd.Series | None:
+    """team -> highest-ranked depth-chart QB who is not ruled out."""
+    charts = _depth_chart_qbs(depth_charts, season, week, as_of)
+    if charts is None:
+        return None
+    available = charts[~charts["gsis_id"].isin(unavailable)]
+    return available.groupby("team")["gsis_id"].first()
 
 
 def expected_starters(
@@ -93,11 +131,13 @@ def expected_starters(
     week: int,
     as_of=None,
     use_overrides: bool = True,
+    injuries: pd.DataFrame | None = None,
 ) -> pd.Series:
     """team -> expected starter gsis_id for the given week.
 
-    Priority: overrides file, then the depth-chart QB1 as of that week, then
-    the team's most recent actual starter.
+    Priority: overrides file, then the highest depth-chart QB not ruled Out or
+    Doubtful on the week's injury report, then the team's most recent actual
+    starter who is not ruled out.
     """
     qb_meta = qb_games.merge(
         game_index[["game_id", "season", "model_week"]], on="game_id"
@@ -111,17 +151,20 @@ def expected_starters(
             pd.to_datetime(game_index["start_date"], utc=True).lt(as_of), "game_id"
         ]
         prior = prior[prior["game_id"].isin(eligible_ids)]
-    # Latest known starter is the fallback; current depth charts supersede it.
-    prior_starts = prior[prior["started"]].sort_values(["season", "model_week"])
+    unavailable = ruled_out(injuries, season, week, as_of)
+    # Latest available starter is the fallback; current depth charts supersede it.
+    prior_starts = prior[
+        prior["started"] & ~prior["passer_player_id"].isin(unavailable)
+    ].sort_values(["season", "model_week"])
     result = prior_starts.drop_duplicates("team", keep="last").set_index("team")[
         "passer_player_id"
     ]
 
-    qb1 = _depth_chart_qb1(depth_charts, season, week, as_of)
-    if qb1 is not None and not qb1.empty:
+    charted = depth_chart_starters(depth_charts, season, week, as_of, unavailable)
+    if charted is not None and not charted.empty:
         # A named rookie starter has no NFL history yet. Keep that identity;
         # the projection layer supplies replacement value for an unseen QB.
-        result = qb1.combine_first(result)
+        result = charted.combine_first(result)
 
     overrides = (
         _overrides()
