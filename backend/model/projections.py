@@ -12,6 +12,7 @@ from backend.model.joint_scoring import JointScoringFit
 from backend.model.market_blend import blend_margin, capped_weight
 from backend.model.outputs import GameProjection
 from backend.model.qb_adjustment import DEFAULT_SPAN_DROPBACKS
+from backend.model.totals import TOTALS_LAYER_VERSION
 
 # Selected by the calibrate walk-forward (dev 2016-2021): the rest signal is
 # already priced into the market line at this blend weight, so its own
@@ -28,7 +29,7 @@ DEFAULT_QB_ADJUSTMENT_WEIGHT = 0.25
 # The QB layer version names the starter-identification rule and its weight;
 # the preseason producer appends the same suffix to its own version.
 QB_LAYER_VERSION = "qb_v5"
-MODEL_VERSION = f"nfl_joint_scoring_{QB_LAYER_VERSION}"
+MODEL_VERSION = f"nfl_joint_scoring_{QB_LAYER_VERSION}_{TOTALS_LAYER_VERSION}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +77,9 @@ def assemble_projections(
     projections = []
     for game in schedule.itertuples():
         game_id = str(game.game_id)
-        engine = fit.engine_projection(game)
+        # Preserve the incumbent QB/clipping and margin calculations exactly;
+        # apply the common totals correction once after those layers.
+        engine = fit.engine_projection(game, stabilize_totals=False)
 
         home_qb, away_qb = qb_adjustments.get(game_id, (0.0, 0.0))
         rest = rest_adjustment(
@@ -96,6 +99,9 @@ def assemble_projections(
         shift = 0.5 * (published_margin - pure_margin)
         expected_home += shift
         expected_away -= shift
+        expected_home, expected_away = fit.stabilize_scores(
+            game, expected_home, expected_away, minimum_total=abs(pure_margin)
+        )
 
         start_date = getattr(game, "start_date", None)
         if pd.isna(start_date):

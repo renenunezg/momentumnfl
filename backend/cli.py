@@ -290,6 +290,7 @@ def run_preseason(args) -> None:
         LayerConfig,
         assemble_projections,
     )
+    from backend.model.totals import TOTALS_LAYER_VERSION
 
     prepare(args)
     prior = build_preseason_prior(args.season, as_of=args.forecast_cutoff)
@@ -331,7 +332,9 @@ def run_preseason(args) -> None:
     projections_df = pd.DataFrame(
         [projection.to_record() for projection in projections]
     )
-    projections_df["model_version"] = f"{MODEL_VERSION}_{QB_LAYER_VERSION}"
+    projections_df["model_version"] = (
+        f"{MODEL_VERSION}_{QB_LAYER_VERSION}_{TOTALS_LAYER_VERSION}"
+    )
     _write_week(projections_df, "projections", args.season, 1)
     finish(args, projections_df)
     print(
@@ -402,6 +405,12 @@ def run_calibrate(args) -> None:
     print(f"dev margin log loss: {summary['dev_margin_log_loss']:.4f}")
     print(f"holdout margin log loss: {summary['holdout_margin_log_loss']:.4f}")
     print(f"holdout coverage: {summary['holdout_coverage']}")
+    print(f"totals configuration: {summary['totals_config']}")
+    print(f"dev engine totals (before QB/market): {summary['dev_engine_totals']}")
+    print(
+        "retrospective engine totals (before QB/market): "
+        f"{summary['holdout_engine_totals']}"
+    )
     print(
         f"key-number log loss: {summary['holdout_discrete_nll']:.4f}; "
         f"smooth discrete: {summary['holdout_smooth_discrete_nll']:.4f}"

@@ -82,6 +82,84 @@ def test_fit_accepts_clean_cut():
     assert after @ posterior.parameter_covariance @ after <= (
         before @ prior.parameter_covariance @ before
     )
+    # Historical fits without a preseason anchor and the synthetic opening
+    # forecast retain their original scoring environment.
+    assert fit.totals_base_ppd is None
+    assert fit.totals_base_drives is None
+    assert prior.totals_base_ppd is None
+    assert prior.totals_base_drives is None
+    assert prior.base_ppd == fit.base_ppd
+    assert prior.base_drives == fit.base_drives
+
+
+@pytest.mark.parametrize("forecast_week", [3, 20])
+def test_totals_prior_uses_only_earlier_model_weeks(forecast_week):
+    """The same chronology contract applies after regular-season week 18."""
+    from dataclasses import replace
+
+    from backend.model.joint_scoring import DEFAULT_CONFIG
+
+    games = _toy_games()
+    previous_season = games.assign(
+        season=2022, start_date=datetime(2022, 9, 1, tzinfo=UTC)
+    )
+    preseason = replace(
+        fit_joint_scoring(previous_season, 6, datetime(2023, 8, 31, tzinfo=UTC)),
+        season=2023,
+        week=1,
+        base_ppd=1.0,
+        base_drives=20.0,
+    )
+    games["model_week"] = np.arange(forecast_week - 2, forecast_week + 3)
+    games["start_date"] = [
+        datetime(2023, 9, 1, tzinfo=UTC) + timedelta(weeks=int(week) - 1)
+        for week in games.model_week
+    ]
+    # Vary the earlier outcomes so weighting by observations, team-rows, or
+    # calendar week instead of the configured recency changes the answer.
+    games["home_points"] = [21.0, 35.0, 14.0, 28.0, 10.0]
+    games["game_drives"] = [20.0, 24.0, 22.0, 22.0, 22.0]
+    config = replace(DEFAULT_CONFIG, rating_half_life_weeks=3.0)
+    cutoff = datetime(2023, 9, 1, tzinfo=UTC) + timedelta(weeks=forecast_week - 1)
+    fixed = fit_joint_scoring(
+        games, forecast_week, cutoff, config, totals_prior=preseason
+    )
+    effective_games = 1.0 + 0.5 ** (1 / 3)
+    prior_games = 64 * 0.5 ** ((forecast_week - 1) / 6)
+    assert fixed.totals_base_ppd == pytest.approx(
+        (effective_games * fixed.base_ppd + prior_games * preseason.base_ppd)
+        / (effective_games + prior_games)
+    )
+    assert fixed.totals_base_drives == pytest.approx(
+        (effective_games * fixed.base_drives + prior_games * preseason.base_drives)
+        / (effective_games + prior_games)
+    )
+    poisoned = games.copy()
+    outcome_fields = [
+        "home_points",
+        "away_points",
+        "game_drives",
+        "competitive_drives",
+        "home_competitive_points",
+        "away_competitive_points",
+        "home_epa_per_drive",
+        "away_epa_per_drive",
+    ]
+    poisoned.loc[poisoned.model_week.ge(forecast_week), outcome_fields] = 1000.0
+    replay = fit_joint_scoring(
+        poisoned, forecast_week, cutoff, config, totals_prior=preseason
+    )
+    assert replay.totals_base_ppd == fixed.totals_base_ppd
+    assert replay.totals_base_drives == fixed.totals_base_drives
+    assert replay.engine_projection(games.iloc[-1]) == fixed.engine_projection(
+        games.iloc[-1]
+    )
+    # An earlier week label cannot make an outcome at the cutoff available.
+    poisoned.loc[0, "start_date"] = cutoff
+    with pytest.raises(ValueError, match="training games must start before as_of"):
+        fit_joint_scoring(
+            poisoned, forecast_week, cutoff, config, totals_prior=preseason
+        )
 
 
 def test_calibration_uses_one_sd_contract_and_keeps_pricing_holdout_free(
@@ -104,6 +182,8 @@ def test_calibration_uses_one_sd_contract_and_keeps_pricing_holdout_free(
                     "game_id": f"{season}-{i}",
                     "model_week": 1,
                     "engine_margin": 0.0,
+                    "engine_total": 44.0,
+                    "actual_total": 44.0 + actual,
                     "market_margin": 0.0,
                     "closing_spread": 0.0,
                     "actual_margin": actual,
@@ -147,6 +227,12 @@ def test_calibration_uses_one_sd_contract_and_keeps_pricing_holdout_free(
 
     expected = -t.logpdf(holdout.actual_margin, 7, scale=student_t_scale(8.5, 7)).mean()
     assert summary["holdout_margin_log_loss"] == pytest.approx(expected)
+    totals = summary["holdout_engine_totals"]
+    assert totals["forecast_basis"] == "engine_only_before_qb_and_market"
+    assert totals["mae"] == pytest.approx(5.2)
+    assert totals["log_loss"] == pytest.approx(
+        -t.logpdf(holdout.actual_total - 44, 7, scale=student_t_scale(10.2, 7)).mean()
+    )
     artifact = pd.read_csv(tmp_path / "margin_distribution_v2.csv")
     development = predictions[predictions.season.isin(c.DEVELOPMENT_SEASONS)]
     assert artifact.weight.to_numpy() == pytest.approx(

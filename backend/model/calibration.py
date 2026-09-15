@@ -40,6 +40,7 @@ from backend.model.preseason import (
     points_per_win,
 )
 from backend.model.projections import MODEL_VERSION, LayerConfig, rest_adjustment
+from backend.model.totals import DEFAULT_TOTALS_CONFIG
 
 EVAL_SEASONS = tuple(DEVELOPMENT_SEASONS) + tuple(HOLDOUT_SEASONS)
 QB_SPANS = (250.0, 500.0, 1000.0)
@@ -173,6 +174,7 @@ def generate_walk_forward(
                     as_of,
                     engine_config,
                     strength_prior=prior.week1_fit() if use_prior_means else None,
+                    totals_prior=prior.week1_fit(),
                 )
             context_key = (
                 season,
@@ -302,6 +304,28 @@ def coverage_report(frame: pd.DataFrame, scale: float, df: float) -> dict[str, f
         bound = student_t.ppf(0.5 + level / 2, df)
         out[f"coverage_{int(level * 100)}"] = float(np.mean(np.abs(z) <= bound))
     return out
+
+
+def engine_totals_report(frame: pd.DataFrame, df: float) -> dict:
+    """Audit totals separately without mistaking engine scores for priced picks."""
+    error = (frame["engine_total"] - frame["actual_total"]).to_numpy()
+    scale = student_t_scale(frame["total_sd"].to_numpy(), df)
+    return {
+        "forecast_basis": "engine_only_before_qb_and_market",
+        "games": len(frame),
+        "bias": float(error.mean()),
+        "mae": float(np.abs(error).mean()),
+        "rmse": float(np.sqrt(np.mean(error**2))),
+        "log_loss": float(
+            -np.mean(student_t.logpdf(error / scale, df) - np.log(scale))
+        ),
+        "coverage": {
+            str(int(level * 100)): float(
+                np.mean(np.abs(error) <= student_t.ppf((1 + level) / 2, df) * scale)
+            )
+            for level in (0.5, 0.8, 0.95)
+        },
+    }
 
 
 ENGINE_GRID = [
@@ -723,6 +747,9 @@ def finish_calibration(
         "holdout_coverage": coverage_report(holdout, 1.0, df),
         "dev_honesty": honesty_report(dev_layered),
         "holdout_honesty": honesty_report(holdout),
+        "totals_config": asdict(DEFAULT_TOTALS_CONFIG),
+        "dev_engine_totals": engine_totals_report(dev_layered, df),
+        "holdout_engine_totals": engine_totals_report(holdout, df),
         "validation_basis": "retrospective; closing-line conditional benchmark",
     }
     combined = pd.concat([dev_layered, holdout], ignore_index=True)

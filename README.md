@@ -52,6 +52,20 @@ History windows use decision dates in UTC and include pending games.
 
 ## How it works
 
+### Totals baseline
+
+`nfl_joint_scoring_qb_v5_totals_v1` retains preseason evidence for league scoring rate and pace instead of replacing both baselines after one completed week.
+The dedicated settings in `backend/model/totals.py` give each baseline 64 prior-equivalent games, with prior influence halving every six model weeks.
+These fixed values were selected on 2016-2021 totals error; 2022-2025 remains retrospective validation.
+The correction shifts both expected scores equally after the QB and market-margin layers, with a nonnegative score boundary that preserves the pure and published margins.
+Team strengths, ratings, spread and moneyline probabilities, and uncertainty widths retain their existing calculations.
+Totals pricing has its own market-weight constant, currently unchanged at 0.5.
+Calibration summaries and the production artifact manifest report engine-total error and coverage separately, explicitly before QB adjustments and market blending.
+The new model version requires regenerated production artifacts before publication.
+Existing archived forecasts and first-published qualifying recommendations remain frozen; a forecast refresh does not replace those recommendation records.
+
+### Pipeline
+
 1. **Ingest.** Schedules, play-by-play, depth charts, PFR pass-protection
    charting, and Next Gen passing stats are pulled with
    [nflreadpy](https://github.com/nflverse/nflreadpy) into local parquet.

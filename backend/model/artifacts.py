@@ -85,6 +85,9 @@ def ensure(force: bool = False) -> dict:
         "fixed_model_config": True,
         "games": len(predictions),
         "validation_basis": summary["validation_basis"],
+        "totals_config": summary["totals_config"],
+        "development_engine_totals": summary["dev_engine_totals"],
+        "retrospective_engine_totals": summary["holdout_engine_totals"],
         "artifacts": {
             p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in paths
         },

@@ -2,7 +2,9 @@
 
 from datetime import UTC, datetime
 
+import numpy as np
 import pandas as pd
+import pytest
 
 from backend import pipeline
 from backend.etl import ingest, store
@@ -136,3 +138,111 @@ def test_preseason_runs_load_current_starters_before_pbp_opens(monkeypatch, tmp_
         "LV": "rookie",
         "NEW": "new_team_qb",
     }
+
+
+@pytest.mark.parametrize("home_qb_adjustment", [-1.25, -100.0])
+def test_early_totals_stabilization_preserves_published_spread_and_moneyline(
+    home_qb_adjustment,
+):
+    """One high-scoring opening week must not replace the preseason environment."""
+    from backend.model.joint_scoring import (
+        DEFAULT_CONFIG,
+        JointScoringFit,
+        fit_joint_scoring,
+    )
+    from backend.model.market_blend import MARGINS
+    from backend.model.projections import assemble_projections
+    from backend.model.totals import TotalsConfig
+    from backend.recommendations import _h2h_projection, _probabilities
+
+    as_of = datetime(2026, 9, 15, tzinfo=UTC)
+    teams = [f"T{i:02d}" for i in range(32)]
+    prior = JointScoringFit(
+        season=2026,
+        week=1,
+        as_of=datetime(2026, 9, 1, tzinfo=UTC),
+        teams=teams,
+        offense_ppd=np.linspace(-0.15, 0.15, 32),
+        defense_ppd=np.linspace(0.1, -0.1, 32),
+        pace=np.zeros(32),
+        base_ppd=2.2,
+        base_drives=10.0,
+        hfa_ppd=0.2,
+        parameter_covariance=np.eye(65) * 0.01,
+        score_residual_covariance=np.eye(2) * 50,
+        config=DEFAULT_CONFIG,
+    )
+    games = pd.DataFrame(
+        [
+            dict(
+                game_id=f"2026_01_{i}",
+                season=2026,
+                week=1,
+                model_week=1,
+                home_team=teams[i],
+                away_team=teams[-i - 1],
+                neutral_site=False,
+                home_points=28.0 + i % 3,
+                away_points=23.0 - i % 3,
+                game_drives=11.0,
+                competitive_drives=10.0,
+                home_competitive_points=26.0 + i % 3,
+                away_competitive_points=21.0 - i % 3,
+                home_epa_per_drive=0.1 + i / 100,
+                away_epa_per_drive=-0.1,
+                feature_version=2,
+                start_date=datetime(2026, 9, 10, tzinfo=UTC),
+            )
+            for i in range(16)
+        ]
+    )
+    legacy = fit_joint_scoring(
+        games,
+        2,
+        as_of,
+        strength_prior=prior,
+        totals_config=TotalsConfig(scoring_prior_games=0, pace_prior_games=0),
+    )
+    fixed = fit_joint_scoring(games, 2, as_of, strength_prior=prior)
+    assert (
+        2 * prior.base_ppd * prior.base_drives
+        < (2 * fixed.totals_base_ppd * fixed.totals_base_drives)
+        < 2 * legacy.base_ppd * legacy.base_drives
+    )
+    assert [r.to_record() for r in fixed.ratings({})] == [
+        r.to_record() for r in legacy.ratings({})
+    ]
+    slate = games.assign(
+        week=2, model_week=2, start_date=datetime(2026, 9, 20, tzinfo=UTC)
+    )
+    # The extreme substitution reaches the existing zero-score clamp.
+    # Applying the total shift before that clamp would alter the margin.
+    qb_adjustments = {g: (home_qb_adjustment, 0.5) for g in slate.game_id}
+    market_spreads = {g: -3.5 for g in slate.game_id}
+    before, after = [
+        assemble_projections(fit, slate, as_of, {}, qb_adjustments, market_spreads)
+        for fit in (legacy, fixed)
+    ]
+    distribution = np.ones(len(MARGINS))
+    for old, new in zip(before, after, strict=True):
+        if home_qb_adjustment > -100:
+            assert 0 < new.model_total < old.model_total
+        else:
+            assert new.model_total == pytest.approx(old.model_total)
+        assert min(new.expected_home_points, new.expected_away_points) > 0
+        assert new.pure_home_margin == pytest.approx(old.pure_home_margin)
+        assert new.home_margin == pytest.approx(old.home_margin)
+        assert new.margin_sd == old.margin_sd
+        assert new.total_sd == old.total_sd
+        old_row = next(pd.DataFrame([old.to_record()]).itertuples())
+        new_row = next(pd.DataFrame([new.to_record()]).itertuples())
+        for market in ("spreads", "h2h"):
+            offer = dict(market=market, side="home", point=-3.5)
+            old_priced, new_priced = (
+                (_h2h_projection(old_row), _h2h_projection(new_row))
+                if market == "h2h"
+                else (old_row, new_row)
+            )
+            assert _probabilities(new_priced, offer, distribution) == pytest.approx(
+                _probabilities(old_priced, offer, distribution)
+            )

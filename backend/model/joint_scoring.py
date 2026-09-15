@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from backend.model.outputs import TeamRating
+from backend.model.totals import DEFAULT_TOTALS_CONFIG, TotalsConfig, pool_environment
 
 MODEL_VERSION = "nfl_joint_scoring_v2"
 PACE_PRIOR_SD = 1.0
@@ -110,6 +111,8 @@ class JointScoringFit:
     parameter_covariance: np.ndarray
     score_residual_covariance: np.ndarray
     config: JointScoringConfig
+    totals_base_ppd: float | None = None
+    totals_base_drives: float | None = None
 
     @property
     def team_index(self) -> dict[str, int]:
@@ -159,7 +162,26 @@ class JointScoringFit:
             score_design[:, -1] = [0.5 * self.base_drives, -0.5 * self.base_drives]
         return score_design
 
-    def engine_projection(self, game) -> "EngineProjection":
+    def stabilize_scores(self, game, home, away, *, minimum_total=0.0):
+        """Change only common scoring, preserving margin at the score boundary."""
+        if self.totals_base_ppd is None or self.totals_base_drives is None:
+            return home, away
+        index = self.team_index
+        pace = 0.5 * (
+            self.pace[index[str(game.home_team)]]
+            + self.pace[index[str(game.away_team)]]
+        )
+        adjustment = 2 * (
+            self.totals_base_ppd * (self.totals_base_drives + pace)
+            - self.base_ppd * (self.base_drives + pace)
+        )
+        if adjustment == 0:
+            return home, away
+        margin = home - away
+        total = max(home + away + adjustment, abs(margin), minimum_total)
+        return max(0.0, (total + margin) / 2), max(0.0, (total - margin) / 2)
+
+    def engine_projection(self, game, *, stabilize_totals=True) -> "EngineProjection":
         """Engine-only numbers for one schedule row."""
         index = self.team_index
         home = index[str(game.home_team)]
@@ -177,6 +199,10 @@ class JointScoringFit:
             + self.base_drives * (self.offense_ppd[away] - self.defense_ppd[home])
             - 0.5 * home_field
         )
+        if stabilize_totals:
+            expected_home, expected_away = self.stabilize_scores(
+                game, expected_home, expected_away
+            )
         score_design = self.score_design(game)
         score_covariance = self.score_residual_covariance + (
             score_design @ self.parameter_covariance @ score_design.T
@@ -212,6 +238,9 @@ def fit_joint_scoring(
     as_of: datetime,
     config: JointScoringConfig = DEFAULT_CONFIG,
     strength_prior: JointScoringFit | None = None,
+    *,
+    totals_prior: JointScoringFit | None = None,
+    totals_config: TotalsConfig = DEFAULT_TOTALS_CONFIG,
 ) -> JointScoringFit:
     """Fit on prior model weeks, carrying preseason means and covariance together."""
     if as_of.tzinfo is None or as_of.utcoffset() is None:
@@ -400,6 +429,18 @@ def fit_joint_scoring(
             floor=4.0,
             shrinkage=config.covariance_shrinkage,
         )
+    totals_prior = totals_prior if totals_prior is not None else strength_prior
+    totals_ppd = totals_drives = None
+    if totals_prior is not None:
+        totals_ppd, totals_drives = pool_environment(
+            base_ppd,
+            base_drives,
+            totals_prior.base_ppd,
+            totals_prior.base_drives,
+            float(recency[::2].sum()),
+            forecast_week,
+            totals_config,
+        )
     return JointScoringFit(
         season=int(training["season"].iloc[-1]),
         week=forecast_week,
@@ -414,4 +455,6 @@ def fit_joint_scoring(
         parameter_covariance=covariance,
         score_residual_covariance=score_covariance,
         config=config,
+        totals_base_ppd=totals_ppd,
+        totals_base_drives=totals_drives,
     )

@@ -11,7 +11,7 @@ from scipy.stats import t as student_t
 
 from backend.model.distributions import student_t_scale
 from backend.model.market_blend import blend_margin, cover_push_probabilities
-from backend.model.projections import DEFAULT_MARKET_WEIGHT
+from backend.model.totals import DEFAULT_TOTAL_MARKET_WEIGHT
 from backend.odds.markets import _american_profit
 
 POLICY_VERSION = "nfl-picks-v4"
@@ -370,7 +370,7 @@ def build_recommendations(projections, offers, distribution, *, decision_at=None
         if np.isfinite(market_total) and np.isfinite(projection.model_total):
             priced_projection = priced_projection._replace(
                 model_total=blend_margin(
-                    projection.model_total, market_total, DEFAULT_MARKET_WEIGHT
+                    projection.model_total, market_total, DEFAULT_TOTAL_MARKET_WEIGHT
                 )
             )
         h2h_projection = _h2h_projection(priced_projection)

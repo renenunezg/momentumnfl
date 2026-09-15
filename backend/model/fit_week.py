@@ -23,6 +23,7 @@ from backend.model.preseason import (
     load_qb_references,
 )
 from backend.model.projections import LayerConfig, assemble_projections
+from backend.model.totals import DEFAULT_TOTALS_CONFIG, TotalsConfig
 
 
 def recency_by_game(
@@ -137,13 +138,19 @@ def fit_and_project(
     as_of: datetime | None = None,
     config: JointScoringConfig = DEFAULT_CONFIG,
     layer_config: LayerConfig = LayerConfig(),
+    totals_config: TotalsConfig = DEFAULT_TOTALS_CONFIG,
 ) -> tuple[JointScoringFit, list[TeamRating], list[GameProjection]]:
     as_of = as_of or datetime.now(UTC)
     games = store.season_games(season)
     slate = week_slate(season, week)
     prior = build_preseason_prior(season, as_of=as_of, engine_config=config)
     fit = fit_joint_scoring(
-        games, week, as_of, config, strength_prior=prior.week1_fit()
+        games,
+        week,
+        as_of,
+        config,
+        strength_prior=prior.week1_fit(),
+        totals_config=totals_config,
     )
     team_names = store.team_names()
     qb_games = store.qb_games(list(range(HISTORY_START_SEASON, season + 1)))
