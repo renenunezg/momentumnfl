@@ -372,6 +372,7 @@ Parquet source versions, first-observed timestamps, fitted coefficients, candida
 Win percentages remain null until a model has eight validation seasons, complete winner coverage, lower log loss than a uniform baseline, and a leader-confidence gap no larger than ten percentage points.
 
 `sql/005_awards.sql` is the frontend contract for `/nfl/awards` in momentumweb.
+`sql/011_award_season_stats.sql` adds the `season_stats` column that carries each candidate's season-to-date totals for the board's stat line; apply it before the next `publish-awards` run.
 Publication atomically writes all seven status records and matching complete boards.
 `publish-awards --season 2026 --week 0` uses the existing production write guard.
 Apply the migration before publication.

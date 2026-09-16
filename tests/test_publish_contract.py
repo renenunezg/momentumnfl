@@ -40,6 +40,8 @@ def _ddl_columns(table: str) -> list[str]:
         if not line or line.startswith("primary key"):
             continue
         columns.append(line.split()[0])
+    # Later migrations extend a table in place; the frontend reads the union.
+    columns += re.findall(rf"alter table nfl\.{table} add column (\w+)", DDL)
     return columns
 
 

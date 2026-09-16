@@ -33,6 +33,7 @@ BOARD_COLUMNS = [
     "drivers",
     "context_source",
     "context_reason",
+    "season_stats",
 ]
 META_COLUMNS = [
     "season",
@@ -105,6 +106,7 @@ def build(season: int, week: int, as_of=None, awards=None, write=True) -> tuple:
                 model_version=MODEL_VERSION,
                 games=0,
                 projected_stats="{}",
+                season_stats="{}",
                 drivers="[]",
                 probability_status="insufficient_history",
             )
@@ -172,9 +174,23 @@ def build(season: int, week: int, as_of=None, awards=None, write=True) -> tuple:
                 )
             pool["award"], pool["model_version"] = award, MODEL_VERSION
             stat_columns = [c for c in pool if c.startswith("projected_")]
+            # To-date totals feed the published stat line only; the model
+            # sees the projections.
+            season_columns = (
+                ["wins", "ties", "point_margin", "win_improvement"]
+                if award == "COY"
+                else [c for c in features.STATS if c in pool]
+            )
+            records = pool.to_dict("records")
             pool["projected_stats"] = [
-                json.dumps({k: round(float(row[k]), 2) for k in stat_columns})
-                for _, row in pool.iterrows()
+                json.dumps({k: round(float(r[k]), 2) for k in stat_columns})
+                for r in records
+            ]
+            pool["season_stats"] = [
+                json.dumps(
+                    {k: round(float(r[k]), 2) for k in season_columns if pd.notna(r[k])}
+                )
+                for r in records
             ]
             pool["drivers"] = [
                 json.dumps(

@@ -517,7 +517,12 @@ def publish_awards(engine, season: int, week: int) -> dict:
                 raise ValueError("Unvalidated or incomplete award probabilities")
     with engine.begin() as conn:
         for table, frame, columns, json_columns in (
-            ("award_boards", board, BOARD_COLUMNS, ["projected_stats", "drivers"]),
+            (
+                "award_boards",
+                board,
+                BOARD_COLUMNS,
+                ["projected_stats", "season_stats", "drivers"],
+            ),
             (
                 "award_model_meta",
                 meta,
