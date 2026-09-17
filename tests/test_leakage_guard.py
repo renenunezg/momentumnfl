@@ -356,3 +356,59 @@ def test_recommendation_qb_freshness_uses_the_selected_player(tmp_path, monkeypa
     )
     assert decisions.status.eq("no_play").all()
     assert decisions.reason.eq("missing_model_inputs").all()
+
+
+def test_unit_ratings_ignore_later_games_and_adjust_for_opponents():
+    from backend.model import unit_ratings as ur
+
+    rng = np.random.default_rng(0)
+    teams = list("ABCDEFGH")
+    strength = dict(zip(teams, np.linspace(6, -6, len(teams))))
+    games, units = [], []
+    for week in range(1, 9):
+        # Round robin: schedules differ, so raw pass EPA carries schedule noise.
+        order = teams[:1] + teams[1:][week - 1 :] + teams[1:][: week - 1]
+        for home, away in zip(order[:4], order[4:][::-1]):
+            game_id = f"2023_{week:02d}_{away}_{home}"
+            games.append(
+                dict(
+                    game_id=game_id,
+                    season=2023,
+                    model_week=week,
+                    home_team=home,
+                    away_team=away,
+                    start_date=datetime(2023, 9, 1, tzinfo=UTC) + timedelta(weeks=week),
+                )
+            )
+            for team, opponent in ((home, away), (away, home)):
+                units.append(
+                    dict(
+                        game_id=game_id,
+                        team=team,
+                        rush_epa=rng.normal(),
+                        pass_epa=-strength[opponent] + rng.normal(),
+                        st_epa=rng.normal(),
+                        protection_epa_allowed=rng.normal(),
+                        pressures_allowed=np.nan,
+                        dropbacks=35.0,
+                        avg_time_to_throw=np.nan,
+                        line_yards=80.0,
+                        carries=25.0,
+                    )
+                )
+    games, units = pd.DataFrame(games), pd.DataFrame(units)
+    cutoff = datetime(2023, 9, 1, tzinfo=UTC) + timedelta(weeks=6, days=3)
+    weights = dict.fromkeys(games.game_id, 1.0)
+    fixed = ur.fit_unit_ratings(units, games, 7, cutoff, weights).frame
+    poisoned = units.copy()
+    later = poisoned.game_id.isin(games.loc[games.model_week.ge(7), "game_id"])
+    poisoned.loc[later, ["rush_epa", "pass_epa", "st_epa", "line_yards"]] = 1000.0
+    replay = ur.fit_unit_ratings(poisoned, games, 7, cutoff, weights).frame
+    pd.testing.assert_frame_equal(replay, fixed)
+    with pytest.raises(ValueError, match="training games must start before as_of"):
+        ur.fit_unit_ratings(units, games, 7, cutoff - timedelta(weeks=1), weights)
+    # Every offense is average: raw pass EPA reflects only the defenses faced.
+    rated = fixed.set_index("team_abbr")
+    raw = units[~later].groupby("team").pass_epa.mean()
+    assert rated.pass_offense.abs().max() < 0.5 * raw.sub(raw.mean()).abs().max()
+    assert rated.pass_defense.corr(pd.Series(strength)) > 0.9

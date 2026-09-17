@@ -11,8 +11,17 @@ import pandas as pd
 
 from backend.model.joint_scoring import solve_ridge
 
-MODEL_VERSION = "nfl_unit_ratings_v1"
-CHANNEL_PRIOR_SD = 3.0  # points per game
+MODEL_VERSION = "nfl_unit_ratings_v2"
+# Ridge penalty per channel: single-game noise variance over between-team
+# variance. Selected by next-week walk-forward RMSE on the development
+# seasons; a penalty near zero publishes raw game totals early in a season.
+CHANNEL_PENALTY = {
+    "rush": 12.0,
+    "pass": 8.0,
+    "pass_block": 12.0,
+    "run_block": 8.0,
+    "special_teams": 16.0,
+}
 # Points-scale conversions for the line-channel proxies.
 EPA_PER_PRESSURE = -0.45
 POINTS_PER_LINE_YARD = 0.08
@@ -29,7 +38,10 @@ COLUMNS = (
 
 
 def _two_sided_ridge(
-    observations: pd.DataFrame, teams: list[str], weights: np.ndarray
+    observations: pd.DataFrame,
+    teams: list[str],
+    weights: np.ndarray,
+    penalty: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     """obs = unit[team] - counter_unit[opponent] + noise. Returns (unit,
     counter_unit) posterior means, both centered."""
@@ -46,7 +58,7 @@ def _two_sided_ridge(
         target - center,
         weights,
         np.zeros(2 * n_teams),
-        np.full(2 * n_teams, CHANNEL_PRIOR_SD),
+        np.full(2 * n_teams, penalty**-0.5),
     )
     unit = parameters[:n_teams] - parameters[:n_teams].mean()
     counter = parameters[n_teams:] - parameters[n_teams:].mean()
@@ -133,10 +145,14 @@ def fit_unit_ratings(
     as_of: datetime,
     recency_by_game: dict[str, float],
 ) -> UnitRatings:
-    """Fit all channels on games strictly before forecast_week."""
+    """Fit all channels on games strictly before forecast_week and as_of."""
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise ValueError("as_of must be timezone-aware")
     training = games[games["model_week"] < forecast_week]
     if training.empty:
         raise ValueError("at least one prior model week is required")
+    if pd.to_datetime(training["start_date"], utc=True).max() >= as_of:
+        raise ValueError("training games must start before as_of")
     home_map = training[["game_id", "home_team", "away_team"]].rename(
         columns={"home_team": "team", "away_team": "opponent"}
     )
@@ -165,11 +181,17 @@ def fit_unit_ratings(
     ratings: dict[str, np.ndarray] = {}
     for name, column in channels.items():
         frame = _channel_frame(window, game_map, column)
-        unit, counter = _two_sided_ridge(frame, teams, frame["weight"].to_numpy(float))
+        unit, counter = _two_sided_ridge(
+            frame, teams, frame["weight"].to_numpy(float), CHANNEL_PENALTY[name]
+        )
         if name == "rush":
             ratings["rush_offense"], ratings["rush_defense"] = unit, counter
         elif name == "pass":
             ratings["pass_offense"], ratings["pass_defense"] = unit, counter
+        elif name == "special_teams":
+            # Possession plays (returns, punts, kicks) plus the coverage and
+            # return-defense side measured when the opponent has the ball.
+            ratings[name] = unit + counter
         else:
             ratings[name] = unit
 

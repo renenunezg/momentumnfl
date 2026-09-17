@@ -109,7 +109,11 @@ Existing archived forecasts and first-published qualifying recommendations remai
 
 Opponent-adjusted unit ratings (rush and pass offense and defense, pass
 block, run block, special teams) are published as descriptive companions.
-They do not feed the engine.
+They do not feed the engine. Each channel is a two-sided ridge (team unit
+against the opposing unit) whose penalty is the single-game noise variance
+over the between-team variance, selected by next-week walk-forward error on
+the development seasons, so early-season ratings shrink toward average.
+Special teams sums the possession and coverage sides.
 
 ## Layout
 
