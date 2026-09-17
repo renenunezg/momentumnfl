@@ -411,6 +411,8 @@ def run_calibrate(args) -> None:
         "retrospective engine totals (before QB/market): "
         f"{summary['holdout_engine_totals']}"
     )
+    print(f"dev calibrated model totals: {summary['dev_model_totals']}")
+    print(f"retrospective calibrated model totals: {summary['holdout_model_totals']}")
     print(
         f"key-number log loss: {summary['holdout_discrete_nll']:.4f}; "
         f"smooth discrete: {summary['holdout_smooth_discrete_nll']:.4f}"

@@ -12,7 +12,7 @@ from backend.model.joint_scoring import JointScoringFit
 from backend.model.market_blend import blend_margin, capped_weight
 from backend.model.outputs import GameProjection
 from backend.model.qb_adjustment import DEFAULT_SPAN_DROPBACKS
-from backend.model.totals import TOTALS_LAYER_VERSION
+from backend.model.totals import TOTALS_LAYER_VERSION, calibrate_total
 
 # Selected by the calibrate walk-forward (dev 2016-2021): the rest signal is
 # already priced into the market line at this blend weight, so its own
@@ -102,6 +102,15 @@ def assemble_projections(
         expected_home, expected_away = fit.stabilize_scores(
             game, expected_home, expected_away, minimum_total=abs(pure_margin)
         )
+        # Calibrate only after QB and environment pooling. Protect both the
+        # published margin and the pure-margin score reconstruction at zero.
+        total = max(
+            calibrate_total(expected_home + expected_away, fit.totals_config),
+            abs(published_margin),
+            abs(pure_margin),
+        )
+        expected_home = max(0.0, 0.5 * (total + published_margin))
+        expected_away = max(0.0, 0.5 * (total - published_margin))
 
         start_date = getattr(game, "start_date", None)
         if pd.isna(start_date):

@@ -145,6 +145,8 @@ def test_early_totals_stabilization_preserves_published_spread_and_moneyline(
     home_qb_adjustment,
 ):
     """One high-scoring opening week must not replace the preseason environment."""
+    from dataclasses import replace
+
     from backend.model.joint_scoring import (
         DEFAULT_CONFIG,
         JointScoringFit,
@@ -224,7 +226,30 @@ def test_early_totals_stabilization_preserves_published_spread_and_moneyline(
         for fit in (legacy, fixed)
     ]
     distribution = np.ones(len(MARGINS))
-    for old, new in zip(before, after, strict=True):
+    uncalibrated = assemble_projections(
+        replace(
+            fixed,
+            totals_config=replace(
+                fixed.totals_config, location_slope=1.0, location_intercept=0.0
+            ),
+        ),
+        slate,
+        as_of,
+        {},
+        qb_adjustments,
+        market_spreads,
+    )
+    for old, new, raw in zip(before, after, uncalibrated, strict=True):
+        # Pin the selected location correction after QB/clipping, including
+        # the boundary where a total reduction would change the pure margin.
+        assert new.model_total == pytest.approx(
+            max(
+                45 - 0.19747920925833432 + 0.7163893796380143 * (raw.model_total - 45),
+                abs(raw.pure_home_margin),
+                abs(raw.home_margin),
+            )
+        )
+        assert new.model_version.endswith("totals_v2")
         if home_qb_adjustment > -100:
             assert 0 < new.model_total < old.model_total
         else:

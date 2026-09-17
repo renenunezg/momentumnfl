@@ -40,7 +40,7 @@ from backend.model.preseason import (
     points_per_win,
 )
 from backend.model.projections import MODEL_VERSION, LayerConfig, rest_adjustment
-from backend.model.totals import DEFAULT_TOTALS_CONFIG
+from backend.model.totals import DEFAULT_TOTALS_CONFIG, calibrate_total
 
 EVAL_SEASONS = tuple(DEVELOPMENT_SEASONS) + tuple(HOLDOUT_SEASONS)
 QB_SPANS = (250.0, 500.0, 1000.0)
@@ -243,6 +243,7 @@ def generate_walk_forward(
                 }
                 for span in qb_spans:
                     adj = 0.0
+                    total_adj = 0.0
                     for sign, team in (
                         (1.0, str(game.home_team)),
                         (-1.0, str(game.away_team)),
@@ -250,8 +251,11 @@ def generate_walk_forward(
                         passer = expected.get(team)
                         if passer is None:
                             continue
-                        adj += sign * contexts[span].adjustment(team, passer)
+                        value = contexts[span].adjustment(team, passer)
+                        adj += sign * value
+                        total_adj += value
                     record[f"qb_adj_{int(span)}"] = adj
+                    record[f"qb_sum_{int(span)}"] = total_adj
                 rows.append(record)
         if verbose:
             print(f"walk-forward {season}: {len(rows)} cumulative rows")
@@ -271,6 +275,14 @@ def apply_layers(predictions: pd.DataFrame, config: LayerConfig) -> pd.DataFrame
     ).to_numpy()
     out["pure_model_margin"] = pure
     out["model_margin"] = blend_margin(pure, out["market_margin"], config.market_weight)
+    out["model_total"] = np.maximum(
+        calibrate_total(
+            out["engine_total"]
+            + config.qb_adjustment_weight
+            * out[f"qb_sum_{int(config.qb_span_dropbacks)}"]
+        ),
+        np.maximum(np.abs(pure), np.abs(out["model_margin"])),
+    )
     return out
 
 
@@ -306,12 +318,18 @@ def coverage_report(frame: pd.DataFrame, scale: float, df: float) -> dict[str, f
     return out
 
 
-def engine_totals_report(frame: pd.DataFrame, df: float) -> dict:
+def engine_totals_report(
+    frame: pd.DataFrame, df: float, column: str = "engine_total"
+) -> dict:
     """Audit totals separately without mistaking engine scores for priced picks."""
-    error = (frame["engine_total"] - frame["actual_total"]).to_numpy()
+    error = (frame[column] - frame["actual_total"]).to_numpy()
     scale = student_t_scale(frame["total_sd"].to_numpy(), df)
     return {
-        "forecast_basis": "engine_only_before_qb_and_market",
+        "forecast_basis": (
+            "engine_only_before_qb_and_market"
+            if column == "engine_total"
+            else "qb_adjusted_calibrated_total_without_game_market_blend"
+        ),
         "games": len(frame),
         "bias": float(error.mean()),
         "mae": float(np.abs(error).mean()),
@@ -750,6 +768,8 @@ def finish_calibration(
         "totals_config": asdict(DEFAULT_TOTALS_CONFIG),
         "dev_engine_totals": engine_totals_report(dev_layered, df),
         "holdout_engine_totals": engine_totals_report(holdout, df),
+        "dev_model_totals": engine_totals_report(dev_layered, df, "model_total"),
+        "holdout_model_totals": engine_totals_report(holdout, df, "model_total"),
         "validation_basis": "retrospective; closing-line conditional benchmark",
     }
     combined = pd.concat([dev_layered, holdout], ignore_index=True)

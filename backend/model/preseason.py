@@ -175,6 +175,7 @@ class PreseasonPrior:
             defense_ppd=defense,
             pace=pace,
             base_ppd=self.previous_fit.base_ppd,
+            totals_config=self.previous_fit.totals_config,
             base_drives=base,
             hfa_ppd=self.previous_fit.hfa_ppd,
             parameter_covariance=np.diag(variance),

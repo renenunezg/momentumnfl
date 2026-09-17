@@ -88,6 +88,8 @@ def ensure(force: bool = False) -> dict:
         "totals_config": summary["totals_config"],
         "development_engine_totals": summary["dev_engine_totals"],
         "retrospective_engine_totals": summary["holdout_engine_totals"],
+        "development_model_totals": summary["dev_model_totals"],
+        "retrospective_model_totals": summary["holdout_model_totals"],
         "artifacts": {
             p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in paths
         },

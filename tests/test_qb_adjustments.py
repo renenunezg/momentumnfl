@@ -95,7 +95,14 @@ def test_starter_swap_changes_projection_without_double_counting(monkeypatch):
     assert after.pure_home_margin - before.pure_home_margin == pytest.approx(
         expected_loss
     )
-    assert after.expected_away_points == before.expected_away_points
+    # The QB loss changes the margin in full; the separately calibrated common
+    # scoring level changes both scores and shrinks only the total response.
+    assert after.model_total - before.model_total == pytest.approx(
+        fit.totals_config.location_slope * expected_loss
+    )
+    assert after.expected_away_points - before.expected_away_points == pytest.approx(
+        0.5 * (fit.totals_config.location_slope - 1) * expected_loss
+    )
     assert [r.to_record() for r in fit.ratings({})] == before_ratings
 
     # Half of a preseason prior already prices the new reference QB. A later

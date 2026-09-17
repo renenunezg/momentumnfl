@@ -113,6 +113,7 @@ class JointScoringFit:
     config: JointScoringConfig
     totals_base_ppd: float | None = None
     totals_base_drives: float | None = None
+    totals_config: TotalsConfig = DEFAULT_TOTALS_CONFIG
 
     @property
     def team_index(self) -> dict[str, int]:
@@ -362,13 +363,15 @@ def fit_joint_scoring(
     # Competitive possessions estimate strength. Full outcomes determine the
     # final-score environment, so extrapolating competitive scoring rates does
     # not inflate totals when late-game scoring slows down.
+    # Pool points over possession exposure: a low-drive game's rate should not
+    # receive the same influence as a high-drive game's rate at equal recency.
     base_ppd = (
         float(
             np.average(
-                (training["home_points"] + training["away_points"])
-                / (2 * training["game_drives"]),
+                training["home_points"] + training["away_points"],
                 weights=recency[::2],
             )
+            / (2 * np.average(training["game_drives"], weights=recency[::2]))
         )
         + offense_mean
         - defense_mean
@@ -457,4 +460,5 @@ def fit_joint_scoring(
         config=config,
         totals_base_ppd=totals_ppd,
         totals_base_drives=totals_drives,
+        totals_config=totals_config,
     )

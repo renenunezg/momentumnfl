@@ -191,6 +191,7 @@ def test_calibration_uses_one_sd_contract_and_keeps_pricing_holdout_free(
                     "total_sd": 12 * config.score_covariance_scale,
                     "rest_diff": 0.0,
                     **{f"qb_adj_{int(span)}": 0.0 for span in c.QB_SPANS},
+                    **{f"qb_sum_{int(span)}": 0.0 for span in c.QB_SPANS},
                 }
                 for season in seasons
                 for i, actual in enumerate([-10, -3, 0, 3, 10])
@@ -230,6 +231,14 @@ def test_calibration_uses_one_sd_contract_and_keeps_pricing_holdout_free(
     totals = summary["holdout_engine_totals"]
     assert totals["forecast_basis"] == "engine_only_before_qb_and_market"
     assert totals["mae"] == pytest.approx(5.2)
+    final_totals = summary["holdout_model_totals"]
+    assert final_totals["forecast_basis"] == (
+        "qb_adjusted_calibrated_total_without_game_market_blend"
+    )
+    assert final_totals["mae"] == pytest.approx(
+        (holdout.model_total - holdout.actual_total).abs().mean()
+    )
+    assert not holdout.model_total.equals(holdout.engine_total)
     assert totals["log_loss"] == pytest.approx(
         -t.logpdf(holdout.actual_total - 44, 7, scale=student_t_scale(10.2, 7)).mean()
     )
