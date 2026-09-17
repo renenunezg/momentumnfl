@@ -20,7 +20,7 @@ from backend.model.joint_scoring import (
 )
 from backend.model.outputs import TeamRating
 
-MODEL_VERSION = "nfl_preseason_v2"
+MODEL_VERSION = "nfl_preseason_v3"
 
 # Selected by the calibrate walk-forward on weeks 1-4 of dev seasons.
 CARRYOVER = 0.50
@@ -33,6 +33,13 @@ FALLBACK_POINTS_PER_WIN = 2.7
 # Two full seasons of team-level (win total, rating) pairs before the fitted
 # slope replaces the fallback.
 MIN_SLOPE_SAMPLES = 64
+# The map from win totals to points is not an engine-selection question. The
+# production engine's short memory and tight ridge shrink final ratings, which
+# roughly halves the slope the blend weight was selected with.
+SLOPE_REFERENCE_CONFIG = JointScoringConfig(
+    rating_half_life_weeks=float("inf"),
+    strength_prior_sd_ppd=0.35,
+)
 ENVIRONMENT_CLIP_POINTS = 8.0
 
 
@@ -84,7 +91,7 @@ def load_qb_references(season: int, as_of: datetime | None = None) -> dict[str, 
 
 def points_per_win(
     previous_seasons: list[int],
-    engine_config: JointScoringConfig = DEFAULT_CONFIG,
+    engine_config: JointScoringConfig = SLOPE_REFERENCE_CONFIG,
     games_by_season: dict[int, pd.DataFrame] | None = None,
 ) -> float:
     """OLS slope of centered win totals onto same-season final power ratings,

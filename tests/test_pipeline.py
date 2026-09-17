@@ -271,3 +271,30 @@ def test_early_totals_stabilization_preserves_published_spread_and_moneyline(
             assert _probabilities(new_priced, offer, distribution) == pytest.approx(
                 _probabilities(old_priced, offer, distribution)
             )
+
+
+def test_production_win_total_slope_uses_the_calibration_reference(monkeypatch):
+    """The blend weight was selected with this slope; a shrunk engine halves it."""
+    from backend.model import calibration, preseason
+
+    seen = []
+    monkeypatch.setattr(
+        preseason, "load_win_totals", lambda season: pd.Series({"A": 9.0, "B": 8.0})
+    )
+    monkeypatch.setattr(
+        preseason.store,
+        "season_games",
+        lambda season: pd.DataFrame({"model_week": [1]}),
+    )
+
+    def fit(games, week, as_of, config):
+        seen.append(config)
+        raise KeyError
+
+    monkeypatch.setattr(preseason, "fit_joint_scoring", fit)
+    with pytest.raises(KeyError):
+        preseason.points_per_win([2025])
+
+    assert seen == [preseason.SLOPE_REFERENCE_CONFIG]
+    assert calibration.SLOPE_REFERENCE_CONFIG is preseason.SLOPE_REFERENCE_CONFIG
+    assert seen[0].rating_half_life_weeks == float("inf")

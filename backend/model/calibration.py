@@ -34,6 +34,7 @@ from backend.model.market_blend import (
     integer_margin_probabilities,
 )
 from backend.model.preseason import (
+    SLOPE_REFERENCE_CONFIG,
     PreseasonConfig,
     build_preseason_prior,
     load_qb_references,
@@ -77,16 +78,12 @@ class WalkForwardData:
             span: qb_layer.strength_history(self.qb_games, self.game_index, span)
             for span in qb_spans
         }
-        # One slope per season from a long-memory reference config; the map
-        # from win totals to points is not an engine-selection question.
-        reference = JointScoringConfig(
-            rating_half_life_weeks=float("inf"),
-            strength_prior_sd_ppd=0.35,
-            student_t_degrees_of_freedom=SELECTION_DF,
-        )
+        # One slope per season from the long-memory reference production uses.
         self.slopes = {
             season: points_per_win(
-                list(range(HISTORY_START_SEASON, season)), reference, all_games
+                list(range(HISTORY_START_SEASON, season)),
+                SLOPE_REFERENCE_CONFIG,
+                all_games,
             )
             for season in seasons
         }
