@@ -135,9 +135,9 @@ def expected_starters(
 ) -> pd.Series:
     """team -> expected starter gsis_id for the given week.
 
-    Priority: overrides file, then the highest depth-chart QB not ruled Out or
-    Doubtful on the week's injury report, then the team's most recent actual
-    starter who is not ruled out.
+    Priority: overrides, then dated depth charts with Out/Doubtful QBs removed.
+    Undated prior-week charts cannot supersede a newer current-season starter.
+    The latest available actual starter is the fallback for missing charts.
     """
     qb_meta = qb_games.merge(
         game_index[["game_id", "season", "model_week"]], on="game_id"
@@ -165,6 +165,15 @@ def expected_starters(
         # A named rookie starter has no NFL history yet. Keep that identity;
         # the projection layer supplies replacement value for an unseen QB.
         result = charted.combine_first(result)
+        if as_of is not None and "pos_abb" not in depth_charts.columns:
+            # Undated prior-week charts predate that week's actual starter.
+            # Keep the newer current-season observation unless he is ruled out.
+            latest = prior[prior["started"] & prior["season"].eq(season)]
+            latest = latest.sort_values(["season", "model_week"])
+            latest = latest.drop_duplicates("team", keep="last")
+            latest = latest[~latest["passer_player_id"].isin(unavailable)]
+            recent = latest.set_index("team")["passer_player_id"]
+            result = recent.combine_first(result)
 
     overrides = (
         _overrides()

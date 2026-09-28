@@ -543,29 +543,13 @@ def publish_awards(engine, season: int, week: int) -> dict:
 
 
 def publish_recommendations(conn, decisions):
-    """Freeze a qualifying pick on first publication, atomically with forecasts."""
+    """Freeze picks unless verified pregame QB inputs change; archive revisions."""
     import json
 
     from backend.recommendations import RECOMMENDATION_COLUMNS
 
     if decisions.empty:
         return
-    frozen = set(
-        conn.execute(
-            text(
-                "select game_id, market from nfl.recommendations "
-                "where game_id = any(:ids) and (status = 'recommended' "
-                "or outcome <> 'pending' or start_date <= clock_timestamp())"
-            ),
-            {"ids": decisions.game_id.unique().tolist()},
-        ).all()
-    )
-    decisions = decisions.loc[
-        [(r.game_id, r.market) not in frozen for r in decisions.itertuples()]
-    ]
-    if decisions.empty:
-        return
-    table = Table("recommendations", MetaData(), schema=SCHEMA, autoload_with=conn)
     rows = _prepare(decisions, RECOMMENDATION_COLUMNS).to_dict("records")
     for row in rows:
         for key in ("source_timestamps", "data_flags", "pricing_weights"):
@@ -573,6 +557,34 @@ def publish_recommendations(conn, decisions):
                 row[key] = json.loads(row[key])
             if row[key] is None:
                 row[key] = [] if key == "pricing_weights" else {}
+    # BEFORE INSERT validation runs even for an ON CONFLICT no-op. Filter
+    # frozen rows first, then repeat the same gate atomically in the upsert.
+    eligible = set(
+        conn.execute(
+            text(
+                "select proposed.game_id, proposed.market "
+                "from jsonb_populate_recordset(null::nfl.recommendations, "
+                "cast(:rows as jsonb)) proposed "
+                "left join nfl.recommendations existing using (game_id, market) "
+                "where existing.game_id is null or "
+                "(existing.outcome = 'pending' "
+                "and existing.start_date > clock_timestamp() "
+                "and proposed.decision_at > existing.decision_at "
+                "and (existing.status = 'no_play' "
+                "or nfl.can_refresh_qb_pick(existing, proposed)))"
+            ),
+            {
+                "rows": json.dumps(
+                    [{"outcome": "pending", **row} for row in rows],
+                    default=lambda value: value.isoformat(),
+                )
+            },
+        ).all()
+    )
+    rows = [row for row in rows if (row["game_id"], row["market"]) in eligible]
+    if not rows:
+        return
+    table = Table("recommendations", MetaData(), schema=SCHEMA, autoload_with=conn)
     statement = insert(table).values(rows)
     statement = statement.on_conflict_do_update(
         index_elements=["game_id", "market"],
@@ -581,7 +593,10 @@ def publish_recommendations(conn, decisions):
             for c in RECOMMENDATION_COLUMNS
             if c not in ("game_id", "market")
         },
-        where=(table.c.status == "no_play")
+        where=(
+            (table.c.status == "no_play")
+            | text("nfl.can_refresh_qb_pick(recommendations, excluded)")
+        )
         & (table.c.outcome == "pending")
         & (table.c.start_date > text("clock_timestamp()"))
         & (statement.excluded.decision_at > table.c.decision_at),

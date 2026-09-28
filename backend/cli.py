@@ -431,6 +431,7 @@ def run_validate_qb(args) -> None:
         apply_layers,
         margin_log_loss,
         rescore_qb_layer,
+        select_qb_absence_weight,
         select_qb_layer,
     )
     from backend.model.projections import DEFAULT_MARKET_WEIGHT, LayerConfig
@@ -447,11 +448,18 @@ def run_validate_qb(args) -> None:
     selected = replace(select_qb_layer(rescored), market_weight=DEFAULT_MARKET_WEIGHT)
     candidate = apply_layers(rescored, selected)
     print(f"Development-selected QB layer: {selected}")
-    print("Conditional on majority-dropback QBs; engine/artifacts unchanged.")
+    print(
+        f"Confirmed-absence development selection: {select_qb_absence_weight(rescored)}"
+    )
+    print("Pregame expected-QB reconstruction; engine/artifacts unchanged.")
     print("Historical market QB references include weekly lineup proxies.")
     for label, frame in (
         ("frozen", frozen),
         ("unanchored", previous),
+        (
+            "ordinary_absence_weight",
+            apply_layers(rescored, replace(LayerConfig(), qb_absence_weight=0.25)),
+        ),
         ("candidate", candidate),
     ):
         for split, mask in (
@@ -468,6 +476,18 @@ def run_validate_qb(args) -> None:
                 f"blended MAE {blended_mae:.4f}, closing MAE {market_mae:.4f}, "
                 f"blended NLL {margin_log_loss(subset, 1.0, 7.0):.5f}"
             )
+            span = int(LayerConfig().qb_span_dropbacks)
+            absence = subset[
+                subset[f"qb_absence_adj_{span}"].ne(0)
+                | subset[f"qb_absence_sum_{span}"].ne(0)
+            ]
+            if not absence.empty:
+                errors = absence.pure_model_margin - absence.actual_margin
+                print(
+                    f"  confirmed absences: {len(absence)} games, "
+                    f"pure MAE {errors.abs().mean():.4f}, "
+                    f"signed bias {errors.mean():.4f}"
+                )
     if getattr(args, "context", False):
         from backend.model.calibration import evaluate_qb_context
 

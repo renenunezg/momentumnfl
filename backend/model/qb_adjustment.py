@@ -27,9 +27,10 @@ def strength_history(
     ordered = qb_games.merge(
         game_index[["game_id", "season", "model_week", "start_date"]], on="game_id"
     ).sort_values(["passer_player_id", "start_date"])
-    if not all(isfinite(x) and x > 0 for x in (
-        span_dropbacks, calendar_half_life, prior_dropbacks
-    )):
+    if not all(
+        isfinite(x) and x > 0
+        for x in (span_dropbacks, calendar_half_life, prior_dropbacks)
+    ):
         raise ValueError("QB memory and prior sizes must be finite and positive")
     epa_states, weight_states = [], []
     for _, group in ordered.groupby("passer_player_id", sort=False):
@@ -76,6 +77,18 @@ class QbContext:
         coefficients[passer] = coefficients.get(passer, 0.0) + 1.0
         return coefficients
 
+    def absence_delta(
+        self, team: str, passer: str | None, unavailable: set[str]
+    ) -> float:
+        """Substitution from the dominant recent QB, explicitly ruled unavailable."""
+        mixture = self.mixtures.get(team, {})
+        if not mixture or passer is None:
+            return 0.0
+        incumbent = max(mixture, key=mixture.get)
+        if incumbent == passer or incumbent not in unavailable:
+            return 0.0
+        return self.adjustment(team, passer)
+
     def adjustment(self, team: str, passer: str | None, weight: float = 1.0) -> float:
         """Only replace the QB contribution represented by the team's mix.
 
@@ -120,7 +133,8 @@ def context_before_week(
     evidence = latest.set_index("passer_player_id")["effective_dropbacks"].to_dict()
     strengths = (
         latest.set_index("passer_player_id")["strength_points"].to_dict()
-        if strengths_override is None else strengths_override
+        if strengths_override is None
+        else strengths_override
     )
     window = eligible[eligible["season"].eq(season)].copy()
     played_teams = set(window["team"])
@@ -142,18 +156,19 @@ def context_before_week(
     totals = totals[totals["weight"] > 0]
     baselines = (totals["weighted_strength"] / totals["weight"]).to_dict()
     mixtures = {
-        team: (group.groupby("passer_player_id")["weight"].sum()
-               / group["weight"].sum()).to_dict()
-        for team, group in window.groupby("team") if group["weight"].sum() > 0
+        team: (
+            group.groupby("passer_player_id")["weight"].sum() / group["weight"].sum()
+        ).to_dict()
+        for team, group in window.groupby("team")
+        if group["weight"].sum() > 0
     }
     if not 0 <= win_total_weight <= 1:
         raise ValueError("win_total_weight must be between 0 and 1")
     for team, passer in (preseason_references or {}).items():
         if team in baselines and team not in played_teams:
-            baselines[team] = (
-                (1 - win_total_weight) * baselines[team]
-                + win_total_weight * strengths.get(passer, 0.0)
-            )
+            baselines[team] = (1 - win_total_weight) * baselines[
+                team
+            ] + win_total_weight * strengths.get(passer, 0.0)
             mixtures[team] = {
                 q: w * (1 - win_total_weight) for q, w in mixtures[team].items()
             }

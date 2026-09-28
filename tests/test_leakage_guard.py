@@ -192,6 +192,8 @@ def test_calibration_uses_one_sd_contract_and_keeps_pricing_holdout_free(
                     "rest_diff": 0.0,
                     **{f"qb_adj_{int(span)}": 0.0 for span in c.QB_SPANS},
                     **{f"qb_sum_{int(span)}": 0.0 for span in c.QB_SPANS},
+                    **{f"qb_absence_adj_{int(span)}": 0.0 for span in c.QB_SPANS},
+                    **{f"qb_absence_sum_{int(span)}": 0.0 for span in c.QB_SPANS},
                 }
                 for season in seasons
                 for i, actual in enumerate([-10, -3, 0, 3, 10])

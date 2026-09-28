@@ -84,6 +84,7 @@ def compute_qb_adjustments(
         injuries=injuries,
     )
 
+    unavailable = qb_features.ruled_out(injuries, season, week, as_of)
     adjustments: dict[str, tuple[float, float]] = {}
     for game in slate.itertuples():
         sides = []
@@ -94,6 +95,8 @@ def compute_qb_adjustments(
                 continue
             sides.append(
                 context.adjustment(team, passer, layer_config.qb_adjustment_weight)
+                + (layer_config.qb_absence_weight - layer_config.qb_adjustment_weight)
+                * context.absence_delta(team, passer, unavailable)
             )
         adjustments[str(game.game_id)] = (sides[0], sides[1])
     return adjustments

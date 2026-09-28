@@ -22,7 +22,7 @@ from backend.config import (
     HOLDOUT_SEASONS,
 )
 from backend.etl import store
-from backend.features.qb import expected_starters
+from backend.features.qb import expected_starters, ruled_out
 from backend.model import qb_adjustment as qb_layer
 from backend.model.distributions import student_t_scale
 from backend.model.fit_week import load_depth_charts, load_injuries
@@ -91,6 +91,26 @@ class WalkForwardData:
         self.previous_games = {season: all_games[season - 1] for season in seasons}
         self.forecast_inputs = {}
         self.contexts = {}
+        self.pregame_availability = {}
+
+    def availability_at(self, season, week, cutoff, eligible):
+        """Pregame source reconstruction; team ratings retain their weekly cut."""
+        key = season, week, cutoff
+        if key not in self.pregame_availability:
+            self.pregame_availability[key] = (
+                expected_starters(
+                    self.qb_games,
+                    eligible,
+                    self.depth_charts[season],
+                    season,
+                    week,
+                    as_of=cutoff,
+                    use_overrides=False,
+                    injuries=self.injuries[season],
+                ),
+                ruled_out(self.injuries[season], season, week, cutoff),
+            )
+        return self.pregame_availability[key]
 
     def forecast_inputs_at(self, season, week, slate):
         key = season, week
@@ -103,17 +123,7 @@ class WalkForwardData:
                     cutoff - timedelta(days=1)
                 )
             ]
-            expected = expected_starters(
-                self.qb_games,
-                eligible,
-                self.depth_charts[season],
-                season,
-                week,
-                as_of=cutoff,
-                use_overrides=False,
-                injuries=self.injuries[season],
-            )
-            self.forecast_inputs[key] = cutoff.to_pydatetime(), eligible, expected
+            self.forecast_inputs[key] = cutoff.to_pydatetime(), eligible
         return self.forecast_inputs[key]
 
 
@@ -156,7 +166,7 @@ def generate_walk_forward(
         weeks = sorted(games["model_week"].unique())
         for week in weeks:
             slate = games[games["model_week"].eq(week)]
-            as_of, eligible, expected = data.forecast_inputs_at(season, week, slate)
+            as_of, eligible = data.forecast_inputs_at(season, week, slate)
             if week == weeks[0]:
                 fit = prior.week1_fit()
                 fit.as_of = as_of
@@ -200,6 +210,12 @@ def generate_walk_forward(
             for game in slate.itertuples():
                 game_id = str(game.game_id)
                 engine = fit.engine_projection(game)
+                availability_cutoff = pd.Timestamp(game.start_date) - timedelta(
+                    seconds=1
+                )
+                expected, unavailable = data.availability_at(
+                    season, week, availability_cutoff, eligible
+                )
                 record = {
                     "season": season,
                     "model_week": int(week),
@@ -207,7 +223,8 @@ def generate_walk_forward(
                     "season_type": game.season_type,
                     "game_id": game_id,
                     "neutral_site": bool(game.neutral_site),
-                    "forecast_cutoff": as_of,
+                    "forecast_cutoff": availability_cutoff,
+                    "ratings_cutoff": as_of,
                     "home_expected_qb": expected.get(str(game.home_team)),
                     "away_expected_qb": expected.get(str(game.away_team)),
                     "market_input_basis": "closing_line_conditional_benchmark",
@@ -241,6 +258,8 @@ def generate_walk_forward(
                 for span in qb_spans:
                     adj = 0.0
                     total_adj = 0.0
+                    absence_adj = 0.0
+                    absence_sum = 0.0
                     for sign, team in (
                         (1.0, str(game.home_team)),
                         (-1.0, str(game.away_team)),
@@ -251,8 +270,15 @@ def generate_walk_forward(
                         value = contexts[span].adjustment(team, passer)
                         adj += sign * value
                         total_adj += value
+                        absence = contexts[span].absence_delta(
+                            team, passer, unavailable
+                        )
+                        absence_adj += sign * absence
+                        absence_sum += absence
                     record[f"qb_adj_{int(span)}"] = adj
                     record[f"qb_sum_{int(span)}"] = total_adj
+                    record[f"qb_absence_adj_{int(span)}"] = absence_adj
+                    record[f"qb_absence_sum_{int(span)}"] = absence_sum
                 rows.append(record)
         if verbose:
             print(f"walk-forward {season}: {len(rows)} cumulative rows")
@@ -265,9 +291,15 @@ def apply_layers(predictions: pd.DataFrame, config: LayerConfig) -> pd.DataFrame
     qb_column = f"qb_adj_{int(config.qb_span_dropbacks)}"
     if qb_column not in out.columns:
         raise KeyError(f"{qb_column} not precomputed")
+    absence_weight = config.qb_absence_weight - config.qb_adjustment_weight
+    absence_column = f"qb_absence_adj_{int(config.qb_span_dropbacks)}"
+    absence_sum = f"qb_absence_sum_{int(config.qb_span_dropbacks)}"
+    if absence_column not in out or absence_sum not in out:
+        raise ValueError("Regenerate forecasts with pregame QB absence inputs")
     pure = (
         out["engine_margin"]
         + config.qb_adjustment_weight * out[qb_column]
+        + absence_weight * out[absence_column]
         + config.rest_points_per_day * out["rest_diff"]
     ).to_numpy()
     out["pure_model_margin"] = pure
@@ -277,6 +309,7 @@ def apply_layers(predictions: pd.DataFrame, config: LayerConfig) -> pd.DataFrame
             out["engine_total"]
             + config.qb_adjustment_weight
             * out[f"qb_sum_{int(config.qb_span_dropbacks)}"]
+            + absence_weight * out[absence_sum]
         ),
         np.maximum(np.abs(pure), np.abs(out["model_margin"])),
     )
@@ -389,6 +422,31 @@ def select_qb_layer(predictions: pd.DataFrame) -> LayerConfig:
     return min(candidates, key=_lowest_loss)[1]
 
 
+def select_qb_absence_weight(predictions: pd.DataFrame) -> dict:
+    """Select only on development confirmed absences with the engine held fixed."""
+    layer = LayerConfig(market_weight=0)
+    span = int(layer.qb_span_dropbacks)
+    mask = predictions[f"qb_absence_adj_{span}"].ne(0) | predictions[
+        f"qb_absence_sum_{span}"
+    ].ne(0)
+    development = predictions[mask & predictions.season.isin(DEVELOPMENT_SEASONS)]
+    if development.empty:
+        raise ValueError("QB absence selection requires development absence games")
+    scores = [
+        (
+            margin_log_loss(
+                apply_layers(development, replace(layer, qb_absence_weight=weight)),
+                1.0,
+                7.0,
+            ),
+            weight,
+        )
+        for weight in (0.25, 0.5, 0.75, 1.0)
+    ]
+    loss, weight = min(scores)
+    return {"weight": weight, "games": len(development), "margin_nll": loss}
+
+
 def rescore_qb_layer(
     predictions: pd.DataFrame,
     anchor_preseason: bool = True,
@@ -401,6 +459,10 @@ def rescore_qb_layer(
     Starter identities must come from the original forecast cutoff. Legacy
     artifacts with outcome-derived starters must be regenerated first.
     """
+    if "ratings_cutoff" not in predictions:
+        raise ValueError(
+            "Regenerate forecasts with separate ratings/availability cutoffs"
+        )
     seasons = list(range(HISTORY_START_SEASON, int(predictions["season"].max()) + 1))
     index = store.game_index(seasons)
     games = store.qb_games(seasons)
@@ -412,13 +474,17 @@ def rescore_qb_layer(
         season: load_qb_references(season) if anchor_preseason else {}
         for season in out["season"].unique()
     }
+    injuries = {season: load_injuries(season) for season in out["season"].unique()}
     for span in qb_spans:
         history = qb_layer.strength_history(
             games, index, span, calendar_half_life, prior_dropbacks
         )
         deltas = {}
         for (season, week), slate in out.groupby(["season", "model_week"]):
-            cutoff = pd.to_datetime(slate["forecast_cutoff"], utc=True).min()
+            cutoff_column = (
+                "ratings_cutoff" if "ratings_cutoff" in slate else "forecast_cutoff"
+            )
+            cutoff = pd.to_datetime(slate[cutoff_column], utc=True).min()
             context = qb_layer.context_before_week(
                 history[
                     pd.to_datetime(history.start_date, utc=True).le(
@@ -432,12 +498,26 @@ def rescore_qb_layer(
                 PreseasonConfig().win_total_blend,
             )
             for game in slate.itertuples():
-                deltas[game.game_id] = context.adjustment(
-                    game.home_team, starters.get((game.game_id, game.home_team))
-                ) - context.adjustment(
-                    game.away_team, starters.get((game.game_id, game.away_team))
+                unavailable = ruled_out(
+                    injuries[season], season, week, game.forecast_cutoff
                 )
-        out[f"qb_adj_{int(span)}"] = out["game_id"].map(deltas)
+                values, absence = [], []
+                for team in (game.home_team, game.away_team):
+                    passer = starters.get((game.game_id, team))
+                    values.append(context.adjustment(team, passer))
+                    absence.append(context.absence_delta(team, passer, unavailable))
+                deltas[game.game_id] = (
+                    values[0] - values[1],
+                    sum(values),
+                    absence[0] - absence[1],
+                    sum(absence),
+                )
+        for i, prefix in enumerate(
+            ("qb_adj", "qb_sum", "qb_absence_adj", "qb_absence_sum")
+        ):
+            out[f"{prefix}_{int(span)}"] = out["game_id"].map(
+                {key: values[i] for key, values in deltas.items()}
+            )
     return out
 
 

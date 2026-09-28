@@ -105,6 +105,54 @@ def test_starter_swap_changes_projection_without_double_counting(monkeypatch):
     )
     assert [r.to_record() for r in fit.ratings({})] == before_ratings
 
+    # A confirmed absence gets the separately validated substitution weight.
+    # The same override without an Out/Doubtful report retains ordinary shrinkage.
+    report = pd.DataFrame(
+        [
+            dict(
+                season=2026,
+                week=1,
+                gsis_id="starter",
+                report_status="Out",
+                date_modified="2026-08-31T12:00Z",
+            )
+        ]
+    )
+    confirmed = compute_qb_adjustments(
+        2026,
+        1,
+        slate,
+        logs,
+        pd.DataFrame(),
+        DEFAULT_CONFIG,
+        layer,
+        as_of=fit.as_of,
+        injuries=report,
+    )
+    expected_absence = (
+        expected_loss * layer.qb_absence_weight / layer.qb_adjustment_weight
+    )
+    assert confirmed["new"] == pytest.approx((expected_absence, 0))
+    confirmed_projection = assemble_projections(
+        fit, slate, fit.as_of, {}, confirmed, config=layer
+    )[0]
+    assert (
+        confirmed_projection.pure_home_margin - before.pure_home_margin
+        == pytest.approx(expected_absence)
+    )
+    late = report.assign(date_modified="2026-09-02T12:00Z")
+    assert compute_qb_adjustments(
+        2026,
+        1,
+        slate,
+        logs,
+        pd.DataFrame(),
+        DEFAULT_CONFIG,
+        layer,
+        as_of=fit.as_of,
+        injuries=late,
+    )["new"] == pytest.approx(injured["new"])
+
     # Half of a preseason prior already prices the new reference QB. A later
     # override must still move the forecast by the full calibrated QB gap.
     monkeypatch.setattr(
@@ -241,7 +289,8 @@ def test_backtest_and_production_qb_context_ignore_target_week_outcomes():
         logs, index, charts.iloc[:1], 2026, 1, as_of=cutoff, use_overrides=False
     ).equals(expected)
     # Weekly files have no publication clock. A chart from the target week
-    # cannot be treated as a verified pregame observation.
+    # cannot be treated as a verified pregame observation, and an older chart
+    # cannot undo the newer actual starter from the previous game.
     weekly = pd.DataFrame(
         [
             (2026, 1, "A", "known", "QB", "1"),
@@ -259,7 +308,7 @@ def test_backtest_and_production_qb_context_ignore_target_week_outcomes():
             as_of=datetime(2026, 9, 14, tzinfo=UTC),
             use_overrides=False,
         )["A"]
-        == "known"
+        == "starter"
     )
     # A starter ruled Out before the cutoff yields to the next depth-chart
     # rank; a report modified after the cutoff was not yet known. The 2025+
@@ -286,3 +335,18 @@ def test_backtest_and_production_qb_context_ignore_target_week_outcomes():
             )["A"]
             == starter
         )
+
+    # Availability is reconstructed per game's cutoff, even with fixed weekly ratings.
+    from backend.model.calibration import WalkForwardData
+
+    data = WalkForwardData.__new__(WalkForwardData)
+    data.qb_games = logs
+    data.depth_charts = {2026: ranked}
+    data.injuries = {2026: report("2026-09-02T12:00Z")}
+    data.pregame_availability = {}
+    early, early_out = data.availability_at(2026, 1, cutoff, index.iloc[:1])
+    late, late_out = data.availability_at(
+        2026, 1, datetime(2026, 9, 3, tzinfo=UTC), index.iloc[:1]
+    )
+    assert early["A"] == "starter" and not early_out
+    assert late["A"] == "backup" and late_out == {"starter"}

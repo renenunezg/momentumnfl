@@ -26,9 +26,12 @@ DEFAULT_MARKET_WEIGHT = 0.5
 # window could not separate 0.25 from 0.75 and did not reject this choice.
 DEFAULT_QB_SPAN_DROPBACKS = DEFAULT_SPAN_DROPBACKS
 DEFAULT_QB_ADJUSTMENT_WEIGHT = 0.25
+# Selected on 2016-2021 pregame confirmed-absence cases with team ratings fixed.
+# The locked 2022-2025 retrospective check improved that cohort's margin MAE.
+DEFAULT_QB_ABSENCE_WEIGHT = 0.5
 # The QB layer version names the starter-identification rule and its weight;
 # the preseason producer appends the same suffix to its own version.
-QB_LAYER_VERSION = "qb_v5"
+QB_LAYER_VERSION = "qb_v6"
 MODEL_VERSION = f"nfl_joint_scoring_{QB_LAYER_VERSION}_{TOTALS_LAYER_VERSION}"
 
 
@@ -41,12 +44,15 @@ class LayerConfig:
     rest_points_per_day: float = REST_POINTS_PER_DAY
     qb_span_dropbacks: float = DEFAULT_QB_SPAN_DROPBACKS
     qb_adjustment_weight: float = DEFAULT_QB_ADJUSTMENT_WEIGHT
+    qb_absence_weight: float = DEFAULT_QB_ABSENCE_WEIGHT
 
     def __post_init__(self) -> None:
         if not isfinite(self.qb_span_dropbacks) or self.qb_span_dropbacks <= 0:
             raise ValueError("qb_span_dropbacks must be finite and positive")
         if not 0 <= self.qb_adjustment_weight <= 1:
             raise ValueError("qb_adjustment_weight must be between 0 and 1")
+        if not 0 <= self.qb_absence_weight <= 1:
+            raise ValueError("qb_absence_weight must be between 0 and 1")
 
 
 def rest_adjustment(

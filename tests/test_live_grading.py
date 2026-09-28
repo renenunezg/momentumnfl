@@ -512,6 +512,100 @@ def test_recommendation_publication_settlement_and_filtered_history(database):
             ).scalar_one()
             == original
         )
+    # A lineup correction revises an open pick and preserves its original record.
+    # Market-only refreshes, stale QB evidence and post-kickoff edits stay frozen.
+    with database.connect() as conn:
+        transaction = conn.begin()
+        try:
+            trial = decisions.iloc[:1].assign(
+                game_id="qb-refresh-trial",
+                start_date=now + timedelta(days=1),
+                provider_start_date=now + timedelta(days=1),
+            )
+            publish_recommendations(conn, trial)
+            original_pick = conn.execute(
+                text(
+                    "select to_jsonb(r) from nfl.recommendations r "
+                    "where game_id='qb-refresh-trial'"
+                )
+            ).scalar_one()
+            flags = json.loads(trial.iloc[0].data_flags)
+            flags["home_expected_qb"] = "announced-backup"
+            corrected = trial.assign(
+                data_flags=json.dumps(flags),
+                forecast_as_of=now - timedelta(seconds=15),
+                decision_at=pd.Timestamp.now(tz="UTC"),
+            )
+            publish_recommendations(conn, corrected)
+            assert (
+                conn.execute(
+                    text(
+                        "select data_flags ->> 'home_expected_qb' "
+                        "from nfl.recommendations "
+                        "where game_id='qb-refresh-trial'"
+                    )
+                ).scalar_one()
+                == "test-qb"
+            )
+            flags["home_qb_source_at"] = (now - timedelta(seconds=30)).isoformat()
+            corrected["data_flags"] = json.dumps(flags)
+            publish_recommendations(conn, corrected)
+            saved = conn.execute(
+                text(
+                    "select to_jsonb(r) from nfl.recommendations r "
+                    "where game_id='qb-refresh-trial'"
+                )
+            ).scalar_one()
+            assert saved["data_flags"]["home_expected_qb"] == "announced-backup"
+            assert saved["published_at"] > original_pick["published_at"]
+            assert (
+                conn.execute(
+                    text(
+                        "select previous_record from nfl.recommendation_revisions "
+                        "where game_id='qb-refresh-trial'"
+                    )
+                ).scalar_one()
+                == original_pick
+            )
+            # A changed QB can also remove a pick when its new edge is inadequate.
+            flags["home_expected_qb"] = "third-string-starter"
+            flags["home_qb_source_at"] = (now - timedelta(seconds=10)).isoformat()
+            no_play = corrected.assign(
+                data_flags=json.dumps(flags),
+                forecast_as_of=now,
+                decision_at=pd.Timestamp.now(tz="UTC"),
+                status="no_play",
+                reason="below_edge_threshold",
+                stake_units=0.0,
+            )
+            publish_recommendations(conn, no_play)
+            assert (
+                conn.execute(
+                    text(
+                        "select status from nfl.recommendations "
+                        "where game_id='qb-refresh-trial'"
+                    )
+                ).scalar_one()
+                == "no_play"
+            )
+            assert (
+                conn.execute(
+                    text(
+                        "select count(*) from nfl.recommendation_revisions "
+                        "where game_id='qb-refresh-trial'"
+                    )
+                ).scalar_one()
+                == 2
+            )
+            for mutation in ("delete from", "update", "truncate"):
+                with pytest.raises(DBAPIError), conn.begin_nested():
+                    sql = f"{mutation} nfl.recommendation_revisions"
+                    if mutation == "update":
+                        sql += " set reason='expected_qb_changed'"
+                    conn.execute(text(sql))
+        finally:
+            transaction.rollback()
+
     # Database checks independently reject rewriting, deletion and arithmetic lies.
     for sql in (
         "update nfl.recommendations set price=200",
