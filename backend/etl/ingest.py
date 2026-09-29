@@ -63,7 +63,26 @@ def ingest_season(season: int) -> list[str]:
             write_parquet(loader(), directory / f"{season}.parquet")
         except Exception as error:  # noqa: BLE001 - report and continue
             problems.append(f"{season} {name}: {error}")
+    problems.extend(_current_injuries(season))
     return problems
+
+
+def _current_injuries(season):
+    # Never attach today's availability to a historical season pull.
+    if season != nflreadpy.get_current_season(roster=True):
+        return []
+    from backend import availability
+    from backend.etl import store
+
+    try:
+        availability.refresh(
+            season,
+            store.read_raw("depth_charts", f"{season}.parquet"),
+            store.current_teams(),
+        )
+    except Exception as error:  # noqa: BLE001 - fail the refresh on source failure
+        return [f"{season} current_injuries: {error}"]
+    return []
 
 
 def ingest_shared(seasons: list[int]) -> None:
@@ -98,4 +117,5 @@ def ingest_projection_inputs(season: int) -> list[str]:
             write_parquet(loader([season]), RAW_DIR / name / f"{season}.parquet")
         except Exception as error:  # noqa: BLE001 - caller reports all sources
             problems.append(f"{season} {name}: {error}")
+    problems.extend(_current_injuries(season))
     return problems

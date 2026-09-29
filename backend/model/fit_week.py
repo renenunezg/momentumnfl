@@ -109,11 +109,19 @@ def load_depth_charts(season: int) -> pd.DataFrame:
         return pd.DataFrame(columns=["season", "week", "position", "team", "gsis_id"])
 
 
-def load_injuries(season: int) -> pd.DataFrame:
+def load_injuries(season: int, week=None, as_of=None) -> pd.DataFrame:
     try:
-        return store.read_raw("injuries", f"{season}.parquet")
+        weekly = store.read_raw("injuries", f"{season}.parquet")
     except FileNotFoundError:
-        return pd.DataFrame(columns=["season", "week", "gsis_id", "report_status"])
+        weekly = pd.DataFrame(columns=["season", "week", "gsis_id", "report_status"])
+    if week is None or as_of is None:
+        return weekly
+    from backend.availability import current_reports, merge_reports
+
+    current, _ = current_reports(
+        season, week, as_of, load_depth_charts(season), store.current_teams()
+    )
+    return merge_reports(weekly, current)
 
 
 def week_slate(season: int, week: int) -> pd.DataFrame:
@@ -166,7 +174,7 @@ def fit_and_project(
         config,
         layer_config,
         as_of=as_of,
-        injuries=load_injuries(season),
+        injuries=load_injuries(season, week, as_of),
     )
     projections = assemble_projections(
         fit,

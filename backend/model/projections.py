@@ -31,7 +31,7 @@ DEFAULT_QB_ADJUSTMENT_WEIGHT = 0.25
 DEFAULT_QB_ABSENCE_WEIGHT = 0.5
 # The QB layer version names the starter-identification rule and its weight;
 # the preseason producer appends the same suffix to its own version.
-QB_LAYER_VERSION = "qb_v6"
+QB_LAYER_VERSION = "qb_v7"
 MODEL_VERSION = f"nfl_joint_scoring_{QB_LAYER_VERSION}_{TOTALS_LAYER_VERSION}"
 
 

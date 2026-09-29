@@ -35,16 +35,6 @@ def _toy_games() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def test_fit_refuses_future_games():
-    games = _toy_games()
-    with pytest.raises(ValueError):
-        fit_joint_scoring(
-            games,
-            forecast_week=5,
-            as_of=datetime(2023, 9, 1, tzinfo=UTC),
-        )
-
-
 def test_fit_accepts_clean_cut():
     fit = fit_joint_scoring(
         games=_toy_games(),

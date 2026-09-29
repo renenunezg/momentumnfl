@@ -315,7 +315,7 @@ def build_season_forecast(
         fit.config,
         LayerConfig(),
         as_of=as_of,
-        injuries=load_injuries(season),
+        injuries=load_injuries(season, qb_week, as_of),
     )
     frame, audit = project_season(
         fit, schedules, adjustments, store.team_names(), as_of

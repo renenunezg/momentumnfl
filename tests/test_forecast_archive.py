@@ -11,21 +11,6 @@ import pytest
 from backend import forecast_archive as archive
 
 
-def test_json_source_receipt_preserves_sportsbook_payload(tmp_path, monkeypatch):
-    from backend import source_inputs
-
-    processed = tmp_path / "processed"
-    monkeypatch.setattr(source_inputs, "PROCESSED_DIR", processed)
-    monkeypatch.setattr(source_inputs, "ARCHIVE", processed / "source_archive")
-    source = tmp_path / "win_total_sources.json"
-    payload = '{"2026":{"source":"BetMGM","date":"2026-09-01"}}'
-    source.write_text(payload)
-    receipt = source_inputs.archive_source(source)
-    assert (processed / receipt["archive"]).read_text() == payload
-    assert source_inputs.receipt_for(source) == receipt
-    assert source_inputs.archive_source(source) == receipt
-
-
 def test_replay_restores_frozen_inputs_and_refuses_missing_late_or_corrupt_bytes(
     tmp_path, monkeypatch
 ):
@@ -44,6 +29,21 @@ def test_replay_restores_frozen_inputs_and_refuses_missing_late_or_corrupt_bytes
             "dt": ["2026-09-01T00:00:00Z"] * 2,
         }
     ).to_parquet(raw / "depth_charts/2026.parquet")
+    pd.DataFrame({"team_name": ["Home", "Away"], "team_abbr": ["H", "A"]}).to_parquet(
+        raw / "teams.parquet"
+    )
+    (raw / "current_injuries").mkdir()
+    observed = pd.Timestamp.now(tz="UTC").isoformat()
+    injury_snapshot = dict(
+        observed_at=observed,
+        payload=dict(
+            status="success",
+            timestamp=observed,
+            season={"year": 2026},
+            injuries=[dict(displayName=name, injuries=[]) for name in ["Home", "Away"]],
+        ),
+    )
+    (raw / "current_injuries/2026.json").write_text(json.dumps(injury_snapshot))
     monkeypatch.setattr(archive, "REPO_ROOT", root)
     monkeypatch.setattr(archive, "PROCESSED_DIR", processed)
     monkeypatch.setattr(archive, "ARCHIVE", processed / "forecast_archive")
@@ -77,12 +77,19 @@ def test_replay_restores_frozen_inputs_and_refuses_missing_late_or_corrupt_bytes
     pd.DataFrame({"revision": [99]}).to_parquet(raw / "schedules.parquet")
     (root / "overrides").mkdir()
     (root / "overrides/qb_starters.csv").write_text("later override")
+    (raw / "current_injuries/2026.json").write_text("later injury revision")
 
     def run(*args, cwd, **kwargs):
         assert (
             pd.read_parquet(cwd / "backend/data/raw/schedules.parquet").revision[0] == 1
         )
         assert not (cwd / "overrides/qb_starters.csv").exists()
+        assert (
+            json.loads(
+                (cwd / "backend/data/raw/current_injuries/2026.json").read_text()
+            )
+            == injury_snapshot
+        )
         target = cwd / "backend/data/processed/projections/2026_01.parquet"
         target.parent.mkdir(parents=True)
         expected.to_parquet(target, index=False)

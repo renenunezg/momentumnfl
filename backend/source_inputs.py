@@ -12,11 +12,12 @@ from pathlib import Path
 
 import pandas as pd
 
+from backend import availability
 from backend.config import PROCESSED_DIR, RAW_DIR, STATIC_DIR
 from backend.features.qb import (
     OVERRIDES_PATH,
     _overrides,
-    depth_chart_starters,
+    lineup_starters,
     ruled_out,
 )
 
@@ -91,6 +92,13 @@ def source_reason(value, forecast, now):
         return "missing_source_archive"
     if not isinstance(sources, dict):
         return "missing_source_archive"
+    current = sources.get("current_injuries")
+    if isinstance(current, dict) and current.get("present"):
+        observed = pd.to_datetime(current.get("observed_at"), utc=True, errors="coerce")
+        if pd.isna(observed) or observed > forecast:
+            return "source_after_forecast"
+        if now - observed > availability.MAX_AGE or not current.get("sha256"):
+            return "stale_availability_inputs"
     for name in (
         "schedule",
         "depth_charts",
@@ -125,6 +133,7 @@ def attach_sources(frame):
             "schedule": RAW_DIR / "schedules.parquet",
             "depth_charts": RAW_DIR / "depth_charts" / f"{season}.parquet",
             "injuries": RAW_DIR / "injuries" / f"{season}.parquet",
+            "current_injuries": availability.snapshot_path(season),
             "qb_overrides": OVERRIDES_PATH,
             "win_totals": STATIC_DIR / "win_totals.csv",
             "win_total_sources": STATIC_DIR / "win_total_sources.json",
@@ -134,27 +143,69 @@ def attach_sources(frame):
     depth_path = RAW_DIR / "depth_charts" / f"{season}.parquet"
     depth = pd.read_parquet(depth_path) if depth_path.exists() else pd.DataFrame()
     injury_path = RAW_DIR / "injuries" / f"{season}.parquet"
-    injuries = pd.read_parquet(injury_path) if injury_path.exists() else None
+    weekly = pd.read_parquet(injury_path) if injury_path.exists() else pd.DataFrame()
+    teams_path = RAW_DIR / "teams.parquet"
+    teams = (
+        pd.read_parquet(teams_path)
+        if teams_path.exists()
+        else pd.DataFrame(columns=["team_name", "team_abbr"])
+    )
     overrides = _overrides()
     overrides = overrides[overrides.season.eq(season) & overrides.week.eq(week)]
     flags = []
     missing = {"home": [], "away": []}
+    availability_by_cutoff = {}
     for row in rows.itertuples():
         forecast = pd.to_datetime(row.as_of, utc=True)
-        charted = depth_chart_starters(
-            depth, season, week, forecast, ruled_out(injuries, season, week, forecast)
-        )
-        expected = {} if charted is None else charted.to_dict()
-        expected.update(dict(zip(overrides.team_abbr, overrides.gsis_id)))
+        if forecast not in availability_by_cutoff:
+            current, covered = availability.current_reports(
+                season, week, forecast, depth, teams
+            )
+            injuries = availability.merge_reports(weekly, current)
+            unavailable = ruled_out(injuries, season, week, forecast)
+            selected, evidence = lineup_starters(
+                depth, season, week, forecast, injuries, overrides
+            )
+            availability_by_cutoff[forecast] = (
+                current,
+                covered,
+                unavailable,
+                selected.to_dict(),
+                evidence,
+            )
+        current, covered, unavailable, expected, evidence = availability_by_cutoff[
+            forecast
+        ]
+        current_receipt = sources["current_injuries"] or {}
+        if not current_receipt.get("present"):
+            covered = set()
         data = {
-            "availability_basis": "expected-QB depth chart, injury report, overrides",
+            "availability_basis": (
+                "announcements, injuries, overrides, depth-chart fallback"
+            ),
             "non_qb_injuries": "not modeled; no comprehensive injury clearance",
         }
         for side in ("home", "away"):
             team = getattr(row, f"{side}_team_abbr")
             qb = expected.get(team)
+            selection = evidence.get(team, dict(basis="missing"))
+            data[f"{side}_qb_selection"] = selection
+            data[f"{side}_injury_coverage"] = (
+                "current_snapshot" if team in covered else "missing_current_snapshot"
+            )
+            absent = (
+                current[current.team.eq(team) & current.report_status.eq("Out")]
+                if not current.empty
+                else current
+            )
+            data[f"{side}_reported_absences"] = [
+                dict(player=r.full_name, position=r.position, status=r.current_status)
+                for r in absent.itertuples()
+            ]
             data[f"{side}_expected_qb"] = qb if pd.notna(qb) else None
-            if team in set(overrides.team_abbr):
+            if selection["basis"] == "announced_starter":
+                qb_at = pd.Timestamp(selection["observed_at"])
+            elif team in set(overrides.team_abbr):
                 qb_at = pd.to_datetime(
                     (sources["qb_overrides"] or {}).get("observed_at"),
                     utc=True,
@@ -170,11 +221,23 @@ def attach_sources(frame):
                 ].max()
             else:
                 qb_at = pd.NaT
-            data[f"{side}_qb_source_at"] = None if pd.isna(qb_at) else qb_at.isoformat()
             stale_qb = pd.isna(qb_at) or not (
                 forecast - timedelta(hours=48) <= qb_at <= forecast
             )
-            missing[side].append(int(qb is None or pd.isna(qb) or stale_qb))
+            # A newly observed absence can select QB2 from the same chart.
+            # Preserve the chart freshness gate while dating that new evidence.
+            if team in covered and not stale_qb:
+                qb_at = max(qb_at, pd.Timestamp(current_receipt["observed_at"]))
+            data[f"{side}_qb_source_at"] = None if pd.isna(qb_at) else qb_at.isoformat()
+            missing[side].append(
+                int(
+                    qb is None
+                    or pd.isna(qb)
+                    or stale_qb
+                    or qb in unavailable
+                    or team not in covered
+                )
+            )
         flags.append(json.dumps(data))
     rows["source_timestamps"] = json.dumps(sources)
     rows["data_flags"] = flags

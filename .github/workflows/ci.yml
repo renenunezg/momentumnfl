@@ -46,3 +46,4 @@ jobs:
           tests/test_market_blend.py tests/test_season_wins.py
           tests/test_pipeline.py tests/test_database_write_guard.py
           tests/test_live_grading.py tests/test_forecast_archive.py
+          tests/test_current_availability.py

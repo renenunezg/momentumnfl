@@ -325,7 +325,7 @@ def run_preseason(args) -> None:
         week1_fit.config,
         LayerConfig(),
         as_of=prior.as_of,
-        injuries=load_injuries(args.season),
+        injuries=load_injuries(args.season, 1, prior.as_of),
     )
     projections = assemble_projections(
         week1_fit,
@@ -538,8 +538,15 @@ def run_qbs(args) -> None:
         raise SystemExit("Current snapshot depth charts are required for this team")
     roster = depth[depth["team"].eq(team) & depth["pos_abb"].eq("QB")]
     roster = roster[roster["dt"].eq(roster["dt"].max())].sort_values("pos_rank")
+    as_of = pd.Timestamp.now(tz="UTC")
     starter = expected_starters(
-        games, index, depth, season, week, injuries=load_injuries(season)
+        games,
+        index,
+        depth,
+        season,
+        week,
+        as_of=as_of,
+        injuries=load_injuries(season, week, as_of),
     ).get(team)
     rows = []
     for row in roster.itertuples():

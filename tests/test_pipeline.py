@@ -95,6 +95,7 @@ def test_incremental_write_replaces_game_and_keeps_prior_weeks(monkeypatch):
 
 
 def test_preseason_runs_load_current_starters_before_pbp_opens(monkeypatch, tmp_path):
+    monkeypatch.setattr(ingest, "_current_injuries", lambda season: [])
     monkeypatch.setattr(ingest, "RAW_DIR", tmp_path)
     monkeypatch.setattr(store, "RAW_DIR", tmp_path)
     monkeypatch.setattr(

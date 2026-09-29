@@ -24,10 +24,23 @@ Calibration and backtests are diagnostics, not publication gates; estimated EV d
 Bookmaker availability must be explicitly configured through `ODDS_API_BOOKMAKERS`; the existing NFL `execution_eligibility_verified` flag is required, and an unverified regional-feed quote remains No Play.
 An offer needs an opposing quote from the same event, bookmaker, and observation, an exact kickoff match, match confidence of at least 0.95, and a price update within one hour.
 Forecasts must be at most seven days old, schedule receipts at most 24 hours old, and depth-chart receipts at most 48 hours old.
-All required receipts must precede the forecast, and both expected QBs must be identified from current depth charts or explicit overrides.
+All required receipts must precede the forecast, and both expected QBs must be identified from a sourced announcement, current depth chart or explicit override.
 A quarterback listed Out or Doubtful on the week's injury report yields to the next depth-chart rank.
-The underlying QB chart date or override receipt must precede the forecast and fall within 48 hours of publication; fetching an old chart again does not make its contents current.
+The prospective `qb_v7` pipeline also fetches ESPN's current injury feed on every active-season input refresh, independently of the weekly game-status report.
+It checks the feed's player news for definite coach-attributed starter announcements before falling back to the actual depth-chart order; it never ranks substitutes by model strength.
+Announcements must name an identified QB, refer to the upcoming matchup, follow the previous game, and be observed before the forecast cutoff.
+Speculation, negation, ambiguous wording and previous-game announcements cannot override the depth chart.
+The selection basis, reported statement, source link, publication time and observation time are retained with the forecast inputs.
+An accepted announcement survives later routine player notes for that same game; a newer definite benching report or the end of its stated injury condition invalidates it.
+Verified starter overrides remain supported, but a conflict with an announcement or confirmed absence stops selection for review.
+Out, Doubtful, injured-reserve and physically-unable-to-perform statuses remove a QB from the expected lineup and activate the existing confirmed-absence adjustment; coefficients are unchanged.
+The full provider response, provider timestamp and local observation timestamp are archived before the forecast cutoff.
+The current snapshot must be no more than 24 hours old, match the season, cover the team and resolve its reported QB identities against the depth-chart ESPN/GSIS IDs.
+Missing, stale, malformed or unresolved coverage produces No Play rather than being interpreted as healthy; a fetch failure fails the input-refresh job.
+An estimated return date never automatically clears an absence, and a future snapshot cannot enter an earlier forecast or historical backtest.
+The QB chart date, announcement observation or override receipt must precede the forecast and fall within 48 hours of publication; fetching an old chart again does not make its contents current.
 Other injuries are not modeled and remain explicitly flagged; no CFB missing-injury-count exception is imported.
+Named non-QB absences, including IR, are retained in each recommendation's input flags for audit without assigning an unvalidated point value.
 Missing coverage produces No Play, never a fabricated source timestamp or historical recommendation.
 Source bytes and receipts are retained under `backend/data/processed/source_archive`; each pick retains their hashes, timestamps, input flags, and the pricing weights used.
 

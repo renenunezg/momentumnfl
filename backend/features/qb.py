@@ -104,7 +104,11 @@ def ruled_out(
         & injuries["report_status"].isin(UNAVAILABLE_STATUSES)
     ]
     if as_of is not None and "date_modified" in reports.columns:
-        reports = reports[pd.to_datetime(reports["date_modified"], utc=True).lt(as_of)]
+        dates = pd.to_datetime(reports["date_modified"], utc=True)
+        untimestamped = reports.get(
+            "untimestamped_weekly_report", pd.Series(False, index=reports.index)
+        ).eq(True)
+        reports = reports[(dates.isna() & untimestamped) | dates.le(as_of)]
     return set(reports["gsis_id"].dropna())
 
 
@@ -123,6 +127,40 @@ def depth_chart_starters(
     return available.groupby("team")["gsis_id"].first()
 
 
+def lineup_starters(depth_charts, season, week, as_of, injuries, overrides):
+    """Verified overrides and announcements precede the actual depth-chart order."""
+    from backend.starter_announcements import confirmed
+
+    unavailable = ruled_out(injuries, season, week, as_of)
+    charted = depth_chart_starters(depth_charts, season, week, as_of, unavailable)
+    selected = {} if charted is None else charted.to_dict()
+    evidence = {team: dict(basis="depth_chart_fallback") for team in selected}
+    for team, announcement in confirmed(
+        injuries, season, week, as_of, unavailable
+    ).items():
+        selected[team] = announcement["gsis_id"]
+        evidence[team] = dict(basis="announced_starter", **announcement)
+    overrides = overrides[overrides.season.eq(season) & overrides.week.eq(week)]
+    for row in overrides.itertuples():
+        if row.gsis_id in unavailable:
+            raise ValueError(
+                f"QB override conflicts with confirmed absence: {row.team_abbr}"
+            )
+        announcement = evidence.get(row.team_abbr, {})
+        if (
+            announcement.get("basis") == "announced_starter"
+            and selected[row.team_abbr] != row.gsis_id
+        ):
+            raise ValueError(
+                f"QB override conflicts with announced starter: {row.team_abbr}"
+            )
+        selected[row.team_abbr] = row.gsis_id
+        evidence[row.team_abbr] = dict(
+            basis="verified_override", source_url=getattr(row, "source_url", None)
+        )
+    return pd.Series(selected, dtype=object), evidence
+
+
 def expected_starters(
     qb_games: pd.DataFrame,
     game_index: pd.DataFrame,
@@ -135,7 +173,7 @@ def expected_starters(
 ) -> pd.Series:
     """team -> expected starter gsis_id for the given week.
 
-    Priority: overrides, then dated depth charts with Out/Doubtful QBs removed.
+    Priority: verified overrides, announcements, then available depth-chart order.
     Undated prior-week charts cannot supersede a newer current-season starter.
     The latest available actual starter is the fallback for missing charts.
     """
@@ -180,7 +218,17 @@ def expected_starters(
         if use_overrides
         else pd.DataFrame(columns=["season", "week", "team_abbr", "gsis_id"])
     )
-    overrides = overrides[overrides["season"].eq(season) & overrides["week"].eq(week)]
-    for row in overrides.itertuples():
-        result[row.team_abbr] = row.gsis_id
+    selected, evidence = lineup_starters(
+        depth_charts, season, week, as_of, injuries, overrides
+    )
+    if injuries is not None and "current_status" in injuries:
+        # Prospective inputs must not revive a former starter on a missing chart.
+        return selected
+    # Keep the historical fallback rules for undated weekly charts.
+    for team, starter in selected.items():
+        if (
+            evidence[team]["basis"] != "depth_chart_fallback"
+            or "pos_abb" in depth_charts
+        ):
+            result[team] = starter
     return result

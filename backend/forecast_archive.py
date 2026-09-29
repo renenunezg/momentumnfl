@@ -44,6 +44,7 @@ def prepare(args):
             "teams.parquet",
             f"depth_charts/{args.season}.parquet",
             f"injuries/{args.season}.parquet",
+            f"current_injuries/{args.season}.json",
         )
     ]
     for directory in ("team_games", "qb_games"):
@@ -117,7 +118,11 @@ def replay(path: Path):
         if importlib.metadata.version(package) != version:
             raise ValueError(f"Replay requires {package}=={version}")
     season, week = manifest["season"], manifest["week"]
-    for source in ("schedules.parquet", f"depth_charts/{season}.parquet"):
+    required = ["schedules.parquet", f"depth_charts/{season}.parquet"]
+    current_name = f"current_injuries/{season}.json"
+    if f"backend/data/raw/{current_name}" in manifest["files"]:
+        required.append(current_name)
+    for source in required:
         entry = manifest["files"].get(f"backend/data/raw/{source}", {})
         receipt = entry.get("source_receipt") or {}
         observed = pd.to_datetime(receipt.get("observed_at"), utc=True)
@@ -141,7 +146,7 @@ def replay(path: Path):
                 raise ValueError(f"Corrupt archived input: {name}")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
-        from backend.features.qb import depth_chart_starters, ruled_out
+        from backend.features.qb import lineup_starters
 
         raw = workspace / "backend/data/raw"
         depth = pd.read_parquet(raw / f"depth_charts/{season}.parquet")
@@ -151,15 +156,31 @@ def replay(path: Path):
             )
         injury_path = raw / f"injuries/{season}.parquet"
         injuries = pd.read_parquet(injury_path) if injury_path.exists() else None
-        charted = depth_chart_starters(
-            depth, season, week, cutoff, ruled_out(injuries, season, week, cutoff)
-        )
-        starters = {} if charted is None else charted.to_dict()
+        current_path = raw / f"current_injuries/{season}.json"
+        if current_path.exists():
+            from backend.availability import merge_reports, parse_snapshot
+
+            current, covered = parse_snapshot(
+                json.loads(current_path.read_text()),
+                season,
+                week,
+                cutoff,
+                depth,
+                pd.read_parquet(raw / "teams.parquet"),
+                pd.read_parquet(raw / "schedules.parquet"),
+            )
+            injuries = merge_reports(injuries, current)
+            if any(
+                row[f"{side}_team_abbr"] not in covered
+                for row in manifest["forecasts"]
+                for side in ("home", "away")
+            ):
+                raise ValueError("Missing archived current injury coverage")
         override_path = workspace / "overrides/qb_starters.csv"
+        overrides = pd.DataFrame(columns=["season", "week", "team_abbr", "gsis_id"])
         if override_path.exists():
             overrides = pd.read_csv(override_path)
-            overrides = overrides[overrides.season.eq(season) & overrides.week.eq(week)]
-            starters.update(dict(zip(overrides.team_abbr, overrides.gsis_id)))
+        starters, _ = lineup_starters(depth, season, week, cutoff, injuries, overrides)
         for row in manifest["forecasts"]:
             for side in ("home", "away"):
                 if pd.isna(starters.get(row[f"{side}_team_abbr"])):
