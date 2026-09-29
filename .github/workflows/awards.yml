@@ -1,8 +1,6 @@
 name: awards
 on:
-  # Supabase pg_cron: nfl-awards-dispatch, Wednesdays at 18:00 UTC.
-  repository_dispatch:
-    types: [nfl-awards]
+  # Manual retry; scheduled awards run inside the Tuesday weekly workflow.
   workflow_dispatch:
     inputs:
       season:
@@ -10,8 +8,9 @@ on:
         required: true
         type: number
       week:
-        description: Completed regular-season week (0 before kickoff)
-        required: true
+        description: Regular-season week (-1 auto-detects, 0 before kickoff)
+        default: -1
+        required: false
         type: number
       publish:
         description: Publish after the awards SQL migration has been applied
@@ -27,7 +26,6 @@ concurrency:
 
 jobs:
   run:
-    if: github.event_name == 'workflow_dispatch' || vars.NFL_AWARDS_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -50,56 +48,9 @@ jobs:
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write(f'season={season}\n')
           PYCODE
-      - uses: actions/cache@v4
+      - uses: ./.github/actions/awards
         with:
-          path: |
-            backend/data/raw/awards
-            backend/data/processed/awards
-          key: nfl-awards-v1-${{ steps.context.outputs.season }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: |
-            nfl-awards-v1-${{ steps.context.outputs.season }}-
-      - name: Build weekly awards with recorded source provenance
-        id: build
-        env:
-          AWARD_SEASON: ${{ steps.context.outputs.season }}
-          AWARD_WEEK: ${{ inputs.week }}
-        run: |
-          poetry run python - <<'PY'
-          import os
-          from backend.awards import ingest, pipeline
-          season = int(os.environ['AWARD_SEASON'])
-          week = int(os.environ['AWARD_WEEK']) if os.environ.get('AWARD_WEEK') else -1
-          if not 2015 <= season <= 2100 or not -1 <= week <= 18:
-              raise ValueError('Invalid award forecast window')
-          ingest.ingest(list(range(2009, season)))
-          ingest.ingest([season], refresh=True)
-          if week < 0:
-              import pandas as pd
-              from backend.features.drives import kickoff_utc
-              schedule = ingest.read('schedules', season)
-              schedule = schedule[schedule.game_type.eq('REG')].copy()
-              schedule['available'] = schedule.home_score.notna() & kickoff_utc(schedule).lt(pd.Timestamp.now(tz='UTC') - pd.Timedelta(hours=24))
-              completed = schedule.groupby('week').available.all()
-              week = int(completed[completed].index.max()) if completed.any() else 0
-          if week > 0:
-              from backend.nflverse.data import load_pbp
-              from backend.config import RAW_DIR
-              from backend.etl.store import write_parquet
-              write_parquet(load_pbp([season]), RAW_DIR / 'pbp' / f'{season}.parquet')
-          pipeline.build(season, week)
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              output.write(f'week={week}\n')
-          PY
-      - uses: actions/upload-artifact@v4
-        with:
-          name: nfl-awards-${{ steps.context.outputs.season }}-${{ steps.build.outputs.week }}
-          path: backend/data/processed/awards
-          retention-days: 90
-          if-no-files-found: error
-      - name: Publish explicitly requested award snapshot
-        if: inputs.publish || github.event_name == 'repository_dispatch'
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          AWARD_SEASON: ${{ steps.context.outputs.season }}
-          AWARD_WEEK: ${{ steps.build.outputs.week }}
-        run: poetry run python -m backend publish-awards --season "$AWARD_SEASON" --week "$AWARD_WEEK"
+          season: ${{ steps.context.outputs.season }}
+          week: ${{ inputs.week }}
+          publish: ${{ inputs.publish }}
+          database-url: ${{ secrets.DATABASE_URL }}

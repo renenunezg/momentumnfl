@@ -77,7 +77,13 @@ def main() -> None:
             name, help="independent AP award forecasts"
         )
         award_parser.add_argument("--season", type=int, required=True)
-        award_parser.add_argument("--week", type=int, required=True)
+        award_parser.add_argument(
+            "--week",
+            type=int,
+            required=name != "awards",
+            default=-1,
+            help="Regular-season week; awards defaults to the latest started week",
+        )
         if name == "awards":
             award_parser.add_argument("--as-of")
     for name in ("validate-model", "validate-season-wins"):

@@ -6,7 +6,7 @@ from datetime import timedelta
 
 import pandas as pd
 
-from backend.awards import ingest, value
+from backend.awards import ingest, readiness, value
 from backend.config import STATIC_DIR
 from backend.features.drives import kickoff_utc
 
@@ -113,7 +113,7 @@ def team_rows(schedule: pd.DataFrame) -> pd.DataFrame:
 
 
 def snapshot(
-    season: int, week: int, as_of=None
+    season: int, week: int, as_of=None, *, observed: bool = False
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     schedule = ingest.read("schedules", season)
     schedule = schedule[schedule.game_type.eq("REG")].copy()
@@ -130,12 +130,25 @@ def snapshot(
     )
     if cutoff.tzinfo is None:
         raise ValueError("Award forecast cutoff must include a timezone")
+    if observed:
+        requested = schedule[schedule.week.le(week)]
+        if week and not schedule.week.eq(week).any():
+            raise ValueError(f"Missing award schedule for week {week}")
+        pending = requested[
+            requested.home_score.isna()
+            | requested.away_score.isna()
+            | ~requested.start_date.le(cutoff)
+        ]
+        if not pending.empty:
+            raise ValueError(
+                f"Awards waiting for completed games: {pending.game_id.tolist()}"
+            )
     played = schedule[
         schedule.week.le(week)
         & schedule.home_score.notna()
         & schedule.away_score.notna()
         & schedule.start_date.astype("int64").le(
-            cutoff.value - 24 * 60 * 60 * 1_000_000_000
+            cutoff.value - (0 if observed else 24 * 60 * 60 * 1_000_000_000)
         )
     ]
     scheduled = pd.concat([schedule.home_team, schedule.away_team]).value_counts()
@@ -231,12 +244,16 @@ def snapshot(
         stats.season_type.eq("REG") & stats.game_id.isin(played.game_id)
     ].copy()
     if set(stats.game_id) != set(played.game_id):
-        raise ValueError("Player statistics do not cover every completed game")
+        raise ValueError(
+            "Player statistics do not cover every completed game: "
+            f"{sorted(set(played.game_id) - set(stats.game_id))}"
+        )
     if stats.duplicated(["player_id", "game_id"]).any():
         raise ValueError("Duplicate player-game statistics")
     missing = set(STATS) - set(stats)
     if missing:
         raise ValueError(f"Missing award statistics: {sorted(missing)}")
+    readiness_evidence = readiness.validate(played, stats, season) if observed else None
     identity = stats.sort_values("week").drop_duplicates("player_id", keep="last")
     totals = stats.groupby("player_id")[STATS].sum(min_count=1)
     totals["games"] = stats.groupby("player_id").game_id.nunique()
@@ -304,13 +321,16 @@ def snapshot(
             "cutoff": cutoff.isoformat(),
             "games_included": len(played),
             "source_basis": (
-                "reconstructed historical sources; results available after 24h"
+                "observed sources; both teams stats and final PBP scores checked"
+                if observed
+                else "reconstructed historical sources; results available after 24h"
             ),
             "projection_basis": (
                 "four-game player rate prior; beta(4,4) team record prior"
             ),
             "market_inputs": False,
             "sources": ingest.provenance(season),
+            "readiness": readiness_evidence,
         },
     )
 

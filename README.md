@@ -282,8 +282,8 @@ Both workflows grade completed games immediately after refreshing schedules, eve
 Grading uses `DATABASE_URL` and the same production write guard as publication.
 
 Supabase `pg_cron` owns the NFL schedules; GitHub Actions executes the dispatched jobs.
-After deploying the `repository_dispatch` workflows, apply `ops/install_nfl_crons.sql` to install or update the three named jobs using the existing Vault `github_dispatch_pat`.
-Refresh runs at 10:00 UTC daily in January, February, and August through December; weekly runs at 16:00 UTC Tuesday in those months; awards runs at 18:00 UTC Wednesday in January and September through December.
+After deploying the `repository_dispatch` workflows, apply `ops/install_nfl_crons.sql` to install or update the two named jobs and remove the retired awards job using the existing Vault `github_dispatch_pat`.
+Refresh runs at 10:00 UTC daily in January, February, and August through December; weekly runs at 16:00 UTC Tuesday in those months; awards runs after the weekly publication when `NFL_AWARDS_ENABLED=true`.
 The GitHub schedule triggers are removed to avoid duplicate runs.
 Dispatch removes GitHub's scheduled-event delay, but runner queues and the shared `nfl-production` concurrency group can still delay execution.
 
@@ -387,8 +387,14 @@ Win percentages remain null until a model has eight validation seasons, complete
 Publication atomically writes all seven status records and matching complete boards.
 `publish-awards --season 2026 --week 0` uses the existing production write guard.
 Apply the migration before publication.
-The awards workflow supports an offline manual run by default; its Wednesday schedule only activates when the repository variable `NFL_AWARDS_ENABLED` is explicitly set to `true` after migration and release verification.
-It refreshes current sources, finds the latest fully available regular-season week, and retains reviewable artifacts.
+The Tuesday weekly workflow runs awards after publishing team forecasts when `NFL_AWARDS_ENABLED=true`, reusing that run's play-by-play.
+The standalone awards workflow remains available for manual retries and defaults to building without publication.
+Production selects the latest started regular-season week and requires every game through that week to have both scores, player statistics for both teams on offense and defense, and final play-by-play with matching scores and EPA coverage.
+This includes Monday Night Football as soon as the inputs are ready, without a fixed 24-hour delay.
+Missing inputs fail before rebuilding or publishing a board; the existing published board remains unchanged and the failed workflow identifies the missing games or teams.
+Retry the manual awards workflow with week `-1` and publication enabled once the missing sources arrive.
+Historical evaluations retain their documented 24-hour availability assumption.
+Both workflows share one awards action and retain reviewable artifacts.
 
 ## Production artifact readiness
 

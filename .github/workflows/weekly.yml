@@ -20,7 +20,7 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - name: Resolve NFL season
@@ -174,3 +174,11 @@ jobs:
           path: backend/data/processed/forecast_archive
           retention-days: 90
           if-no-files-found: ignore
+      - name: Build and publish awards after the weekly refresh
+        if: steps.context.outputs.active == 'true' && vars.NFL_AWARDS_ENABLED == 'true'
+        uses: ./.github/actions/awards
+        with:
+          season: ${{ steps.context.outputs.season }}
+          publish: 'true'
+          reuse-pbp: 'true'
+          database-url: ${{ secrets.DATABASE_URL }}

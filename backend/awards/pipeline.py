@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import numpy as np
 import pandas as pd
 
-from backend.awards import AWARDS, MODEL_VERSION, features, ingest, model
+from backend.awards import AWARDS, MODEL_VERSION, features, ingest, model, readiness
 from backend.config import PROCESSED_DIR, STATIC_DIR
 from backend.etl import store
 
@@ -73,8 +73,15 @@ def build(season: int, week: int, as_of=None, awards=None, write=True) -> tuple:
     awards = list(awards or AWARDS)
     if set(awards) - AWARDS.keys():
         raise ValueError("Unknown AP award")
+    # Explicit historical cutoffs retain reconstructed availability.
+    observed = as_of is None
+    as_of = as_of or datetime.now(UTC).isoformat()
+    if week == -1 and not observed:
+        raise ValueError("Historical awards with as_of require an explicit week")
+    if week == -1:
+        week = readiness.resolve_week(ingest.read("schedules", season), as_of)
     players, coaches, provenance = features.snapshot(
-        season, week, as_of or datetime.now(UTC).isoformat()
+        season, week, as_of, observed=observed
     )
     stamp = provenance["cutoff"]
     races, evaluations = history_for(season, week, awards) if week else ({}, {})

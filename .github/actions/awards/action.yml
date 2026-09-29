@@ -1,0 +1,73 @@
+name: Build and publish NFL awards
+description: Require completed games and complete sources before updating awards.
+inputs:
+  season:
+    description: NFL season
+    required: true
+  week:
+    description: Regular-season week, or -1 to resolve from the schedule
+    default: '-1'
+  publish:
+    description: Publish the validated snapshot
+    default: 'false'
+  reuse-pbp:
+    description: Reuse play-by-play ingested by this weekly run
+    default: 'false'
+  database-url:
+    description: Database connection used only for publication
+    required: false
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache@v4
+      with:
+        path: |
+          backend/data/raw/awards
+          backend/data/processed/awards
+        key: nfl-awards-v1-${{ inputs.season }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          nfl-awards-v1-${{ inputs.season }}-
+    - name: Build awards from complete observed sources
+      id: build
+      shell: bash
+      env:
+        AWARD_SEASON: ${{ inputs.season }}
+        AWARD_WEEK: ${{ inputs.week }}
+        REUSE_PBP: ${{ inputs.reuse-pbp }}
+      run: |
+        poetry run python - <<'PYCODE'
+        import os
+        from backend.awards import ingest, pipeline, readiness
+        from datetime import datetime, UTC
+        season = int(os.environ['AWARD_SEASON'])
+        week = int(os.environ['AWARD_WEEK'])
+        if not 2015 <= season <= 2100 or not -1 <= week <= 18:
+            raise ValueError('Invalid award forecast window')
+        ingest.ingest(list(range(2009, season)))
+        ingest.ingest([season], refresh=True)
+        as_of = datetime.now(UTC).isoformat()
+        if week < 0:
+            week = readiness.resolve_week(ingest.read('schedules', season), as_of)
+        if week > 0 and os.environ['REUSE_PBP'] != 'true':
+            from backend.nflverse.data import load_pbp
+            from backend.config import RAW_DIR
+            from backend.etl.store import write_parquet
+            write_parquet(load_pbp([season]), RAW_DIR / 'pbp' / f'{season}.parquet')
+        pipeline.build(season, week)
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+            output.write(f'week={week}\n')
+        PYCODE
+    - uses: actions/upload-artifact@v4
+      with:
+        name: nfl-awards-${{ inputs.season }}-${{ steps.build.outputs.week }}
+        path: backend/data/processed/awards
+        retention-days: 90
+        if-no-files-found: error
+    - name: Publish validated award snapshot
+      if: inputs.publish == 'true'
+      shell: bash
+      env:
+        DATABASE_URL: ${{ inputs.database-url }}
+        AWARD_SEASON: ${{ inputs.season }}
+        AWARD_WEEK: ${{ steps.build.outputs.week }}
+      run: poetry run python -m backend publish-awards --season "$AWARD_SEASON" --week "$AWARD_WEEK"

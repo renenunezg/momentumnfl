@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from backend import publish
-from backend.awards import AWARDS, features, model, pipeline, value
+from backend.awards import AWARDS, features, model, pipeline, readiness, value
 
 
 def test_award_snapshot_excludes_future_stats_and_checks_eligibility(
@@ -105,6 +105,116 @@ def test_award_snapshot_excludes_future_stats_and_checks_eligibility(
     stats = stats[stats.game_id.ne(first.game_id)]
     with pytest.raises(ValueError, match="every completed game"):
         features.snapshot(2022, 1, "2022-09-14T12:00:00Z")
+
+    # Production on Tuesday must include MNF once its actual sources are ready.
+    schedule.loc[schedule.week.eq(1), ["home_score", "away_score"]] = [20, 10]
+    games = schedule[schedule.week.eq(1)]
+    from backend.features.drives import kickoff_utc
+
+    monday = games.loc[kickoff_utc(games).idxmax()]
+    tuesday = "2022-09-13T16:00:00Z"
+    assert (
+        pd.Timestamp(tuesday).value - kickoff_utc(games).max().value < 24 * 3600 * 10**9
+    )
+    stats = pd.DataFrame(
+        [
+            {
+                **dict.fromkeys(features.STATS, 0.0),
+                "player_id": f"player:{team}",
+                "game_id": game.game_id,
+                "season": 2022,
+                "week": 1,
+                "season_type": "REG",
+                "player_display_name": team,
+                "position": "QB",
+                "team": team,
+                "attempts": 20,
+                "def_tackles_solo": 5,
+                "def_tackle_assists": 5,
+            }
+            for game in games.itertuples()
+            for team in (game.home_team, game.away_team)
+        ]
+    )
+    pbp = pd.DataFrame(
+        [
+            {
+                "game_id": game.game_id,
+                "desc": "END GAME",
+                "total_home_score": game.home_score,
+                "total_away_score": game.away_score,
+                "posteam": team,
+                "epa": 0.0,
+            }
+            for game in games.itertuples()
+            for team in (game.home_team, game.away_team)
+        ]
+    )
+    monkeypatch.setattr(readiness, "RAW_DIR", tmp_path)
+    raw = tmp_path / "pbp" / "2022.parquet"
+    raw.parent.mkdir()
+    pbp.to_parquet(raw)
+    monkeypatch.setattr(pipeline, "PROCESSED_DIR", tmp_path / "processed")
+    monkeypatch.setattr(pipeline, "history_for", lambda *args: ({"COY": []}, {}))
+
+    class TuesdayClock:
+        @staticmethod
+        def now(tz):
+            return pd.Timestamp(tuesday).to_pydatetime()
+
+    monkeypatch.setattr(pipeline, "datetime", TuesdayClock)
+
+    def production(*, write=True):
+        return pipeline.build(2022, -1, awards=["COY"], write=write)
+
+    _, meta, _ = production(write=False)
+    audit = json.loads(meta.provenance.iloc[0])
+    assert meta.week.tolist() == [1]
+    assert audit["games_included"] == len(games)
+    assert audit["readiness"]["team_games_checked"] == len(games) * 2
+    _, _, historical = features.snapshot(2022, 1, tuesday)
+    assert historical["games_included"] == len(games) - 1
+    assert historical["readiness"] is None
+    _, historical_meta, _ = pipeline.build(
+        2022, 1, tuesday, awards=["COY"], write=False
+    )
+    assert (
+        json.loads(historical_meta.provenance.iloc[0])["games_included"]
+        == len(games) - 1
+    )
+    assert readiness.resolve_week(schedule, "2022-09-01T12:00:00Z") == 0
+    # A missing Monday result or postponed game must not select an older week.
+    schedule.loc[schedule.game_id.eq(monday.game_id), "away_score"] = np.nan
+    with pytest.raises(ValueError, match="waiting for completed games"):
+        production()
+    schedule.loc[schedule.game_id.eq(monday.game_id), "away_score"] = 10
+    original_day = monday.gameday
+    schedule.loc[schedule.game_id.eq(monday.game_id), "gameday"] = "2022-09-15"
+    with pytest.raises(ValueError, match="waiting for completed games"):
+        production()
+    schedule.loc[schedule.game_id.eq(monday.game_id), "gameday"] = original_day
+    complete_stats = stats.copy()
+    stats = stats[stats.team.ne(monday.away_team)]
+    with pytest.raises(ValueError, match="waiting for player statistics"):
+        production()
+    stats = complete_stats.copy()
+    stats.loc[stats.team.eq(monday.away_team), "def_tackles_solo"] = 0
+    stats.loc[stats.team.eq(monday.away_team), "def_tackle_assists"] = 0
+    with pytest.raises(ValueError, match="waiting for defense statistics"):
+        production()
+    stats = complete_stats
+    for incomplete in (
+        pbp[pbp.game_id.ne(monday.game_id)],
+        pbp.assign(desc="END QUARTER"),
+        pbp.assign(total_home_score=999),
+    ):
+        incomplete.to_parquet(raw)
+        with pytest.raises(ValueError, match="waiting for final play-by-play"):
+            production()
+    pbp.assign(epa=np.nan).to_parquet(raw)
+    with pytest.raises(ValueError, match="waiting for play-by-play EPA"):
+        production()
+    assert not (tmp_path / "processed").exists()
 
 
 def test_competitive_credit_and_chronological_missing_winner_gate():

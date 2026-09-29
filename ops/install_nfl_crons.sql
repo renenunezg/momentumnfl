@@ -9,10 +9,14 @@ begin
   if not exists (select 1 from vault.secrets where name = 'github_dispatch_pat') then
     raise exception 'Missing github_dispatch_pat in Vault';
   end if;
+  -- Awards now run after publication in the Tuesday workflow.
+  for job in select jobid from cron.job where jobname = 'nfl-awards-dispatch'
+  loop
+    perform cron.unschedule(job.jobid);
+  end loop;
   for job in select * from (values
     ('nfl-refresh-dispatch', '0 10 * 1,2,8-12 *', 'nfl-refresh'),
-    ('nfl-weekly-dispatch', '0 16 * 1,2,8-12 2', 'nfl-weekly'),
-    ('nfl-awards-dispatch', '0 18 * 1,9-12 3', 'nfl-awards')
+    ('nfl-weekly-dispatch', '0 16 * 1,2,8-12 2', 'nfl-weekly')
   ) as jobs(name, schedule, event_type)
   loop
     perform cron.schedule(job.name, job.schedule, format($command$
