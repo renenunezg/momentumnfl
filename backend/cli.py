@@ -146,6 +146,17 @@ def main() -> None:
     )
     grade_parser.add_argument("--season", type=int, required=True)
 
+    live_parser = subparsers.add_parser(
+        "live-win-probability",
+        help="score in-progress games from the scoreboard; read only by default",
+    )
+    live_parser.add_argument("--watch", action="store_true")
+    live_parser.add_argument("--interval", type=int, default=60)
+    live_parser.add_argument(
+        "--duration", type=int, help="stop a watch worker after this many seconds"
+    )
+    live_parser.add_argument("--publish", action="store_true")
+
     subparsers.add_parser(
         "ingame-backtest",
         help="backtest the in-game win probability model on cached data",
@@ -1109,7 +1120,41 @@ def run_ingame_backtest(args) -> None:
     )
 
 
+def run_live_win_probability(args) -> None:
+    import logging
+    import sys
+    from datetime import UTC, datetime, timedelta
+
+    from backend import live_feed, live_publish
+    from backend.db import writes_allowed
+    from backend.model.ingame_nflfastr import load_model
+
+    if args.interval < 30:
+        raise SystemExit("--interval must be at least 30 seconds")
+    if args.duration is not None and (args.duration <= 0 or not args.watch):
+        raise SystemExit("--duration requires --watch and a positive number of seconds")
+    if args.publish and not writes_allowed():
+        raise SystemExit("publication requires MOMENTUMNFL_DB_WRITES=1")
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
+    publisher = live_publish.LivePublisher(
+        load_model(),
+        load_games=live_publish.load_games,
+        load_saved=live_publish.load_saved,
+        fetch_states=live_feed.fetch_states,
+        write=live_publish.write_snapshots if args.publish else None,
+        expires_at=(
+            datetime.now(UTC) + timedelta(seconds=args.duration)
+            if args.duration
+            else None
+        ),
+    )
+    live_publish.run(
+        publisher, watch=args.watch, interval=args.interval, duration=args.duration
+    )
+
+
 COMMANDS = {
+    "live-win-probability": run_live_win_probability,
     "ingame-backtest": run_ingame_backtest,
     "replay-forecast": run_replay_forecast,
     "validate-prospective": run_validate_prospective,

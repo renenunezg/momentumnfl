@@ -1,0 +1,46 @@
+name: live win probability
+
+on:
+  # Supabase dispatches around unfinished games only when live publication is
+  # stale or the worker is nearing expiry. One publisher runs at a time.
+  repository_dispatch:
+    types: [nfl-live-win-probability]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nfl-live-win-probability
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install poetry
+        run: pipx install poetry
+      - name: Install dependencies
+        run: poetry sync --no-interaction
+      - name: Restore the pinned in-game model
+        env:
+          INGAME_MODEL_URL: ${{ vars.INGAME_MODEL_URL }}
+        # The loader refuses any file whose checksum is not the pinned export.
+        run: |
+          case "$INGAME_MODEL_URL" in https://*) ;; *) echo "A reviewed HTTPS model URL is required"; exit 1 ;; esac
+          mkdir -p backend/data/processed/ingame
+          curl --fail --location --silent --show-error --max-filesize 10000000 \
+            --output backend/data/processed/ingame/nflfastr_wp_spread.json "$INGAME_MODEL_URL"
+      - name: Publish live snapshots
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        # Hand off before the six-hour runner limit; the queued replacement
+        # starts after this worker exits. Idle slates exit early.
+        run: >-
+          poetry run python -m backend live-win-probability --watch --interval 30
+          --duration 20700 --publish

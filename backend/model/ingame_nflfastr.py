@@ -135,8 +135,9 @@ def win_probability(inputs: pd.DataFrame, model: TreeEnsemble) -> np.ndarray:
     def offense_wins(flip, points, down, distance, yards_to_goal) -> np.ndarray:
         """Score the side with the ball, or its opponent after ``points``."""
         side = np.where(flip, -sign, sign)
-        receives = inputs["offense_receives_second_half"].to_numpy(bool)
-        receives = np.where(flip & first_half, ~receives, receives)
+        # Unknown until the opening kickoff has been seen; stays missing.
+        receives = inputs["offense_receives_second_half"].to_numpy(float)
+        receives = np.where(flip & first_half, 1.0 - receives, receives)
         score = side * inputs["score_margin"].to_numpy(float) - points
         on_home = side > 0
         columns = {
