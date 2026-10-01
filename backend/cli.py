@@ -146,6 +146,11 @@ def main() -> None:
     )
     grade_parser.add_argument("--season", type=int, required=True)
 
+    subparsers.add_parser(
+        "ingame-backtest",
+        help="backtest the in-game win probability model on cached data",
+    )
+
     args = parser.parse_args()
     COMMANDS[args.command](args)
 
@@ -984,7 +989,128 @@ def run_download_forecast(args) -> None:
     print(download(args.run_id, args.destination))
 
 
+def run_ingame_backtest(args) -> None:
+    import numpy as np
+    import pandas as pd
+
+    from backend.config import DEVELOPMENT_SEASONS, HOLDOUT_SEASONS
+    from backend.etl import store
+    from backend.features.ingame import PBP_COLUMNS, build_game_states
+    from backend.model import ingame_backtest, ingame_nflfastr
+
+    anchors = store.read_processed("calibration", "predictions.parquet")
+    states = pd.concat(
+        [
+            build_game_states(
+                store.read_raw("pbp", f"{season}.parquet", columns=PBP_COLUMNS)
+            )
+            for season in (*DEVELOPMENT_SEASONS, *HOLDOUT_SEASONS)
+        ],
+        ignore_index=True,
+    )
+    model = ingame_nflfastr.load_model()
+
+    def holdout_for(margin_column: str) -> pd.DataFrame:
+        frame = ingame_backtest.build_inputs(states, anchors, margin_column)
+        return frame[frame["season"].isin(HOLDOUT_SEASONS)].reset_index(drop=True)
+
+    inputs = ingame_backtest.build_inputs(states, anchors)
+    holdout = holdout_for("model_margin")
+    closing = holdout_for("market_margin")
+
+    # The port must reproduce nflverse's own numbers when given its spread.
+    ported = ingame_nflfastr.win_probability(closing, model)
+    stored = closing["nflverse_vegas_home_wp"].to_numpy(float)
+    overtime = closing["is_overtime"].to_numpy(bool)
+    match = np.abs(ported - stored) < 0.005
+    print(
+        f"port matches nflverse within 0.005 on {match[~overtime].mean():.4f} of "
+        f"regulation states and {match[overtime].mean():.4f} of overtime states"
+    )
+    if match[~overtime].mean() < 0.99:
+        raise ValueError("The nflfastR port does not reproduce nflverse")
+
+    reference = ingame_nflfastr.win_probability(holdout, model)
+    candidates = {
+        "blended_margin": reference,
+        "pure_margin": ingame_nflfastr.win_probability(
+            holdout_for("pure_model_margin"), model
+        ),
+        "closing_line": ported,
+        "score_clock_possession_feed": ingame_nflfastr.win_probability(
+            ingame_backtest.without_situation(holdout), model
+        ),
+        "nflverse_stored_vegas_wp": stored,
+        "nflverse_stored_wp": holdout["nflverse_home_wp"].to_numpy(float),
+    }
+    comparisons = []
+    for label, probability in candidates.items():
+        for scope, rows in (
+            ("all", np.ones(len(holdout), bool)),
+            ("overtime", overtime),
+        ):
+            comparisons.append(
+                ingame_backtest.comparison_row(
+                    label, holdout[rows], probability[rows], reference[rows]
+                )
+                | {"scope": scope}
+            )
+    summary = pd.concat(
+        [
+            ingame_backtest.evaluate(
+                inputs, ingame_nflfastr.win_probability(inputs, model)
+            ),
+            pd.DataFrame(comparisons),
+        ],
+        ignore_index=True,
+    ).assign(model_version=ingame_nflfastr.MODEL_VERSION)
+    store.write_processed(summary, "ingame", "backtest_summary.parquet")
+
+    calibration = summary[summary["summary_type"].eq("calibration")]
+    print(
+        calibration[
+            [
+                "partition",
+                "scope",
+                "group_value",
+                "n_states",
+                "n_games",
+                "mean_predicted",
+                "empirical_rate",
+                "gap",
+                "tolerance",
+                "calibrated",
+                "brier",
+                "log_loss",
+            ]
+        ].to_string(index=False, float_format="%.4f")
+    )
+    print(
+        summary[summary["summary_type"].eq("comparison")][
+            [
+                "scope",
+                "group_value",
+                "n_states",
+                "n_games",
+                "log_loss",
+                "brier",
+                "log_loss_delta",
+                "log_loss_delta_low",
+                "log_loss_delta_high",
+            ]
+        ].to_string(index=False, float_format="%.5f")
+    )
+    print(
+        "The nflfastR model is used as published and its training seasons may "
+        "overlap the development range, so only the holdout is informative. "
+        "The anchor blend uses the closing line, so the pure-margin row bounds "
+        "what a forecast published without one would score. Deltas are "
+        "against the blended margin with 95% intervals from resampling games."
+    )
+
+
 COMMANDS = {
+    "ingame-backtest": run_ingame_backtest,
     "replay-forecast": run_replay_forecast,
     "validate-prospective": run_validate_prospective,
     "download-forecast": run_download_forecast,
