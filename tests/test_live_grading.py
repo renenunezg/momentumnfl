@@ -303,6 +303,7 @@ def test_recommendation_publication_settlement_and_filtered_history(database):
                 home_margin=8.0,
                 market_home_spread=-20.0,
                 model_total=55.0,
+                market_informed_total=50.0,
                 margin_sd=10.0,
                 total_sd=10.0,
                 degrees_of_freedom=7.0,
@@ -356,6 +357,7 @@ def test_recommendation_publication_settlement_and_filtered_history(database):
     )
     forecasts.loc[48, "home_margin"] = -8.0
     forecasts.loc[50, "model_total"] = 35.0
+    forecasts.loc[50, "market_informed_total"] = 40.0
     offers.loc[offers.game_id.eq("pick-049") & offers.market.eq("spreads"), "point"] = (
         0.0
     )
@@ -374,7 +376,7 @@ def test_recommendation_publication_settlement_and_filtered_history(database):
     weights = np.ones(len(MARGINS))
     decisions = build_recommendations(forecasts, offers, weights, decision_at=now)
     assert len(decisions) == 159 and decisions.status.eq("recommended").all()
-    # Totals price from the model total blended toward the posted total.
+    # Totals price from the published total; the posted total is recorded.
     totals = decisions[decisions.market.eq("totals")]
     assert totals.market_total.eq(45.0).all()
     assert totals[~totals.game_id.eq("pick-050")].model_total.eq(50.0).all()
