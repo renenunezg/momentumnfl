@@ -33,7 +33,8 @@ def test_season_forecast_preserves_schedule_and_completed_results():
                     "away_score": np.nan,
                     "gameday": f"2026-09-{week:02d}",
                     "gametime": "13:00",
-                    "spread_line": 1000.0,
+                    # Wins follow the published margin, so a pick-em line keeps 8.5.
+                    "spread_line": 0.0,
                 }
             )
         rotation = [rotation[0], rotation[-1], *rotation[1:-1]]

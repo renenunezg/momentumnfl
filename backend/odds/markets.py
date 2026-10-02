@@ -196,13 +196,13 @@ def compare_priced_offers(
                 )
                 probability = 1.0 - home_cover - push_probability
             elif offer.market == "totals" and offer.selection == "over":
-                edge = projection.model_total - offer.point
+                edge = projection.market_informed_total - offer.point
                 selection = "Over"
                 probability = float(
                     student_t.cdf(edge / total_scale, projection.degrees_of_freedom)
                 )
             elif offer.market == "totals" and offer.selection == "under":
-                edge = offer.point - projection.model_total
+                edge = offer.point - projection.market_informed_total
                 selection = "Under"
                 probability = float(
                     student_t.cdf(edge / total_scale, projection.degrees_of_freedom)
@@ -245,7 +245,8 @@ def compare_priced_offers(
             "away_team": projection.away_team,
             "home_team": projection.home_team,
             "model_home_spread": projection.home_spread,
-            "model_total": projection.model_total,
+            # The published total, blended toward the forecast-time market.
+            "model_total": projection.market_informed_total,
             "margin_sd": projection.margin_sd,
             "total_sd": projection.total_sd,
             "model_as_of": projection.as_of,

@@ -57,6 +57,7 @@ def test_cover_push_probabilities_sum_and_push_mass():
                 "home_margin": 3.0,
                 "home_spread": -3.0,
                 "model_total": 44.0,
+                "market_informed_total": 44.0,
                 "margin_sd": 13.0,
                 "total_sd": 14.0,
                 "degrees_of_freedom": 7.0,

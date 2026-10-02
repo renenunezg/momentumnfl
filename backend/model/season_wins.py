@@ -1,8 +1,10 @@
 """Regular-season wins from the current engine, with correlated season outcomes.
 
-Means use the engine's Student-t win probabilities without game-market blending.
-A Gaussian copula preserves those marginals while sharing the engine's strength
-uncertainty across games. Its season intervals are not yet coverage-calibrated.
+Means use Student-t win probabilities at the published margin, which is
+blended toward the sportsbook line for the games that have one; games without
+a line yet use the engine's own margin. A Gaussian copula preserves those
+marginals while sharing the engine's strength uncertainty across games. Its
+season intervals are not yet coverage-calibrated.
 Future ratings and today's expected QB remain fixed; future ties are omitted.
 """
 
@@ -22,12 +24,13 @@ from backend.model.fit_week import (
     compute_qb_adjustments,
     load_depth_charts,
     load_injuries,
+    market_home_spreads,
 )
 from backend.model.joint_scoring import JointScoringFit, fit_joint_scoring
 from backend.model.preseason import build_preseason_prior, load_win_totals
 from backend.model.projections import LayerConfig, assemble_projections
 
-MODEL_VERSION = "nfl_season_wins_v2"
+MODEL_VERSION = "nfl_season_wins_v3"
 SIMULATIONS = 100_000
 SEED = 20260907
 
@@ -144,7 +147,7 @@ def project_season(
         as_of,
         team_names,
         qb_adjustments,
-        config=LayerConfig(market_weight=0.0),
+        market_home_spreads(remaining),
     )
     teams = sorted(fit.teams)
     index = {team: i for i, team in enumerate(teams)}
@@ -182,7 +185,7 @@ def project_season(
         if residual <= 0 or not np.isfinite(residual):
             raise ValueError("Invalid game residual variance")
         sd = np.sqrt(np.einsum("ij,jk,ik->i", design, covariance, design) + residual)
-        margins = np.array([p.pure_home_margin for p in projections], dtype=float)
+        margins = np.array([p.home_margin for p in projections], dtype=float)
         scale = student_t_scale(
             np.array([p.margin_sd for p in projections]),
             fit.config.student_t_degrees_of_freedom,
@@ -218,6 +221,7 @@ def project_season(
                     "game_id": p.game_id,
                     "home_team": p.home_team_abbr,
                     "away_team": p.away_team_abbr,
+                    "home_margin": p.home_margin,
                     "pure_home_margin": p.pure_home_margin,
                     "home_win_probability": probability,
                     "away_win_probability": 1 - probability,

@@ -394,7 +394,7 @@ def fallback_market_comparisons(projections: pd.DataFrame) -> pd.DataFrame:
             "home_team": projections["home_team"],
             "away_team": projections["away_team"],
             "model_home_spread": projections["home_spread"],
-            "model_total": projections["model_total"],
+            "model_total": projections["market_informed_total"],
             "margin_sd": projections["margin_sd"],
             "total_sd": projections["total_sd"],
             "model_as_of": projections["as_of"],
