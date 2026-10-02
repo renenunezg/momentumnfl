@@ -10,11 +10,10 @@ from scipy.optimize import brentq
 from scipy.stats import t as student_t
 
 from backend.model.distributions import student_t_scale
-from backend.model.market_blend import blend_margin, cover_push_probabilities
-from backend.model.totals import DEFAULT_TOTAL_MARKET_WEIGHT
+from backend.model.market_blend import cover_push_probabilities
 from backend.odds.markets import _american_profit
 
-POLICY_VERSION = "nfl-picks-v4"
+POLICY_VERSION = "nfl-picks-v5"
 # Minimum points the priced line must sit beyond the offered price's
 # break-even line. Measured in margin or total points, the same yardstick for
 # favourites and underdogs, so a mispriced tail cannot clear the gate on one
@@ -118,8 +117,8 @@ def _probabilities(projection, offer, distribution):
     """Blended NFL probabilities, retaining key-number mass and returned ties.
 
     Sides use the published margin (pure model shrunk toward the pre-decision
-    market line). Totals use the model total shrunk toward the median posted
-    total across the decision-time offers, supplied on the projection.
+    market line). Totals use the published total (model total shrunk toward
+    the forecast-time market total), supplied on the projection.
     """
     if offer["market"] in ("spreads", "h2h"):
         point = 0.0 if offer["market"] == "h2h" else offer["point"]
@@ -291,9 +290,10 @@ def _offer_reason(offer, paired, now, start):
 def build_recommendations(projections, offers, distribution, *, decision_at=None):
     """One best eligible side per game and market, or an explicit No Play.
 
-    Sides use the blended (published) margin and totals the model total blended
-    toward the median posted total, so every edge is measured after shrinking
-    toward the market being bet into. Each pick records that market total.
+    Sides use the blended (published) margin and totals the published total,
+    so every edge is measured after shrinking toward the market and every pick
+    agrees with the forecast the site shows. Each pick records the median
+    posted total at decision time.
     Moneylines are priced from the pre-decision market margin moved
     H2H_MODEL_WEIGHT toward the pure model. Everything is priced with the
     empirical dispersion around the priced line, not the engine's wider
@@ -363,16 +363,16 @@ def build_recommendations(projections, offers, distribution, *, decision_at=None
             continue
         game_offers = groups.get(projection.game_id, offers.iloc[:0])
         candidates = priced_candidates(projection, game_offers)
+        # Totals are priced from the published total, the same number the
+        # site shows, the way spreads are priced from the published line. The
+        # median posted total at decision time is recorded for reference.
         market_total = _consensus_total(game_offers)
         priced_projection = projection._replace(
             margin_sd=PRICING_MARGIN_SD, total_sd=PRICING_TOTAL_SD
         )
-        if np.isfinite(market_total) and np.isfinite(projection.model_total):
-            priced_projection = priced_projection._replace(
-                model_total=blend_margin(
-                    projection.model_total, market_total, DEFAULT_TOTAL_MARKET_WEIGHT
-                )
-            )
+        published_total = getattr(projection, "market_informed_total", np.nan)
+        if pd.notna(published_total) and np.isfinite(published_total):
+            priced_projection = priced_projection._replace(model_total=published_total)
         h2h_projection = _h2h_projection(priced_projection)
         for market in MARKETS:
             market_projection = h2h_projection if market == "h2h" else priced_projection
