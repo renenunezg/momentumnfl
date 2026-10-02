@@ -85,6 +85,10 @@ GAME_PROJECTIONS_COLUMNS = [
     "margin_total_correlation",
     "distribution",
     "degrees_of_freedom",
+    "market_total",
+    "market_informed_total",
+    "market_informed_home_points",
+    "market_informed_away_points",
 ]
 MARKET_COMPARISONS_COLUMNS = [
     "game_id",

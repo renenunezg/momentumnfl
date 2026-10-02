@@ -304,6 +304,7 @@ def run_preseason(args) -> None:
         load_depth_charts,
         load_injuries,
         market_home_spreads,
+        market_totals,
         week_slate,
     )
     from backend.model.preseason import MODEL_VERSION, build_preseason_prior
@@ -350,6 +351,7 @@ def run_preseason(args) -> None:
         team_names,
         qb_adjustments,
         market_home_spreads(slate),
+        market_totals=market_totals(slate),
     )
     projections_df = pd.DataFrame(
         [projection.to_record() for projection in projections]

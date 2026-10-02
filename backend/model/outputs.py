@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from math import isfinite
 
+from backend.model.totals import DEFAULT_TOTAL_MARKET_WEIGHT
+
 
 def _validate_identity(abbr: str, name: str, label: str) -> None:
     if not abbr.strip():
@@ -92,6 +94,9 @@ class GameProjection:
     expected points already include the QB, rest, and market-blend layers, so
     home_margin is the published (blended) number; pure_home_margin preserves
     the model's own opinion (QB and rest applied, market not).
+    model_total stays the model's own total, which pick pricing blends toward
+    the decision-time market; the market_informed total and scores are the
+    published forecast, blended toward the forecast-time market total.
     home_margin is positive when the home team is favored.
     home_spread uses sportsbook notation and therefore has the opposite sign.
     """
@@ -121,6 +126,7 @@ class GameProjection:
     pure_home_margin: float | None = None
     market_home_spread: float | None = None
     market_weight: float = 0.0
+    market_total: float | None = None
 
     def __post_init__(self) -> None:
         if not self.game_id.strip():
@@ -159,6 +165,10 @@ class GameProjection:
             )
         if not 0 <= self.market_weight <= 0.5:
             raise ValueError("market_weight must be in [0, 0.5]")
+        if self.market_total is not None and not (
+            isfinite(self.market_total) and self.market_total >= 0
+        ):
+            raise ValueError("market_total must be finite and nonnegative")
 
     @property
     def home_margin(self) -> float:
@@ -171,6 +181,22 @@ class GameProjection:
     @property
     def model_total(self) -> float:
         return self.expected_home_points + self.expected_away_points
+
+    @property
+    def market_informed_total(self) -> float:
+        # A total below the margin would publish a negative score.
+        total = self.model_total
+        if self.market_total is not None:
+            total += DEFAULT_TOTAL_MARKET_WEIGHT * (self.market_total - total)
+        return max(total, abs(self.home_margin))
+
+    @property
+    def market_informed_home_points(self) -> float:
+        return 0.5 * (self.market_informed_total + self.home_margin)
+
+    @property
+    def market_informed_away_points(self) -> float:
+        return 0.5 * (self.market_informed_total - self.home_margin)
 
     @property
     def pure_home_spread(self) -> float | None:
@@ -214,4 +240,8 @@ class GameProjection:
             "margin_total_correlation": self.margin_total_correlation,
             "distribution": "bivariate_student_t",
             "degrees_of_freedom": self.degrees_of_freedom,
+            "market_total": self.market_total,
+            "market_informed_total": self.market_informed_total,
+            "market_informed_home_points": self.market_informed_home_points,
+            "market_informed_away_points": self.market_informed_away_points,
         }

@@ -240,6 +240,26 @@ def test_early_totals_stabilization_preserves_published_spread_and_moneyline(
         qb_adjustments,
         market_spreads,
     )
+    # The published total and scores move toward the market total; the total
+    # that pick pricing reads and the published margin do not.
+    published = assemble_projections(
+        fixed,
+        slate,
+        as_of,
+        {},
+        qb_adjustments,
+        market_spreads,
+        market_totals={g: 40.0 for g in slate.game_id},
+    )
+    for base, row in zip(after, published, strict=True):
+        assert row.model_total == pytest.approx(base.model_total)
+        assert row.market_informed_total == pytest.approx(
+            max(0.5 * (base.model_total + 40.0), abs(base.home_margin))
+        )
+        assert (
+            row.market_informed_home_points - row.market_informed_away_points
+        ) == pytest.approx(base.home_margin)
+        assert base.market_informed_total == pytest.approx(base.model_total)
     for old, new, raw in zip(before, after, uncalibrated, strict=True):
         # Pin the selected location correction after QB/clipping, including
         # the boundary where a total reduction would change the pure margin.

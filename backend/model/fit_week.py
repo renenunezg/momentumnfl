@@ -143,6 +143,15 @@ def market_home_spreads(slate: pd.DataFrame) -> dict[str, float]:
     }
 
 
+def market_totals(slate: pd.DataFrame) -> dict[str, float]:
+    """game_id -> sportsbook total from the nflverse schedule."""
+    return {
+        str(row.game_id): float(row.total_line)
+        for row in slate.itertuples()
+        if pd.notna(getattr(row, "total_line", None))
+    }
+
+
 def fit_and_project(
     season: int,
     week: int,
@@ -184,5 +193,6 @@ def fit_and_project(
         qb_adjustments,
         market_home_spreads(slate),
         layer_config,
+        market_totals(slate),
     )
     return fit, fit.ratings(team_names), projections

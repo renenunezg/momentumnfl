@@ -73,13 +73,16 @@ def assemble_projections(
     qb_adjustments: dict[str, tuple[float, float]] | None = None,
     market_home_spreads: dict[str, float] | None = None,
     config: LayerConfig = LayerConfig(),
+    market_totals: dict[str, float] | None = None,
 ) -> list[GameProjection]:
     """schedule rows need: game_id, season, week, home_team, away_team,
     neutral_site, and optionally start_date, div_game, home_rest, away_rest.
     qb_adjustments maps game_id -> (home_adj, away_adj) in points.
-    market_home_spreads maps game_id -> sportsbook home line."""
+    market_home_spreads maps game_id -> sportsbook home line.
+    market_totals maps game_id -> sportsbook total."""
     qb_adjustments = qb_adjustments or {}
     market_home_spreads = market_home_spreads or {}
+    market_totals = market_totals or {}
     projections = []
     for game in schedule.itertuples():
         game_id = str(game.game_id)
@@ -151,6 +154,7 @@ def assemble_projections(
                     if market_margin is None
                     else capped_weight(config.market_weight)
                 ),
+                market_total=market_totals.get(game_id),
                 margin_sd=engine.margin_sd,
                 total_sd=engine.total_sd,
                 margin_total_correlation=engine.correlation,
