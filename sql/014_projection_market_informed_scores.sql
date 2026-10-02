@@ -10,4 +10,11 @@ alter table nfl.game_projections add column market_informed_total double precisi
 alter table nfl.game_projections add column market_informed_home_points double precision;
 alter table nfl.game_projections add column market_informed_away_points double precision;
 
+-- archive_pregame_projection copies new.* positionally, so the snapshot table
+-- must gain the same columns in the same order in the same transaction.
+alter table nfl.forecast_snapshots add column market_total double precision;
+alter table nfl.forecast_snapshots add column market_informed_total double precision;
+alter table nfl.forecast_snapshots add column market_informed_home_points double precision;
+alter table nfl.forecast_snapshots add column market_informed_away_points double precision;
+
 commit;
