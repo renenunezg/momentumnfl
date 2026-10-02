@@ -38,6 +38,7 @@ TEAM_RATINGS_COLUMNS = [
     "expected_drives",
     "power_rating_sd",
     "missing_input_count",
+    "forecast_alignment_points",
 ]
 TEAM_UNIT_RATINGS_COLUMNS = [
     "season",
@@ -275,8 +276,9 @@ def publish_week(
     archive_bundle: dict | None = None,
 ) -> dict[str, int]:
     """One transaction; read-back counts returned for the caller to print.
-    ratings=None (the projections-only refresh) leaves teams and both ratings
-    tables untouched. market_snapshot appends to the archive keyed by
+    ratings=None leaves teams and team ratings untouched, and
+    unit_ratings=None (the projections-only refresh) leaves unit ratings
+    untouched. market_snapshot appends to the archive keyed by
     (game_id, fetched_at), so a re-run of the same snapshot is idempotent
     and earlier snapshots are never touched."""
     if ratings is not None:

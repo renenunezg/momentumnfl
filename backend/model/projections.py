@@ -1,7 +1,7 @@
 """Assemble published game projections: engine numbers, then the QB and rest
 layers on expected points, then the market blend (total-invariant shift)."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from math import isfinite
 
@@ -10,7 +10,7 @@ import pandas as pd
 
 from backend.model.joint_scoring import JointScoringFit
 from backend.model.market_blend import blend_margin, capped_weight
-from backend.model.outputs import GameProjection
+from backend.model.outputs import GameProjection, TeamRating
 from backend.model.qb_adjustment import DEFAULT_SPAN_DROPBACKS
 from backend.model.totals import TOTALS_LAYER_VERSION, calibrate_total
 
@@ -162,3 +162,38 @@ def assemble_projections(
             )
         )
     return projections
+
+
+def align_ratings_to_forecast(
+    ratings: list[TeamRating], projections: list[GameProjection]
+) -> list[TeamRating]:
+    """Shift team ratings so they reproduce the week's published lines.
+
+    The fitted ratings carry no market, quarterback, or rest information, so
+    their difference plus home field can sit points away from the published
+    line. Each game's gap is split evenly between its two teams (the
+    minimum-norm solution, which also handles a team with two games), leaving
+    teams on a bye unchanged. Offense and defense each take half of a team's
+    shift, so the scoring environment is unchanged.
+    """
+    index = {rating.team_abbr: row for row, rating in enumerate(ratings)}
+    games = np.zeros((len(projections), len(ratings)))
+    gaps = np.zeros(len(projections))
+    for row, game in enumerate(projections):
+        home, away = index[game.home_team_abbr], index[game.away_team_abbr]
+        games[row, home], games[row, away] = 1.0, -1.0
+        gaps[row] = game.home_margin - (
+            ratings[home].power_rating
+            - ratings[away].power_rating
+            + game.home_field_points
+        )
+    shifts = np.linalg.lstsq(games, gaps, rcond=None)[0] if projections else gaps
+    return [
+        replace(
+            rating,
+            offense_points=rating.offense_points + shift / 2.0,
+            defense_points=rating.defense_points + shift / 2.0,
+            forecast_alignment_points=rating.forecast_alignment_points + shift,
+        )
+        for rating, shift in zip(ratings, shifts, strict=True)
+    ]

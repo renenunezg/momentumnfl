@@ -29,6 +29,9 @@ class TeamRating:
 
     Offense is points scored above average.
     Defense is points prevented above average, so higher is better.
+    forecast_alignment_points is the part of the power rating added so that
+    rating difference plus home field equals the team's published line; the
+    market-free fitted rating is the power rating minus it.
     """
 
     season: int
@@ -41,6 +44,7 @@ class TeamRating:
     defense_points: float
     expected_drives: float
     power_rating_sd: float
+    forecast_alignment_points: float = 0.0
 
     def __post_init__(self) -> None:
         _validate_identity(self.team_abbr, self.team, "team")
@@ -50,6 +54,7 @@ class TeamRating:
             defense_points=self.defense_points,
             expected_drives=self.expected_drives,
             power_rating_sd=self.power_rating_sd,
+            forecast_alignment_points=self.forecast_alignment_points,
         )
         if self.season < 1920:
             raise ValueError("season is invalid")
@@ -84,6 +89,7 @@ class TeamRating:
             "scoring_environment": self.scoring_environment,
             "expected_drives": self.expected_drives,
             "power_rating_sd": self.power_rating_sd,
+            "forecast_alignment_points": self.forecast_alignment_points,
         }
 
 

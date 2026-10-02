@@ -22,7 +22,11 @@ from backend.model.preseason import (
     build_preseason_prior,
     load_qb_references,
 )
-from backend.model.projections import LayerConfig, assemble_projections
+from backend.model.projections import (
+    LayerConfig,
+    align_ratings_to_forecast,
+    assemble_projections,
+)
 from backend.model.totals import DEFAULT_TOTALS_CONFIG, TotalsConfig
 
 
@@ -195,4 +199,10 @@ def fit_and_project(
         layer_config,
         market_totals(slate),
     )
-    return fit, fit.ratings(team_names), projections
+    # The fit keeps the market-free ratings; the published ones reproduce
+    # the published lines.
+    return (
+        fit,
+        align_ratings_to_forecast(fit.ratings(team_names), projections),
+        projections,
+    )

@@ -154,7 +154,10 @@ def test_early_totals_stabilization_preserves_published_spread_and_moneyline(
         fit_joint_scoring,
     )
     from backend.model.market_blend import MARGINS
-    from backend.model.projections import assemble_projections
+    from backend.model.projections import (
+        align_ratings_to_forecast,
+        assemble_projections,
+    )
     from backend.model.totals import TotalsConfig
     from backend.recommendations import _h2h_projection, _probabilities
 
@@ -260,6 +263,17 @@ def test_early_totals_stabilization_preserves_published_spread_and_moneyline(
             row.market_informed_home_points - row.market_informed_away_points
         ) == pytest.approx(base.home_margin)
         assert base.market_informed_total == pytest.approx(base.model_total)
+    # Published ratings reproduce every published line.
+    aligned = {
+        rating.team_abbr: rating
+        for rating in align_ratings_to_forecast(fixed.ratings({}), after)
+    }
+    for row in after:
+        assert (
+            aligned[row.home_team_abbr].power_rating
+            - aligned[row.away_team_abbr].power_rating
+            + row.home_field_points
+        ) == pytest.approx(row.home_margin)
     for old, new, raw in zip(before, after, uncalibrated, strict=True):
         # Pin the selected location correction after QB/clipping, including
         # the boundary where a total reduction would change the pure margin.
