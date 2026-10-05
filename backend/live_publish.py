@@ -17,10 +17,10 @@ from datetime import UTC, datetime, timedelta
 import numpy as np
 import pandas as pd
 
+from backend.contracts import SCHEMA
 from backend.features.ingame import KICKOFF, REGULATION_SECONDS, SCRIMMAGE
 from backend.live_feed import LiveState
 from backend.model.ingame_nflfastr import MODEL_VERSION, TreeEnsemble, win_probability
-from backend.publish import SCHEMA
 
 log = logging.getLogger(__name__)
 
@@ -154,7 +154,7 @@ def score_game(
         "game_id": game.game_id,
         "season": game.season,
         "week": game.week,
-        "abstract_state": "Pre",
+        "abstract_state": "Live" if saved.get("abstract_state") == "Live" else "Pre",
         "status": "scheduled",
         "home_team": game.home_team,
         "away_team": game.away_team,
@@ -184,10 +184,15 @@ def score_game(
         result.update(abstract_state="Off", status="off")
         return unavailable("Game was called off")
     if state is None or state.status == "scheduled":
-        if now - game.start > NO_START_LIMIT:
+        if (
+            state is not None
+            and state.status == "scheduled"
+            and result["abstract_state"] != "Live"
+            and now - game.start > NO_START_LIMIT
+        ):
             result["abstract_state"] = "Off"
             return unavailable("Game did not start")
-        return result
+        return unavailable("Scoreboard is temporarily unavailable")
     home, away = state.home_score, state.away_score
     result.update(status=state.status, home_score=home, away_score=away)
     if state.status == "final":

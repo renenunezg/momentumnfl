@@ -34,7 +34,12 @@ def prepare(args):
         args.forecast_archive = None
         return
     paths = list((REPO_ROOT / "backend").rglob("*.py"))
-    paths += list((REPO_ROOT / "backend/data_static").glob("*"))
+    # The deprecated v1 residual CSV is retained for historical research only.
+    paths += [
+        p
+        for p in (REPO_ROOT / "backend/data_static").glob("*")
+        if p.name != "margin_distribution.csv"
+    ]
     paths += [REPO_ROOT / "pyproject.toml", REPO_ROOT / "poetry.lock"]
     paths += [REPO_ROOT / "overrides/qb_starters.csv"]
     paths += [

@@ -33,6 +33,12 @@ def database(request):
     engine = create_engine(url.set(database=name))
     try:
         with engine.begin() as conn:
+            conn.execute(
+                text("""
+                CREATE FUNCTION public.site_revalidate() RETURNS trigger
+                LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$
+            """)
+            )
             for path in sorted((Path(__file__).parents[1] / "sql").glob("*.sql")):
                 if path.name.startswith("004") and getattr(request, "param", False):
                     conn.execute(
@@ -106,6 +112,31 @@ def test_migration_seeds_existing_pregame_forecasts_in_one_transaction(database)
 
 
 def test_published_forecasts_freeze_and_grade_on_identical_cohort(database):
+    from sqlalchemy import inspect
+
+    from backend import publish
+    from backend.awards.pipeline import BOARD_COLUMNS, META_COLUMNS
+    from backend.grading import RESULT_COLUMNS
+
+    contracts = {
+        "teams": publish.TEAMS_COLUMNS,
+        "team_ratings": publish.TEAM_RATINGS_COLUMNS,
+        "team_unit_ratings": publish.TEAM_UNIT_RATINGS_COLUMNS,
+        "game_projections": publish.GAME_PROJECTIONS_COLUMNS,
+        "market_comparisons": publish.MARKET_COMPARISONS_COLUMNS,
+        "backtest_predictions": publish.BACKTEST_COLUMNS,
+        "market_snapshots": publish.MARKET_SNAPSHOTS_COLUMNS,
+        "season_win_totals": publish.SEASON_WIN_TOTALS_COLUMNS,
+        "game_results": RESULT_COLUMNS,
+        "award_boards": BOARD_COLUMNS,
+        "award_model_meta": META_COLUMNS,
+    }
+    inspector = inspect(database)
+    for table, columns in contracts.items():
+        stored = {
+            column["name"] for column in inspector.get_columns(table, schema="nfl")
+        }
+        assert set(columns) <= stored, table
     now = pd.Timestamp.now(tz="UTC")
     kickoff = pd.Timestamp(now.to_pydatetime() + timedelta(seconds=10))
     projections = pd.DataFrame(
@@ -119,8 +150,9 @@ def test_published_forecasts_freeze_and_grade_on_identical_cohort(database):
                 model_version="acceptance",
                 home_team="Home",
                 away_team="Away",
-                home_team_abbr="H",
-                away_team_abbr="A",
+                home_team_abbr="H" + game,
+                away_team_abbr="A" + game,
+                home_field_points=1.0,
                 pure_home_margin=2.0,
                 home_margin=3.0,
             )
@@ -128,8 +160,43 @@ def test_published_forecasts_freeze_and_grade_on_identical_cohort(database):
         ]
     )
 
+    ratings = pd.DataFrame(
+        [
+            dict(
+                season=2026,
+                week=1,
+                as_of=now,
+                team_abbr=team,
+                team=team,
+                offense_points=2.0,
+                defense_points=1.0,
+                power_rating=3.0,
+                forecast_alignment_points=0.0,
+                model_version="acceptance",
+            )
+            for game in ("frozen", "tie", "no-close")
+            for team in ("H" + game, "A" + game)
+        ]
+    )
+
     def publish(frame):
-        return publish_week(database, 2026, 1, None, None, frame, None, None)
+        result = publish_week(database, 2026, 1, None, ratings, frame, None, None)
+        with database.connect() as conn:
+            differences = (
+                conn.execute(
+                    text("""
+                SELECT h.power_rating - a.power_rating
+                     + g.home_field_points - g.home_margin
+                FROM nfl.game_projections g
+                JOIN nfl.team_ratings h ON h.team_abbr = g.home_team_abbr
+                JOIN nfl.team_ratings a ON a.team_abbr = g.away_team_abbr
+            """)
+                )
+                .scalars()
+                .all()
+            )
+        assert all(abs(delta) < 1e-8 for delta in differences)
+        return result
 
     assert publish(projections)["forecast_snapshots"] == 3
     assert publish(projections)["forecast_snapshots"] == 3
@@ -198,8 +265,8 @@ def test_published_forecasts_freeze_and_grade_on_identical_cohort(database):
                 game_type="REG",
                 gameday=eastern.strftime("%Y-%m-%d"),
                 gametime=eastern.strftime("%H:%M:%S.%f"),
-                home_team="H",
-                away_team="A",
+                home_team="H" + game,
+                away_team="A" + game,
                 location="Home",
                 home_score=home,
                 away_score=away,
@@ -217,7 +284,14 @@ def test_published_forecasts_freeze_and_grade_on_identical_cohort(database):
 
     def results(frame):
         return result_frame(
-            frame, 2026, {"H": "Home", "A": "Away"}, pd.Timestamp.now(tz="UTC")
+            frame,
+            2026,
+            {
+                team + game: name
+                for game in ("frozen", "tie", "no-close", "missing")
+                for team, name in (("H", "Home"), ("A", "Away"))
+            },
+            pd.Timestamp.now(tz="UTC"),
         )
 
     original_results = results(schedules)

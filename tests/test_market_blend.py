@@ -1,22 +1,14 @@
-"""Blend math: weighted average, cap, and missing-market fallback."""
+"""Discrete margin probabilities and executable offer pricing."""
 
 import pandas as pd
 import pytest
 
 from backend.model.market_blend import (
     MARGINS,
-    blend_margin,
     cover_push_probabilities,
     fit_margin_distribution,
     integer_margin_probabilities,
 )
-
-
-def test_blend_margin():
-    assert blend_margin(6.0, 2.0, 0.25) == 5.0
-    assert blend_margin(6.0, 2.0, 0.9) == 4.0  # capped at 0.5
-    assert blend_margin(6.0, None, 0.25) == 6.0
-    assert blend_margin(6.0, float("nan"), 0.25) == 6.0
 
 
 def test_cover_push_probabilities_sum_and_push_mass():

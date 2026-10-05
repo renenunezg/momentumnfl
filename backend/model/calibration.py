@@ -40,8 +40,13 @@ from backend.model.preseason import (
     load_qb_references,
     points_per_win,
 )
-from backend.model.projections import MODEL_VERSION, LayerConfig, rest_adjustment
-from backend.model.totals import DEFAULT_TOTALS_CONFIG, calibrate_total
+from backend.model.projections import (
+    MODEL_VERSION,
+    LayerConfig,
+    published_total,
+    rest_adjustment,
+)
+from backend.model.totals import DEFAULT_TOTALS_CONFIG
 
 EVAL_SEASONS = tuple(DEVELOPMENT_SEASONS) + tuple(HOLDOUT_SEASONS)
 QB_SPANS = (250.0, 500.0, 1000.0)
@@ -304,14 +309,12 @@ def apply_layers(predictions: pd.DataFrame, config: LayerConfig) -> pd.DataFrame
     ).to_numpy()
     out["pure_model_margin"] = pure
     out["model_margin"] = blend_margin(pure, out["market_margin"], config.market_weight)
-    out["model_total"] = np.maximum(
-        calibrate_total(
-            out["engine_total"]
-            + config.qb_adjustment_weight
-            * out[f"qb_sum_{int(config.qb_span_dropbacks)}"]
-            + absence_weight * out[absence_sum]
-        ),
-        np.maximum(np.abs(pure), np.abs(out["model_margin"])),
+    out["model_total"] = published_total(
+        out["engine_total"]
+        + config.qb_adjustment_weight * out[f"qb_sum_{int(config.qb_span_dropbacks)}"]
+        + absence_weight * out[absence_sum],
+        pure,
+        out["model_margin"],
     )
     return out
 

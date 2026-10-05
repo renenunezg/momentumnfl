@@ -12,7 +12,11 @@ from backend.model.joint_scoring import JointScoringFit
 from backend.model.market_blend import blend_margin, capped_weight
 from backend.model.outputs import GameProjection, TeamRating
 from backend.model.qb_adjustment import DEFAULT_SPAN_DROPBACKS
-from backend.model.totals import TOTALS_LAYER_VERSION, calibrate_total
+from backend.model.totals import (
+    DEFAULT_TOTALS_CONFIG,
+    TOTALS_LAYER_VERSION,
+    calibrate_total,
+)
 
 # Selected by the calibrate walk-forward (dev 2016-2021): the rest signal is
 # already priced into the market line at this blend weight, so its own
@@ -65,6 +69,16 @@ def rest_adjustment(
     )
 
 
+def published_total(
+    engine_total, pure_margin, published_margin, config=DEFAULT_TOTALS_CONFIG
+):
+    """Calibrate once and preserve nonnegative scores for both output margins."""
+    return np.maximum(
+        calibrate_total(engine_total, config),
+        np.maximum(np.abs(pure_margin), np.abs(published_margin)),
+    )
+
+
 def assemble_projections(
     fit: JointScoringFit,
     schedule: pd.DataFrame,
@@ -113,10 +127,13 @@ def assemble_projections(
         )
         # Calibrate only after QB and environment pooling. Protect both the
         # published margin and the pure-margin score reconstruction at zero.
-        total = max(
-            calibrate_total(expected_home + expected_away, fit.totals_config),
-            abs(published_margin),
-            abs(pure_margin),
+        total = float(
+            published_total(
+                expected_home + expected_away,
+                pure_margin,
+                published_margin,
+                fit.totals_config,
+            )
         )
         expected_home = max(0.0, 0.5 * (total + published_margin))
         expected_away = max(0.0, 0.5 * (total - published_margin))
@@ -176,24 +193,50 @@ def align_ratings_to_forecast(
     teams on a bye unchanged. Offense and defense each take half of a team's
     shift, so the scoring environment is unchanged.
     """
-    index = {rating.team_abbr: row for row, rating in enumerate(ratings)}
-    games = np.zeros((len(projections), len(ratings)))
-    gaps = np.zeros(len(projections))
-    for row, game in enumerate(projections):
-        home, away = index[game.home_team_abbr], index[game.away_team_abbr]
-        games[row, home], games[row, away] = 1.0, -1.0
-        gaps[row] = game.home_margin - (
-            ratings[home].power_rating
-            - ratings[away].power_rating
-            + game.home_field_points
-        )
-    shifts = np.linalg.lstsq(games, gaps, rcond=None)[0] if projections else gaps
+    frame = pd.DataFrame([rating.to_record() for rating in ratings])
+    games = pd.DataFrame([game.to_record() for game in projections])
+    aligned = align_published_ratings(frame, games)
     return [
         replace(
             rating,
-            offense_points=rating.offense_points + shift / 2.0,
-            defense_points=rating.defense_points + shift / 2.0,
-            forecast_alignment_points=rating.forecast_alignment_points + shift,
+            offense_points=row.offense_points,
+            defense_points=row.defense_points,
+            forecast_alignment_points=row.forecast_alignment_points,
         )
-        for rating, shift in zip(ratings, shifts, strict=True)
+        for rating, row in zip(ratings, aligned.itertuples(), strict=True)
     ]
+
+
+def align_published_ratings(
+    ratings: pd.DataFrame, projections: pd.DataFrame
+) -> pd.DataFrame:
+    """Align ratings to accepted forecasts, including frozen games."""
+    out = ratings.copy()
+    if out.empty or projections.empty:
+        return out
+    previous = out["forecast_alignment_points"].fillna(0.0).to_numpy(dtype=float)
+    pure = out["power_rating"].to_numpy(dtype=float) - previous
+    index = {team: i for i, team in enumerate(out["team_abbr"])}
+    games = np.zeros((len(projections), len(out)))
+    gaps = np.zeros(len(projections))
+    for row, game in enumerate(projections.itertuples()):
+        home, away = index[game.home_team_abbr], index[game.away_team_abbr]
+        games[row, home], games[row, away] = 1.0, -1.0
+        gaps[row] = game.home_margin - (
+            pure[home] - pure[away] + game.home_field_points
+        )
+    if not np.isfinite(gaps).all():
+        raise ValueError(
+            "Rating alignment requires finite accepted margins and home fields"
+        )
+    shifts = np.linalg.lstsq(games, gaps, rcond=None)[0]
+    if not np.allclose(games @ shifts, gaps, atol=1e-8):
+        raise ValueError(
+            "Accepted forecasts cannot be represented by one set of team ratings"
+        )
+    delta = shifts - previous
+    out["offense_points"] += delta / 2
+    out["defense_points"] += delta / 2
+    out["power_rating"] = pure + shifts
+    out["forecast_alignment_points"] = shifts
+    return out

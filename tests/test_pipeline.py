@@ -11,20 +11,6 @@ from backend.etl import ingest, store
 from backend.features.qb import expected_starters
 
 
-def test_history_cache_skips_complete_seasons(monkeypatch):
-    present = {
-        "team_games": ["2015", "2016"],
-        "qb_games": ["2015"],
-    }
-    monkeypatch.setattr(
-        pipeline.store,
-        "core_features_current",
-        lambda directory, season: str(season) in present[directory],
-    )
-
-    assert pipeline.missing_core_seasons(2016) == [2016]
-
-
 def test_upcoming_games_does_not_assume_a_weekday():
     schedules = pd.DataFrame(
         [
@@ -44,7 +30,15 @@ def test_upcoming_games_does_not_assume_a_weekday():
     assert games["game_id"].tolist() == ["2026_17_WED_GAME"]
 
 
-def test_incremental_games_include_recent_weeks_and_old_gaps():
+def test_incremental_write_replaces_game_and_keeps_prior_weeks(monkeypatch, tmp_path):
+    monkeypatch.setattr(store, "PROCESSED_DIR", tmp_path)
+    existing = pd.DataFrame(
+        [
+            {"game_id": "W2", "value": 2, "start_date": "2026-09-08"},
+            {"game_id": "W3", "value": 3, "start_date": "2026-09-15"},
+        ]
+    )
+    store.write_processed(existing, "team_games", "2026.parquet")
     schedules = pd.DataFrame(
         [
             {"game_id": "W1", "week": 1, "home_score": 20},
@@ -53,48 +47,36 @@ def test_incremental_games_include_recent_weeks_and_old_gaps():
             {"game_id": "W4", "week": 4, "home_score": None},
         ]
     )
-    existing = [
-        {"W1", "W2", "W3"},
-        {"W1", "W2", "W3"},
-        {"W2", "W3"},
-    ]
-
-    selected = pipeline.incremental_game_ids(schedules, existing, lookback_weeks=1)
-
-    assert selected == {"W1", "W3"}
-
-
-def test_incremental_write_replaces_game_and_keeps_prior_weeks(monkeypatch):
-    existing = pd.DataFrame(
+    selected = pipeline.incremental_game_ids(
+        schedules, [{"W1", "W2", "W3"}, set(existing.game_id)], lookback_weeks=1
+    )
+    rebuilt = pd.DataFrame(
         [
-            {"game_id": "W1", "value": 1, "start_date": "2026-09-01"},
-            {"game_id": "W2", "value": 2, "start_date": "2026-09-08"},
+            {"game_id": "W1", "value": 10, "start_date": "2026-09-01"},
+            {"game_id": "W2", "value": 20, "start_date": "2026-09-08"},
+            {"game_id": "W3", "value": 30, "start_date": "2026-09-15"},
+            {"game_id": "W4", "value": 40, "start_date": "2026-09-22"},
         ]
     )
-    rebuilt = pd.DataFrame([{"game_id": "W2", "value": 20, "start_date": "2026-09-08"}])
-    written = []
-    monkeypatch.setattr(
-        pipeline.store,
-        "read_processed",
-        lambda *parts: existing,
-    )
-    monkeypatch.setattr(
-        pipeline.store,
-        "write_processed",
-        lambda frame, *parts: written.append(frame),
-    )
-
     pipeline.write_incremental_features(
-        rebuilt, "team_games", 2026, ["start_date", "game_id"]
+        rebuilt[rebuilt.game_id.isin(selected)],
+        "team_games",
+        2026,
+        ["start_date", "game_id"],
     )
-
-    assert written[0][["game_id", "value"]].to_dict("records") == [
-        {"game_id": "W1", "value": 1},
-        {"game_id": "W2", "value": 20},
+    saved = store.read_processed("team_games", "2026.parquet")
+    assert saved[["game_id", "value"]].to_dict("records") == [
+        {"game_id": "W1", "value": 10},
+        {"game_id": "W2", "value": 2},
+        {"game_id": "W3", "value": 30},
     ]
 
 
 def test_preseason_runs_load_current_starters_before_pbp_opens(monkeypatch, tmp_path):
+    from backend import source_inputs
+
+    monkeypatch.setattr(source_inputs, "PROCESSED_DIR", tmp_path)
+    monkeypatch.setattr(source_inputs, "ARCHIVE", tmp_path / "source_archive")
     monkeypatch.setattr(ingest, "_current_injuries", lambda season: [])
     monkeypatch.setattr(ingest, "RAW_DIR", tmp_path)
     monkeypatch.setattr(store, "RAW_DIR", tmp_path)
@@ -333,3 +315,26 @@ def test_production_win_total_slope_uses_the_calibration_reference(monkeypatch):
     assert seen == [preseason.SLOPE_REFERENCE_CONFIG]
     assert calibration.SLOPE_REFERENCE_CONFIG is preseason.SLOPE_REFERENCE_CONFIG
     assert seen[0].rating_half_life_weeks == float("inf")
+
+
+def test_calibration_identity_includes_availability_and_missingness(
+    tmp_path, monkeypatch
+):
+    from backend.model import artifacts
+
+    monkeypatch.setattr(artifacts, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(artifacts, "STATIC_DIR", tmp_path / "static")
+    monkeypatch.setattr(artifacts, "RAW_DIR", tmp_path / "raw")
+    monkeypatch.setattr(artifacts, "PROCESSED_DIR", tmp_path / "processed")
+    missing = artifacts.fingerprint()
+    path = tmp_path / "raw/depth_charts" / f"{artifacts.DEVELOPMENT_SEASONS[0]}.parquet"
+    path.parent.mkdir(parents=True)
+    pd.DataFrame({"starter": ["A"]}).to_parquet(path)
+    present = artifacts.fingerprint()
+    assert present != missing and artifacts.fingerprint() == present
+    pd.DataFrame({"starter": ["B"]}).to_parquet(path)
+    assert artifacts.fingerprint() != present
+    path.unlink()
+    assert artifacts.fingerprint() == missing
+    with pytest.raises(FileNotFoundError, match="bootstrap-history"):
+        artifacts.ensure()

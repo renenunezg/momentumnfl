@@ -423,3 +423,10 @@ These code paths do not themselves confirm a successful remote run, migration, o
 ## License
 
 MIT. See `LICENSE`.
+
+
+Database bootstrap installs the shared `momentumweb/sql/001_site_revalidate.sql` before the ordered sport migrations.
+Its Supabase pg_net and Vault secret prerequisites are owned by the website repository.
+The `backend/data_static/margin_distribution.csv` file is deprecated historical research data and is excluded from new forecast bundles.
+Production calibration uses `margin_distribution_v2.csv` with a manifest bound to numerical dependencies, historical depth charts, injuries, and feature inputs.
+A cold runner restores those availability inputs through `bootstrap-history`; absent coverage fails explicitly rather than silently changing the fitted population.

@@ -83,6 +83,8 @@ jobs:
           path: |
             backend/data/processed/team_games
             backend/data/processed/qb_games
+            backend/data/raw/depth_charts
+            backend/data/raw/injuries
           key: nfl-core-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'backend/nflverse/data.py', 'backend/features/drives.py', 'backend/features/qb.py', 'backend/features/scoring.py') }}-refresh-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             nfl-core-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'backend/nflverse/data.py', 'backend/features/drives.py', 'backend/features/qb.py', 'backend/features/scoring.py') }}-
@@ -103,6 +105,8 @@ jobs:
           path: |
             backend/data/processed/team_games
             backend/data/processed/qb_games
+            backend/data/raw/depth_charts
+            backend/data/raw/injuries
           key: ${{ steps.core-cache.outputs.cache-primary-key }}
       - name: Restore approved model artifacts
         if: steps.upcoming.outputs.run == 'true'

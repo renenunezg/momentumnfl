@@ -47,3 +47,4 @@ jobs:
           tests/test_pipeline.py tests/test_database_write_guard.py
           tests/test_live_grading.py tests/test_forecast_archive.py
           tests/test_current_availability.py
+          tests/test_live_win_probability.py tests/test_ingame.py

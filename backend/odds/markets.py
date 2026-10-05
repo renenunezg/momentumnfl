@@ -10,9 +10,9 @@ import numpy as np
 import pandas as pd
 from scipy.stats import t as student_t
 
+from backend.contracts import MARKET_SNAPSHOTS_COLUMNS
 from backend.model.distributions import student_t_scale
 from backend.model.market_blend import cover_push_probabilities
-from backend.publish import MARKET_SNAPSHOTS_COLUMNS
 
 REVIEW_EDGE_POINTS = 4.0
 

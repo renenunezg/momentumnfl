@@ -6,6 +6,7 @@ import pandas as pd
 
 from backend.features.drives import build_team_games
 from backend.features.qb import build_qb_games
+from backend.features.scoring import build_model_games
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -14,6 +15,10 @@ def test_2023_opener_aggregates():
     pbp = pd.read_parquet(FIXTURES / "pbp_2023_01_DET_KC.parquet")
     schedules = pd.read_parquet(FIXTURES / "schedule_2023_01_DET_KC.parquet")
     tg = build_team_games(pbp, schedules)
+    game = build_model_games(tg, schedules).iloc[0]
+    assert game.closing_spread == -4.0
+    assert game.actual_margin == -1.0
+    assert game.model_week == 1
     assert len(tg) == 1
     row = tg.iloc[0]
     assert row.home_team == "KC" and row.away_team == "DET"

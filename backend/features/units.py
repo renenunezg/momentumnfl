@@ -83,14 +83,12 @@ def build_unit_games(
             pfr_pass.groupby(["game_id", "team"])
             .agg(
                 pressures_allowed=("times_pressured", "sum"),
-                sacks_allowed=("times_sacked", "sum"),
             )
             .reset_index()
         )
         out = out.merge(pressures, on=["game_id", "team"], how="left")
     else:
         out["pressures_allowed"] = np.nan
-        out["sacks_allowed"] = np.nan
 
     out[["season", "week"]] = (
         out["game_id"].str.extract(r"^(?P<season>\d{4})_(?P<week>\d{2})_").astype(int)

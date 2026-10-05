@@ -3,8 +3,8 @@
 import numpy as np
 import pandas as pd
 
+from backend.contracts import prepare_rows as _prepare
 from backend.features.drives import kickoff_utc
-from backend.publish import _prepare
 
 RESULT_COLUMNS = [
     "game_id",

@@ -2,8 +2,10 @@
 
 import hashlib
 import json
+import platform
 from dataclasses import replace
 from datetime import UTC, datetime
+from importlib.metadata import version
 
 import pandas as pd
 
@@ -12,6 +14,7 @@ from backend.config import (
     HISTORY_START_SEASON,
     HOLDOUT_SEASONS,
     PROCESSED_DIR,
+    RAW_DIR,
     REPO_ROOT,
     STATIC_DIR,
 )
@@ -21,21 +24,43 @@ MANIFEST_PATH = PROCESSED_DIR / "calibration" / "production_manifest.json"
 
 
 def fingerprint() -> str:
-    paths = [REPO_ROOT / "pyproject.toml", REPO_ROOT / "backend/config.py"]
+    paths = [
+        REPO_ROOT / "pyproject.toml",
+        REPO_ROOT / "poetry.lock",
+        REPO_ROOT / "backend/config.py",
+    ]
     for directory in ("backend/model", "backend/features", "backend/etl"):
         paths.extend(sorted((REPO_ROOT / directory).glob("*.py")))
     paths.extend(sorted(STATIC_DIR.glob("win_total*")))
     paths.append(STATIC_DIR / "preseason_qbs.csv")
+    for kind in ("depth_charts", "injuries"):
+        paths.extend(
+            RAW_DIR / kind / f"{season}.parquet"
+            for season in (*DEVELOPMENT_SEASONS, *HOLDOUT_SEASONS)
+        )
     for kind in ("team_games", "qb_games"):
         paths.extend(
             PROCESSED_DIR / kind / f"{season}.parquet"
             for season in range(HISTORY_START_SEASON, max(HOLDOUT_SEASONS) + 1)
         )
     digest = hashlib.sha256()
+    digest.update(json.dumps(numerical_environment(), sort_keys=True).encode())
     for path in paths:
         digest.update(str(path.relative_to(REPO_ROOT)).encode())
-        digest.update(path.read_bytes())
+        digest.update(
+            b"present\0" + path.read_bytes() if path.exists() else b"missing\0"
+        )
     return digest.hexdigest()
+
+
+def numerical_environment() -> dict:
+    return {
+        "python": platform.python_version(),
+        **{
+            package: version(package)
+            for package in ("numpy", "pandas", "scipy", "pyarrow")
+        },
+    }
 
 
 def ensure(force: bool = False) -> dict:
@@ -50,6 +75,19 @@ def ensure(force: bool = False) -> dict:
     from backend.model.preseason import PreseasonConfig
     from backend.model.projections import LayerConfig
 
+    required = [
+        RAW_DIR / kind / f"{season}.parquet"
+        for kind in ("depth_charts", "injuries")
+        for season in (*DEVELOPMENT_SEASONS, *HOLDOUT_SEASONS)
+    ]
+    missing = [
+        str(path.relative_to(REPO_ROOT)) for path in required if not path.exists()
+    ]
+    if missing:
+        raise FileNotFoundError(
+            "Run bootstrap-history to restore calibration availability inputs: "
+            + ", ".join(missing)
+        )
     source_hash = fingerprint()
     paths = [PRICING_PATH, PROCESSED_DIR / "calibration/predictions.parquet"]
     if not force and MANIFEST_PATH.exists() and all(p.exists() for p in paths):
@@ -80,6 +118,8 @@ def ensure(force: bool = False) -> dict:
     )
     manifest = {
         "source_hash": source_hash,
+        "numerical_environment": numerical_environment(),
+        "availability_policy": "archived_season_inputs_required_v1",
         "created_at": datetime.now(UTC).isoformat(),
         "training_seasons": list(DEVELOPMENT_SEASONS),
         "fixed_model_config": True,

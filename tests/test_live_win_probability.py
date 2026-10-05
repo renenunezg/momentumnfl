@@ -66,16 +66,28 @@ def test_polling_starts_at_kickoff_and_each_game_closes_once():
     assert latest["2026_05_NE_BUF"]["home_win_probability"] > 0.8
     assert latest["2026_05_NYJ_CHI"]["abstract_state"] == "Off"
 
+    del board[("BUF", "NE")]
+    assert publisher.poll(KICKOFF + timedelta(hours=3, minutes=1))
+    latest = {p["game_id"]: p for p in written}
+    assert latest["2026_05_NE_BUF"]["abstract_state"] == "Live"
+    publisher = LivePublisher(
+        MODEL,
+        load_games=lambda start, end: games,
+        load_saved=lambda ids: latest,
+        fetch_states=fetch_states,
+        write=written.extend,
+    )
+
     # A tie is a final with no winner, and a game that never starts is closed.
     board[("BUF", "NE")] = LiveState("final", 20, 20)
-    assert not publisher.poll(KICKOFF + timedelta(hours=3, minutes=1))
+    assert not publisher.poll(KICKOFF + timedelta(hours=3, minutes=2))
     latest = {p["game_id"]: p for p in written}
     assert latest["2026_05_NE_BUF"]["home_win_probability"] == 0.5
     assert [p["s"] for p in latest["2026_05_NE_BUF"]["history"]] == [0, 1350, 3600]
     assert latest["2026_05_JAX_CIN"]["abstract_state"] == "Off"
 
     spent, rows = len(calls), len(written)
-    assert not publisher.poll(KICKOFF + timedelta(hours=3, minutes=2))
+    assert not publisher.poll(KICKOFF + timedelta(hours=3, minutes=3))
     assert (len(calls), len(written)) == (spent, rows)
 
 

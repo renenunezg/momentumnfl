@@ -32,6 +32,21 @@ def missing_core_seasons(through_season: int) -> list[int]:
 
 def bootstrap_history(through_season: int) -> list[int]:
     """Build missing historical core features without retaining raw PBP."""
+    # Availability is consumed by calibration even when core features are cached.
+    for season in range(HISTORY_START_SEASON, through_season + 1):
+        for kind, loader in (
+            ("depth_charts", data.load_depth_charts),
+            ("injuries", data.load_injuries),
+        ):
+            path = RAW_DIR / kind / f"{season}.parquet"
+            if not path.exists():
+                frame = loader([season])
+                if frame.empty:
+                    raise ValueError(
+                        f"Missing historical {kind} for {season}; "
+                        "no silent availability fallback"
+                    )
+                store.write_parquet(frame, path)
     missing = missing_core_seasons(through_season)
     if not missing:
         print(f"history cache complete through {through_season}")

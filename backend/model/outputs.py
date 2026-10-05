@@ -100,8 +100,8 @@ class GameProjection:
     expected points already include the QB, rest, and market-blend layers, so
     home_margin is the published (blended) number; pure_home_margin preserves
     the model's own opinion (QB and rest applied, market not).
-    model_total stays the model's own total, which pick pricing blends toward
-    the decision-time market; the market_informed total and scores are the
+    model_total stays the model's own total; pick pricing uses the
+    market_informed total and scores, which are the
     published forecast, blended toward the forecast-time market total.
     home_margin is positive when the home team is favored.
     home_spread uses sportsbook notation and therefore has the opposite sign.

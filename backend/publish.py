@@ -1,4 +1,5 @@
-"""The only Supabase writer. Writes use per-key DELETE + append (whole-table
+"""Pregame serving and evaluation publication. Writes use per-key DELETE + append
+(whole-table
 DELETE + append for the full backtest refresh) so RLS, policies, and indexes
 survive; to_sql(if_exists="replace") would drop them. Every statement is
 schema-qualified so a lost search_path can never redirect a write. Timestamps
@@ -10,216 +11,22 @@ import pandas as pd
 from sqlalchemy import MetaData, Table, text
 from sqlalchemy.dialects.postgresql import insert
 
-from backend.etl import store
-
-SCHEMA = "nfl"
-
-TEAMS_COLUMNS = [
-    "team_abbr",
-    "team",
-    "color",
-    "alternate_color",
-    "logo_light",
-    "logo_dark",
-]
-TEAM_RATINGS_COLUMNS = [
-    "season",
-    "week",
-    "as_of",
-    "model_version",
-    "team_abbr",
-    "team",
-    "conference",
-    "division",
-    "offense_points",
-    "defense_points",
-    "power_rating",
-    "scoring_environment",
-    "expected_drives",
-    "power_rating_sd",
-    "missing_input_count",
-    "forecast_alignment_points",
-]
-TEAM_UNIT_RATINGS_COLUMNS = [
-    "season",
-    "week",
-    "as_of",
-    "model_version",
-    "team_abbr",
-    "team",
-    "rush_offense",
-    "pass_offense",
-    "rush_defense",
-    "pass_defense",
-    "pass_block",
-    "run_block",
-    "special_teams",
-]
-GAME_PROJECTIONS_COLUMNS = [
-    "game_id",
-    "season",
-    "week",
-    "as_of",
-    "model_version",
-    "start_date",
-    "home_team_abbr",
-    "home_team",
-    "away_team_abbr",
-    "away_team",
-    "neutral_site",
-    "div_game",
-    "home_field_points",
-    "expected_home_points",
-    "expected_away_points",
-    "home_qb_adjustment",
-    "away_qb_adjustment",
-    "rest_adjustment",
-    "pure_home_margin",
-    "pure_home_spread",
-    "market_home_spread",
-    "market_weight",
-    "home_margin",
-    "home_spread",
-    "model_total",
-    "margin_sd",
-    "total_sd",
-    "margin_total_correlation",
-    "distribution",
-    "degrees_of_freedom",
-    "market_total",
-    "market_informed_total",
-    "market_informed_home_points",
-    "market_informed_away_points",
-]
-MARKET_COMPARISONS_COLUMNS = [
-    "game_id",
-    "start_date",
-    "home_team",
-    "away_team",
-    "model_home_spread",
-    "model_total",
-    "margin_sd",
-    "total_sd",
-    "model_as_of",
-    "market_available",
-    "priced_offer_available",
-    "executable_offer_available",
-    "review_status",
-    "recommendation_status",
-    "best_offer_market",
-    "best_offer_selection",
-    "best_offer_point",
-    "best_offer_price",
-    "best_offer_provider",
-    "best_offer_provider_key",
-    "best_offer_provider_last_update",
-    "best_offer_event_link",
-    "best_offer_market_link",
-    "best_offer_bet_link",
-    "best_offer_edge_points",
-    "best_offer_edge_standardized",
-    "best_offer_model_cover_probability",
-    "best_offer_model_fair_price",
-    "best_offer_expected_value_per_unit",
-]
-MARKET_SNAPSHOTS_COLUMNS = [
-    "game_id",
-    "season",
-    "week",
-    "fetched_at",
-    "home_spread",
-    "total",
-    "spread_books",
-    "total_books",
-]
-BACKTEST_COLUMNS = [
-    "game_id",
-    "season",
-    "week",
-    "week_index",
-    "season_type",
-    "home_team",
-    "away_team",
-    "neutral_site",
-    "home_points",
-    "away_points",
-    "closing_spread",
-    "model_margin",
-    "pure_model_margin",
-    "actual_margin",
-]
-
-SEASON_WIN_TOTALS_COLUMNS = [
-    "season",
-    "as_of",
-    "model_version",
-    "team_abbr",
-    "team",
-    "conference",
-    "division",
-    "wins",
-    "losses",
-    "ties",
-    "games_played",
-    "games_remaining",
-    "projected_wins",
-    "remaining_expected_wins",
-    "wins_p10",
-    "wins_p50",
-    "wins_p90",
-    "simulation_count",
-    "simulation_seed",
-    "ratings_through_week",
-    "ratings_through_date",
-    "schedule_fetched_at",
-    "depth_chart_as_of",
-    "sportsbook_win_total",
-    "sportsbook_source_name",
-    "sportsbook_source_date",
-    "sportsbook_source_url",
-]
-
-TABLES = (
-    "teams",
-    "team_ratings",
-    "team_unit_ratings",
-    "game_projections",
-    "market_comparisons",
-    "backtest_predictions",
-    "market_snapshots",
-    "season_win_totals",
-    "forecast_snapshots",
-    "game_results",
+from backend.contracts import (
+    BACKTEST_COLUMNS,
+    GAME_PROJECTIONS_COLUMNS,
+    MARKET_COMPARISONS_COLUMNS,
+    MARKET_SNAPSHOTS_COLUMNS,
+    SCHEMA,
+    SEASON_WIN_TOTALS_COLUMNS,
+    TABLES,
+    TEAM_RATINGS_COLUMNS,
+    TEAM_UNIT_RATINGS_COLUMNS,
+    TEAMS_COLUMNS,
 )
-
-_TIMESTAMP_COLUMNS = {
-    "source_fetched_at",
-    "decision_at",
-    "forecast_as_of",
-    "market_fetched_at",
-    "provider_last_update",
-    "provider_start_date",
-    "graded_at",
-    "result_source_at",
-    "observed_at",
-    "as_of",
-    "start_date",
-    "model_as_of",
-    "best_offer_provider_last_update",
-    "fetched_at",
-    "ratings_through_date",
-    "schedule_fetched_at",
-    "depth_chart_as_of",
-}
-
-
-def _prepare(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
-    out = df.reindex(columns=columns)
-    for column in columns:
-        if column in _TIMESTAMP_COLUMNS:
-            out[column] = pd.to_datetime(out[column], utc=True, format="ISO8601")
-        out[column] = out[column].astype(object).where(out[column].notna(), None)
-    return out
+from backend.contracts import (
+    prepare_rows as _prepare,
+)
+from backend.etl import store
 
 
 def _append(frame: pd.DataFrame, table: str, conn, **kwargs) -> None:
@@ -300,6 +107,25 @@ def publish_week(
                 "Season win totals must contain all 32 teams for this season"
             )
     with engine.begin() as conn:
+        conn.execute(text("SELECT pg_advisory_xact_lock(20261002, 3)"))
+        # The database archives revisions and rejects late/stale replacements.
+        # Upsert keeps one public row per game even when its week changes.
+        _upsert(
+            _prepare(projections, GAME_PROJECTIONS_COLUMNS), "game_projections", conn
+        )
+        if ratings is not None:
+            from backend.model.projections import align_published_ratings
+
+            effective = pd.read_sql_query(
+                text(
+                    f"SELECT * FROM {SCHEMA}.game_projections "
+                    "WHERE season = :s AND week = :w"
+                ),
+                conn,
+                params=week_key,
+            )
+            ratings = align_published_ratings(ratings, effective)
+
         if season_win_totals is not None:
             conn.execute(
                 text(f"DELETE FROM {SCHEMA}.season_win_totals WHERE season = :s"),
@@ -333,11 +159,6 @@ def publish_week(
                 "team_unit_ratings",
                 conn,
             )
-        # The database archives revisions and rejects late/stale replacements.
-        # Upsert keeps one public row per game even when its week changes.
-        _upsert(
-            _prepare(projections, GAME_PROJECTIONS_COLUMNS), "game_projections", conn
-        )
         if market_comparisons is not None:
             conn.execute(text(f"DELETE FROM {SCHEMA}.market_comparisons"))
             _append(
