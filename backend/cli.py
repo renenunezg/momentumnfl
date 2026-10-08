@@ -638,6 +638,7 @@ def run_qbs(args) -> None:
 
 
 def run_odds(args) -> None:
+    import os
     from datetime import timedelta
 
     import pandas as pd
@@ -670,7 +671,16 @@ def run_odds(args) -> None:
         }
     )
     distribution = load_pricing()
-    client = OddsAPIClient()
+    # Fallback switch: ODDS_SOURCE=espn when The Odds API quota is exhausted.
+    source = os.getenv("ODDS_SOURCE", "odds_api")
+    if source == "espn":
+        from backend.odds.espn import EspnOddsClient
+
+        client = EspnOddsClient()
+    elif source == "odds_api":
+        client = OddsAPIClient()
+    else:
+        raise ValueError(f"ODDS_SOURCE must be 'odds_api' or 'espn', got {source!r}")
     window_from = pd.to_datetime(slate["start_date"]).min().to_pydatetime()
     window_to = pd.to_datetime(slate["start_date"]).max().to_pydatetime() + timedelta(
         hours=6

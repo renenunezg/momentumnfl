@@ -147,6 +147,7 @@ jobs:
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           ODDS_API_BOOKMAKERS: ${{ vars.ODDS_API_BOOKMAKERS }}
+          ODDS_SOURCE: ${{ vars.ODDS_SOURCE || 'odds_api' }}
       - name: Report unavailable priced markets
         if: steps.odds.outcome == 'failure'
         run: echo "::warning::Odds refresh failed. Publishing model forecasts without a fresh priced-market snapshot."
