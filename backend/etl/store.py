@@ -51,8 +51,11 @@ def core_features_current(directory: str, season: int) -> bool:
     path = PROCESSED_DIR / directory / f"{season}.parquet"
     if not path.exists() or "feature_version" not in pq.read_schema(path).names:
         return False
-    versions = pd.read_parquet(path, columns=["feature_version"])
-    return not versions.empty and versions["feature_version"].eq(2).all()
+    # Read by path through pyarrow: pandas hands pyarrow a Python file object,
+    # and its worker threads can still be inside it when a fast command exits.
+    table = pq.read_table(path, columns=["feature_version"])
+    versions = table.column("feature_version").to_pandas()
+    return not versions.empty and versions.eq(2).all()
 
 
 def _read_seasons(
