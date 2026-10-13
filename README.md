@@ -33,7 +33,8 @@ Speculation, negation, ambiguous wording and previous-game announcements cannot 
 The selection basis, reported statement, source link, publication time and observation time are retained with the forecast inputs.
 An accepted announcement survives later routine player notes for that same game; a newer definite benching report or the end of its stated injury condition invalidates it.
 Verified starter overrides remain supported, but a conflict with an announcement or confirmed absence stops selection for review.
-Out, Doubtful, injured-reserve and physically-unable-to-perform statuses remove a QB from the expected lineup and activate the existing confirmed-absence adjustment; coefficients are unchanged.
+Out, Doubtful, injured-reserve, physically-unable-to-perform and suspension statuses remove a QB from the expected lineup and activate the existing confirmed-absence adjustment.
+A status the parser does not recognize withholds a team's QB coverage only when it sits on a quarterback; on any other position it is ignored, because it says nothing about who starts at quarterback.
 The full provider response, provider timestamp and local observation timestamp are archived before the forecast cutoff.
 The current snapshot must be no more than 24 hours old, match the season, cover the team and resolve its reported QB identities against the depth-chart ESPN/GSIS IDs.
 Missing, stale, malformed or unresolved coverage produces No Play rather than being interpreted as healthy; a fetch failure fails the input-refresh job.

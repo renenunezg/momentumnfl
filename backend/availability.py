@@ -14,7 +14,13 @@ import requests
 from backend.config import RAW_DIR
 
 INJURY_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/injuries"
-UNAVAILABLE = {"Out", "Doubtful", "Injured Reserve", "Physically Unable to Perform"}
+UNAVAILABLE = {
+    "Out",
+    "Doubtful",
+    "Injured Reserve",
+    "Physically Unable to Perform",
+    "Suspension",
+}
 STATUSES = UNAVAILABLE | {"Active", "Questionable", "Probable"}
 MAX_AGE = timedelta(hours=24)
 
@@ -88,7 +94,12 @@ def parse_snapshot(snapshot, season, week, as_of, depth, teams, schedules=None):
                 or date > observed
                 or status not in STATUSES
             ):
-                blocked.add(team)
+                # Only a quarterback entry the feed cannot describe withholds
+                # the team's QB coverage. A roster status this parser does not
+                # know on another position (Reserve-Ret, for example) says
+                # nothing about who starts at quarterback.
+                if position in (None, "", "QB"):
+                    blocked.add(team)
                 continue
             if position == "QB" and gsis is None:
                 blocked.add(team)

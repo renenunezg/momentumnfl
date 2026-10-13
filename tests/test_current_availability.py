@@ -248,6 +248,16 @@ def test_current_feed_corrects_lagging_weekly_report_and_fails_closed(
     unresolved["payload"]["injuries"][0]["injuries"][0]["athlete"]["links"] = []
     _, coverage = availability.parse_snapshot(unresolved, 2026, 4, cutoff, depth, teams)
     assert "TB" not in coverage
+    # A roster status the parser does not know says nothing about the QB when
+    # it sits on another position; on a quarterback it still withholds coverage.
+    for position, covered_expected in (("DE", True), ("QB", False)):
+        odd = copy.deepcopy(frozen)
+        entry = copy.deepcopy(odd["payload"]["injuries"][0]["injuries"][0])
+        entry["athlete"]["position"] = dict(abbreviation=position)
+        entry["status"] = "Reserve-Ret"
+        odd["payload"]["injuries"][0]["injuries"].append(entry)
+        _, coverage = availability.parse_snapshot(odd, 2026, 4, cutoff, depth, teams)
+        assert ("TB" in coverage) == covered_expected
 
     # Routine later news must not erase a previously observed announcement.
     daniels["shortComment"] = "Daniels practiced fully Tuesday."
