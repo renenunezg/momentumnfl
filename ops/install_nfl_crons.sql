@@ -14,10 +14,19 @@ begin
   loop
     perform cron.unschedule(job.jobid);
   end loop;
+  -- A cron tick that never starts ('job startup timeout' while the database
+  -- is starved, as on 2026-10-06 through 2026-10-08) sends nothing to GitHub,
+  -- so each dispatch has retry ticks that post only while no tick for that
+  -- event has succeeded today. Both workflows tolerate a late dispatch: the
+  -- refresh is schedule-aware and the weekly run is a full republish.
   for job in select * from (values
-    ('nfl-refresh-dispatch', '0 10 * 1,2,8-12 *', 'nfl-refresh'),
-    ('nfl-weekly-dispatch', '0 16 * 1,2,8-12 2', 'nfl-weekly')
-  ) as jobs(name, schedule, event_type)
+    ('nfl-refresh-dispatch', '0 10 * 1,2,8-12 *', 'nfl-refresh', null),
+    ('nfl-refresh-dispatch-retry', '30 10,12 * 1,2,8-12 *', 'nfl-refresh',
+     'nfl-refresh-dispatch'),
+    ('nfl-weekly-dispatch', '0 16 * 1,2,8-12 2', 'nfl-weekly', null),
+    ('nfl-weekly-dispatch-retry', '30 16,18 * 1,2,8-12 2', 'nfl-weekly',
+     'nfl-weekly-dispatch')
+  ) as jobs(name, schedule, event_type, retries_for)
   loop
     perform cron.schedule(job.name, job.schedule, format($command$
       select net.http_post(
@@ -31,8 +40,16 @@ begin
         ),
         body := jsonb_build_object('event_type', %L),
         timeout_milliseconds := 15000
-      );
-    $command$, job.event_type));
+      ) %s;
+    $command$, job.event_type, case when job.retries_for is null then '' else format($guard$
+      where not exists (
+        select 1 from cron.job_run_details as run
+        join cron.job using (jobid)
+        where cron.job.jobname in (%L, %L)
+          and run.status = 'succeeded'
+          and run.start_time >= date_trunc('day', now())
+      )
+    $guard$, job.retries_for, job.name) end));
   end loop;
 end $$;
 
