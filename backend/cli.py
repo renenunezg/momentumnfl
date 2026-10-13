@@ -727,10 +727,23 @@ def run_grade(args) -> None:
         fetched_at,
     )
     print(grade_season(db.engine, results, args.season))
-    from backend.publish import grade_picks
+    from backend.performance import (
+        build_graded_games,
+        closing_totals,
+        compute_performance_metrics,
+    )
+    from backend.publish import fetch_frozen_forecasts, grade_picks, publish_performance
+
+    schedules = store.read_raw("schedules.parquet")
+    graded = build_graded_games(
+        fetch_frozen_forecasts(db.engine, args.season),
+        closing_totals(schedules, args.season),
+    )
+    metrics = compute_performance_metrics(graded)
+    print(publish_performance(db.engine, args.season, graded, metrics))
 
     schedule = recommendation_schedule(
-        store.read_raw("schedules.parquet"), args.season, store.team_names(), fetched_at
+        schedules, args.season, store.team_names(), fetched_at
     )
     print({"recommendations_graded": grade_picks(db.engine, schedule, args.season)})
 

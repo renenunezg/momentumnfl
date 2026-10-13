@@ -310,6 +310,10 @@ Postponing a game after its previously published kickoff does not reopen its fro
 The `nfl.live_predictions` view selects the last eligible pregame revision and recomputes errors when source results or closing lines are corrected.
 It includes games with missing forecasts or closes so coverage remains visible; pure-model, blended-model, and closing-line MAE use exactly the same complete cohort.
 Live tracking starts in 2026 and is kept separate from `nfl.backtest_predictions`.
+
+Apply `sql/019_performance_grading.sql` before deploying the performance grader or the frontend performance page that reads it.
+`grade` then rebuilds `nfl.graded_games` (the last pregame revision, the nflverse closing spread and total, and the final score, one row per completed game) and `nfl.performance_metrics` (MAE, RMSE, bias, interval coverage, Brier score, and the gap to the closing line per prediction source and segment: overall, week, projected margin size, QB adjustment size, and divisional games).
+The site reads those precomputed rows directly and never aggregates games itself.
 The closing benchmark is the final nflverse schedule line, not an earlier Odds API snapshot relabeled as a close.
 
 Run the PostgreSQL lifecycle acceptance with `NFL_TEST_DATABASE_URL` pointing to a local disposable PostgreSQL admin database and `poetry run pytest -q tests/test_live_grading.py tests/test_publish_contract.py`.

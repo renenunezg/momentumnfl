@@ -487,3 +487,57 @@ def grade_picks(engine, schedule, season):
                 _prepare(grades, SETTLEMENT_COLUMNS).to_dict("records"),
             )
         return len(grades)
+
+
+FROZEN_FORECAST_SQL = f"""
+select r.game_id, r.season, r.week, r.season_type, r.start_date, r.neutral_site,
+  r.home_team_abbr, r.away_team_abbr, r.home_team, r.away_team,
+  r.home_points, r.away_points, r.closing_spread,
+  r.source as score_source, r.source_fetched_at,
+  p.week as forecast_week, p.as_of as forecast_as_of,
+  p.recorded_at as forecast_recorded_at, p.model_version, p.div_game,
+  p.home_qb_adjustment, p.away_qb_adjustment, p.rest_adjustment,
+  p.pure_home_margin, p.home_margin as market_informed_home_margin,
+  p.market_weight, p.market_home_spread as forecast_market_home_spread,
+  p.model_total, p.market_informed_total, p.margin_sd, p.total_sd,
+  p.distribution, p.degrees_of_freedom
+from {SCHEMA}.game_results r
+join lateral (
+  select f.* from {SCHEMA}.forecast_snapshots f
+  where f.game_id = r.game_id and f.season = r.season
+    and f.home_team_abbr = r.home_team_abbr
+    and f.away_team_abbr = r.away_team_abbr
+    and f.recorded_at < r.start_date and f.as_of < r.start_date
+    and f.recorded_at < f.start_date
+  order by f.recorded_at desc, f.snapshot_id desc limit 1
+) p on true
+where r.season = :season and r.start_date < now()
+order by r.start_date, r.game_id
+"""
+
+
+def fetch_frozen_forecasts(engine, season: int) -> pd.DataFrame:
+    """Completed games joined to their last pregame forecast snapshot. The
+    same eligibility rule as the live_predictions view, with every frozen
+    field grading needs."""
+    with engine.connect() as conn:
+        return pd.read_sql(text(FROZEN_FORECAST_SQL), conn, params={"season": season})
+
+
+def publish_performance(
+    engine, season: int, graded: pd.DataFrame, metrics: pd.DataFrame
+) -> dict:
+    """Replace the season's grading record and aggregates in one transaction."""
+    from backend.performance import GRADED_GAME_COLUMNS, PERFORMANCE_METRIC_COLUMNS
+
+    with engine.begin() as conn:
+        for table in ("graded_games", "performance_metrics"):
+            conn.execute(
+                text(f"DELETE FROM {SCHEMA}.{table} WHERE season = :season"),
+                {"season": season},
+            )
+        _append(_prepare(graded, GRADED_GAME_COLUMNS), "graded_games", conn)
+        _append(
+            _prepare(metrics, PERFORMANCE_METRIC_COLUMNS), "performance_metrics", conn
+        )
+    return {"graded_games": len(graded), "performance_metrics": len(metrics)}
