@@ -9,7 +9,12 @@ import pandas as pd
 from backend.config import DEVELOPMENT_SEASONS, STATIC_DIR
 from backend.etl import store
 from backend.features.drives import build_team_games
-from backend.features.qb import build_qb_games, expected_starters, ruled_out
+from backend.features.qb import (
+    build_qb_games,
+    expected_starters,
+    identification_basis,
+    ruled_out,
+)
 from backend.features.scoring import build_model_games
 from backend.model import qb_adjustment
 from backend.model.joint_scoring import DEFAULT_CONFIG, fit_joint_scoring
@@ -185,11 +190,17 @@ def validate_season_wins(data, seasons, weeks=(1, 9), simulations=10_000):
                 PreseasonConfig().win_total_blend if dated_preseason else 0,
             )
             unavailable = ruled_out(data.injuries[season], season, week, cutoff)
+            basis = identification_basis(data.depth_charts[season])
             adjustments = {
                 r.game_id: tuple(
-                    context.adjustment(t, starters.get(t), layer.qb_adjustment_weight)
-                    + (layer.qb_absence_weight - layer.qb_adjustment_weight)
-                    * context.absence_delta(t, starters.get(t), unavailable)
+                    context.adjustment(
+                        t,
+                        starters.get(t),
+                        layer.qb_weight(
+                            basis,
+                            context.confirmed_absence(t, starters.get(t), unavailable),
+                        ),
+                    )
                     for t in (r.home_team, r.away_team)
                 )
                 for r in schedule.itertuples()

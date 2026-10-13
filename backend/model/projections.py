@@ -24,18 +24,27 @@ from backend.model.totals import (
 REST_POINTS_PER_DAY = 0.0
 REST_CLIP_DAYS = 7.0
 DEFAULT_MARKET_WEIGHT = 0.5
-# Selected on development seasons 2016-2021 with the engine held fixed and
-# injury-gated starter identification. The QB selection gate scores
-# pure-model log loss before the market blend; the 2022-2025 retrospective
-# window could not separate 0.25 from 0.75 and did not reject this choice.
 DEFAULT_QB_SPAN_DROPBACKS = DEFAULT_SPAN_DROPBACKS
-DEFAULT_QB_ADJUSTMENT_WEIGHT = 0.25
-# Selected on 2016-2021 pregame confirmed-absence cases with team ratings fixed.
-# The locked 2022-2025 retrospective check improved that cohort's margin MAE.
-DEFAULT_QB_ABSENCE_WEIGHT = 0.5
+# How the expected starter was identified before kickoff. The weight on a QB
+# delta follows the reliability of that identification: a misidentified
+# starter produces a large delta that carries no information.
+QB_BASIS_DATED = "dated_snapshot"
+QB_BASIS_PROXY = "prior_week_proxy"
+# Selected on development seasons 2016-2021 by least squares of the closing
+# line's move away from the engine margin on the raw QB delta, with the
+# outcome regression as the independent check (calibration.select_qb_weights).
+# Dated: development games whose pregame starters proved correct, standing in
+# for dated snapshot charts (2025: 95% correct); the only basis production
+# uses. Proxy: every development game under undated prior-week charts (83%
+# correct), used by the historical backtest only. Proxy absence: proxy games
+# with the incumbent confirmed Out or Doubtful. The earlier grid-selected
+# 0.25 measured the proxy era's misidentification, not the value of a QB.
+DEFAULT_QB_WEIGHT_DATED = 0.90
+DEFAULT_QB_WEIGHT_PROXY = 0.45
+DEFAULT_QB_WEIGHT_PROXY_ABSENCE = 0.89
 # The QB layer version names the starter-identification rule and its weight;
 # the preseason producer appends the same suffix to its own version.
-QB_LAYER_VERSION = "qb_v7"
+QB_LAYER_VERSION = "qb_v8"
 MODEL_VERSION = f"nfl_joint_scoring_{QB_LAYER_VERSION}_{TOTALS_LAYER_VERSION}"
 
 
@@ -47,16 +56,26 @@ class LayerConfig:
     market_weight: float = DEFAULT_MARKET_WEIGHT
     rest_points_per_day: float = REST_POINTS_PER_DAY
     qb_span_dropbacks: float = DEFAULT_QB_SPAN_DROPBACKS
-    qb_adjustment_weight: float = DEFAULT_QB_ADJUSTMENT_WEIGHT
-    qb_absence_weight: float = DEFAULT_QB_ABSENCE_WEIGHT
+    qb_weight_dated: float = DEFAULT_QB_WEIGHT_DATED
+    qb_weight_proxy: float = DEFAULT_QB_WEIGHT_PROXY
+    qb_weight_proxy_absence: float = DEFAULT_QB_WEIGHT_PROXY_ABSENCE
 
     def __post_init__(self) -> None:
         if not isfinite(self.qb_span_dropbacks) or self.qb_span_dropbacks <= 0:
             raise ValueError("qb_span_dropbacks must be finite and positive")
-        if not 0 <= self.qb_adjustment_weight <= 1:
-            raise ValueError("qb_adjustment_weight must be between 0 and 1")
-        if not 0 <= self.qb_absence_weight <= 1:
-            raise ValueError("qb_absence_weight must be between 0 and 1")
+        for name in ("qb_weight_dated", "qb_weight_proxy", "qb_weight_proxy_absence"):
+            if not 0 <= getattr(self, name) <= 1.5:
+                raise ValueError(f"{name} must be between 0 and 1.5")
+
+    def qb_weight(self, basis: str, confirmed_absence: bool) -> float:
+        """Weight on a QB delta given how its starter was identified."""
+        if basis == QB_BASIS_DATED:
+            return self.qb_weight_dated
+        if basis != QB_BASIS_PROXY:
+            raise ValueError(f"Unknown QB identification basis: {basis}")
+        if confirmed_absence:
+            return self.qb_weight_proxy_absence
+        return self.qb_weight_proxy
 
 
 def rest_adjustment(

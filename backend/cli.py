@@ -463,10 +463,13 @@ def run_validate_qb(args) -> None:
         apply_layers,
         margin_log_loss,
         rescore_qb_layer,
-        select_qb_absence_weight,
-        select_qb_layer,
+        select_qb_weights,
     )
-    from backend.model.projections import DEFAULT_MARKET_WEIGHT, LayerConfig
+    from backend.model.projections import (
+        DEFAULT_MARKET_WEIGHT,
+        QB_BASIS_DATED,
+        LayerConfig,
+    )
 
     frozen = store.read_processed("calibration", "predictions.parquet")
     if getattr(args, "memory", False):
@@ -474,25 +477,18 @@ def run_validate_qb(args) -> None:
 
         print(f"Development memory selection: {select_qb_memory(frozen)}")
     rescored = rescore_qb_layer(frozen)
-    previous = apply_layers(
-        rescore_qb_layer(frozen, anchor_preseason=False), LayerConfig()
-    )
-    selected = replace(select_qb_layer(rescored), market_weight=DEFAULT_MARKET_WEIGHT)
-    candidate = apply_layers(rescored, selected)
-    print(f"Development-selected QB layer: {selected}")
-    print(
-        f"Confirmed-absence development selection: {select_qb_absence_weight(rescored)}"
-    )
+    selected, report = select_qb_weights(rescored)
+    selected = replace(selected, market_weight=DEFAULT_MARKET_WEIGHT)
+    print(f"Development-selected QB weights: {selected}")
+    for key, value in report.items():
+        print(f"  {key}: {value}")
     print("Pregame expected-QB reconstruction; engine/artifacts unchanged.")
     print("Historical market QB references include weekly lineup proxies.")
+    span = int(LayerConfig().qb_span_dropbacks)
     for label, frame in (
         ("frozen", frozen),
-        ("unanchored", previous),
-        (
-            "ordinary_absence_weight",
-            apply_layers(rescored, replace(LayerConfig(), qb_absence_weight=0.25)),
-        ),
-        ("candidate", candidate),
+        ("production defaults", apply_layers(rescored, LayerConfig())),
+        ("candidate", apply_layers(rescored, selected)),
     ):
         for split, mask in (
             ("development", frame["season"].between(2016, 2021)),
@@ -508,16 +504,22 @@ def run_validate_qb(args) -> None:
                 f"blended MAE {blended_mae:.4f}, closing MAE {market_mae:.4f}, "
                 f"blended NLL {margin_log_loss(subset, 1.0, 7.0):.5f}"
             )
-            span = int(LayerConfig().qb_span_dropbacks)
-            absence = subset[
-                subset[f"qb_absence_adj_{span}"].ne(0)
-                | subset[f"qb_absence_sum_{span}"].ne(0)
-            ]
-            if not absence.empty:
-                errors = absence.pure_model_margin - absence.actual_margin
+            cohorts = {
+                "confirmed absences": subset[
+                    subset[f"qb_absence_adj_{span}"].ne(0)
+                    | subset[f"qb_absence_sum_{span}"].ne(0)
+                ],
+                "dated charts": subset[subset["qb_input_basis"].eq(QB_BASIS_DATED)],
+            }
+            for name, cohort in cohorts.items():
+                if cohort.empty:
+                    continue
+                errors = cohort.pure_model_margin - cohort.actual_margin
+                closing = cohort.market_margin - cohort.actual_margin
                 print(
-                    f"  confirmed absences: {len(absence)} games, "
+                    f"  {name}: {len(cohort)} games, "
                     f"pure MAE {errors.abs().mean():.4f}, "
+                    f"closing MAE {closing.abs().mean():.4f}, "
                     f"signed bias {errors.mean():.4f}"
                 )
     if getattr(args, "context", False):
@@ -532,6 +534,7 @@ def run_qbs(args) -> None:
     import pandas as pd
 
     from backend.etl import store
+    from backend.features import qb as qb_features
     from backend.features.qb import expected_starters
     from backend.model.fit_week import load_depth_charts, load_injuries
     from backend.model.joint_scoring import DEFAULT_CONFIG
@@ -574,11 +577,12 @@ def run_qbs(args) -> None:
         as_of=as_of,
         injuries=load_injuries(season, week, as_of),
     ).get(team)
+    weight = layer.qb_weight(qb_features.identification_basis(depth), False)
     rows = []
     for row in roster.itertuples():
         if pd.isna(row.gsis_id):
             continue
-        adjustment = context.adjustment(team, row.gsis_id, layer.qb_adjustment_weight)
+        adjustment = context.adjustment(team, row.gsis_id, weight)
         rows.append(
             {
                 "quarterback": row.player_name,
@@ -595,14 +599,15 @@ def run_qbs(args) -> None:
                 "team_baseline": context.baselines.get(team),
                 "adjustment": adjustment,
                 "change_from_starter": adjustment
-                - context.adjustment(team, starter, layer.qb_adjustment_weight),
+                - context.adjustment(team, starter, weight),
             }
         )
     print(f"{team}, {season} week {week}; depth chart {roster['dt'].max()}")
     print(f"Recorded history begins in {HISTORY_START_SEASON}.")
     print(
         "Strength/baseline: raw points above replacement; "
-        f"adjustment = {layer.qb_adjustment_weight:g} * (strength - baseline)."
+        f"adjustment = {weight:g} * (strength - baseline) on this chart basis; "
+        "a confirmed absence under an undated chart uses the absence weight."
     )
     print(pd.DataFrame(rows).round(3).to_string(index=False))
     if getattr(args, "context", False):

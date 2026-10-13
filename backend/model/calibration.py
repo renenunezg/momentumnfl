@@ -22,7 +22,7 @@ from backend.config import (
     HOLDOUT_SEASONS,
 )
 from backend.etl import store
-from backend.features.qb import expected_starters, ruled_out
+from backend.features.qb import expected_starters, identification_basis, ruled_out
 from backend.model import qb_adjustment as qb_layer
 from backend.model.distributions import student_t_scale
 from backend.model.fit_week import load_depth_charts, load_injuries
@@ -42,6 +42,8 @@ from backend.model.preseason import (
 )
 from backend.model.projections import (
     MODEL_VERSION,
+    QB_BASIS_DATED,
+    QB_BASIS_PROXY,
     LayerConfig,
     published_total,
     rest_adjustment,
@@ -233,7 +235,7 @@ def generate_walk_forward(
                     "home_expected_qb": expected.get(str(game.home_team)),
                     "away_expected_qb": expected.get(str(game.away_team)),
                     "market_input_basis": "closing_line_conditional_benchmark",
-                    "qb_input_basis": "dated_snapshot_or_prior_week_proxy",
+                    "qb_input_basis": identification_basis(data.depth_charts[season]),
                     "model_version": MODEL_VERSION,
                     "engine_margin": engine.expected_home - engine.expected_away,
                     "engine_total": engine.expected_home + engine.expected_away,
@@ -293,17 +295,26 @@ def generate_walk_forward(
 def apply_layers(predictions: pd.DataFrame, config: LayerConfig) -> pd.DataFrame:
     """Rescore engine predictions with the production output layers."""
     out = predictions.copy()
-    qb_column = f"qb_adj_{int(config.qb_span_dropbacks)}"
+    span = int(config.qb_span_dropbacks)
+    qb_column = f"qb_adj_{span}"
     if qb_column not in out.columns:
         raise KeyError(f"{qb_column} not precomputed")
-    absence_weight = config.qb_absence_weight - config.qb_adjustment_weight
-    absence_column = f"qb_absence_adj_{int(config.qb_span_dropbacks)}"
-    absence_sum = f"qb_absence_sum_{int(config.qb_span_dropbacks)}"
+    absence_column = f"qb_absence_adj_{span}"
+    absence_sum = f"qb_absence_sum_{span}"
     if absence_column not in out or absence_sum not in out:
         raise ValueError("Regenerate forecasts with pregame QB absence inputs")
+    if not out["qb_input_basis"].isin((QB_BASIS_DATED, QB_BASIS_PROXY)).all():
+        raise ValueError("Regenerate forecasts with per-season QB identification bases")
+    # Dated charts take one weight; undated proxies take the proxy weight plus
+    # the confirmed-absence increment on the ruled-out side's delta.
+    dated = out["qb_input_basis"].eq(QB_BASIS_DATED).to_numpy()
+    weight = np.where(dated, config.qb_weight_dated, config.qb_weight_proxy)
+    absence_weight = np.where(
+        dated, 0.0, config.qb_weight_proxy_absence - config.qb_weight_proxy
+    )
     pure = (
         out["engine_margin"]
-        + config.qb_adjustment_weight * out[qb_column]
+        + weight * out[qb_column]
         + absence_weight * out[absence_column]
         + config.rest_points_per_day * out["rest_diff"]
     ).to_numpy()
@@ -311,7 +322,7 @@ def apply_layers(predictions: pd.DataFrame, config: LayerConfig) -> pd.DataFrame
     out["model_margin"] = blend_margin(pure, out["market_margin"], config.market_weight)
     out["model_total"] = published_total(
         out["engine_total"]
-        + config.qb_adjustment_weight * out[f"qb_sum_{int(config.qb_span_dropbacks)}"]
+        + weight * out[f"qb_sum_{span}"]
         + absence_weight * out[absence_sum],
         pure,
         out["model_margin"],
@@ -408,46 +419,111 @@ PRESEASON_GRID = [
 _lowest_loss = itemgetter(0)
 
 
-def select_qb_layer(predictions: pd.DataFrame) -> LayerConfig:
-    """Select QB stability and shrinkage on development pure-model log loss."""
-    development = predictions[predictions["season"].isin(DEVELOPMENT_SEASONS)]
+QB_WEIGHT_BOUNDS = (0.0, 1.5)
+
+
+def _implied_slope(x, y) -> tuple[float, float]:
+    """Least-squares slope of y on x through the means, with its standard error."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if len(x) < 3:
+        raise ValueError("QB weight selection needs at least three games")
+    centered_x = x - x.mean()
+    centered_y = y - y.mean()
+    sum_xx = float((centered_x * centered_x).sum())
+    if sum_xx <= 0:
+        raise ValueError("QB weight selection needs varying QB deltas")
+    slope = float((centered_x * centered_y).sum() / sum_xx)
+    residual = centered_y - slope * centered_x
+    error = float(np.sqrt((residual**2).sum() / (len(x) - 2) / sum_xx))
+    return slope, error
+
+
+def select_qb_weights(predictions: pd.DataFrame) -> tuple[LayerConfig, dict]:
+    """Development-season QB weights, one per starter-identification basis.
+
+    Each weight is the least-squares slope of the closing line's move away
+    from the engine margin on the raw QB delta, bounded to QB_WEIGHT_BOUNDS.
+    The closing line is the precise estimator (its own move explains outcomes
+    with slope near one); the outcome slope is reported as the independent
+    check and carries a standard error several times larger.
+
+    Dated basis: development games whose pregame expected starters both proved
+    correct, which is what a dated snapshot chart delivers and the only basis
+    production uses. Realized starters classify reliability here and never
+    enter a forecast. Proxy basis: every development game under the undated
+    weekly charts the historical backtest uses, where a misidentified starter
+    produces a large delta that carries no information. Proxy absence: the
+    confirmed-absence subset, fitted after removing the proxy weight from the
+    other side's delta. The span is chosen by development pure-model log loss
+    under the fitted weights.
+    """
+    development = predictions[
+        predictions["season"].isin(DEVELOPMENT_SEASONS)
+        & predictions["market_margin"].notna()
+    ]
     if development.empty:
-        raise ValueError("QB selection requires development seasons")
+        raise ValueError("QB weight selection requires development seasons")
+    seasons = sorted(int(s) for s in development["season"].unique())
+    qb_games = store.qb_games(seasons)
+    actual = qb_games[qb_games["started"]].set_index(["game_id", "team"])[
+        "passer_player_id"
+    ]
+    correct = pd.Series(True, index=development.index)
+    for side in ("home", "away"):
+        started = [
+            actual.get(key)
+            for key in zip(development["game_id"], development[f"{side}_team"])
+        ]
+        correct &= development[f"{side}_expected_qb"].eq(started).to_numpy()
+    market_move = development["market_margin"] - development["engine_margin"]
+    outcome_move = development["actual_margin"] - development["engine_margin"]
+    low, high = QB_WEIGHT_BOUNDS
     candidates = []
-    for span, weight in itertools.product(QB_SPANS, (0.0, 0.25, 0.5, 0.75, 1.0)):
+    for span in QB_SPANS:
+        delta = development[f"qb_adj_{int(span)}"]
+        absence_delta = development[f"qb_absence_adj_{int(span)}"]
+        absent = absence_delta.ne(0)
+        dated, dated_error = _implied_slope(delta[correct], market_move[correct])
+        proxy, proxy_error = _implied_slope(delta, market_move)
+        residual = market_move[absent] - proxy * (delta[absent] - absence_delta[absent])
+        proxy_absence, absence_error = _implied_slope(absence_delta[absent], residual)
         layer = LayerConfig(
             market_weight=0.0,
             qb_span_dropbacks=span,
-            qb_adjustment_weight=weight,
+            qb_weight_dated=float(np.clip(dated, low, high)),
+            qb_weight_proxy=float(np.clip(proxy, low, high)),
+            qb_weight_proxy_absence=float(np.clip(proxy_absence, low, high)),
         )
         loss = margin_log_loss(apply_layers(development, layer), 1.0, 7.0)
-        candidates.append((loss, layer))
-    return min(candidates, key=_lowest_loss)[1]
-
-
-def select_qb_absence_weight(predictions: pd.DataFrame) -> dict:
-    """Select only on development confirmed absences with the engine held fixed."""
-    layer = LayerConfig(market_weight=0)
-    span = int(layer.qb_span_dropbacks)
-    mask = predictions[f"qb_absence_adj_{span}"].ne(0) | predictions[
-        f"qb_absence_sum_{span}"
-    ].ne(0)
-    development = predictions[mask & predictions.season.isin(DEVELOPMENT_SEASONS)]
-    if development.empty:
-        raise ValueError("QB absence selection requires development absence games")
-    scores = [
-        (
-            margin_log_loss(
-                apply_layers(development, replace(layer, qb_absence_weight=weight)),
-                1.0,
-                7.0,
-            ),
-            weight,
-        )
-        for weight in (0.25, 0.5, 0.75, 1.0)
-    ]
-    loss, weight = min(scores)
-    return {"weight": weight, "games": len(development), "margin_nll": loss}
+        outcome_dated = _implied_slope(delta[correct], outcome_move[correct])
+        outcome_proxy = _implied_slope(delta, outcome_move)
+        report = {
+            "span": span,
+            "development_pure_nll": loss,
+            "dated": {
+                "weight": dated,
+                "se": dated_error,
+                "games": int(correct.sum()),
+                "outcome_weight": outcome_dated[0],
+                "outcome_se": outcome_dated[1],
+            },
+            "proxy": {
+                "weight": proxy,
+                "se": proxy_error,
+                "games": int(len(development)),
+                "outcome_weight": outcome_proxy[0],
+                "outcome_se": outcome_proxy[1],
+            },
+            "proxy_absence": {
+                "weight": proxy_absence,
+                "se": absence_error,
+                "games": int(absent.sum()),
+            },
+        }
+        candidates.append((loss, layer, report))
+    _, layer, report = min(candidates, key=_lowest_loss)
+    return layer, report
 
 
 def rescore_qb_layer(
@@ -554,7 +630,10 @@ def select_qb_memory(predictions: pd.DataFrame) -> dict:
         )
         for weight in (0.5, 0.75, 1.0):
             layer = LayerConfig(
-                market_weight=0.0, qb_span_dropbacks=500.0, qb_adjustment_weight=weight
+                market_weight=0.0,
+                qb_span_dropbacks=500.0,
+                qb_weight_proxy=weight,
+                qb_weight_proxy_absence=weight,
             )
             loss = margin_log_loss(apply_layers(rescored, layer), 1.0, 7.0)
             choices.append((loss, calendar, prior, weight))
@@ -615,7 +694,7 @@ def evaluate_qb_context(predictions: pd.DataFrame) -> dict:
         for share in (0.0, 0.25, 0.5, 0.75, 1.0):
             frame = raw.copy()
             frame["pure_model_margin"] = frame["engine_margin"] + (
-                layer.qb_adjustment_weight
+                layer.qb_weight_dated
                 * ((1 - share) * raw_delta + share * context_delta)
             )
             frame["model_margin"] = frame["pure_model_margin"]
@@ -630,7 +709,7 @@ def evaluate_qb_context(predictions: pd.DataFrame) -> dict:
     market_weight = np.where(frame["market_margin"].notna(), layer.market_weight, 0)
     # Translate normal parameter variance into the Student-t scale convention.
     added_scale = (
-        (5 / 7) * (1 - market_weight) ** 2 * layer.qb_adjustment_weight**2 * variance
+        (5 / 7) * (1 - market_weight) ** 2 * layer.qb_weight_dated**2 * variance
     )
     scores = []
     for weight in (0.0, 0.25, 0.5, 1.0, 2.0, 4.0):
@@ -697,13 +776,16 @@ def run_calibration(
     dev_predictions = generate_walk_forward(
         engine_config, development, use_prior_means, data=data
     )
-    qb_layer_config = select_qb_layer(dev_predictions)
+    qb_layer_config, qb_report = select_qb_weights(dev_predictions)
+    log(f"selected QB weights: {qb_report}")
     scored = []
     for layer in LAYER_GRID:
         layer = replace(
             layer,
             qb_span_dropbacks=qb_layer_config.qb_span_dropbacks,
-            qb_adjustment_weight=qb_layer_config.qb_adjustment_weight,
+            qb_weight_dated=qb_layer_config.qb_weight_dated,
+            qb_weight_proxy=qb_layer_config.qb_weight_proxy,
+            qb_weight_proxy_absence=qb_layer_config.qb_weight_proxy_absence,
         )
         layered = apply_layers(dev_predictions, layer)
         loss = margin_log_loss(layered, 1.0, SELECTION_DF)

@@ -69,7 +69,8 @@ def test_starter_swap_changes_projection_without_double_counting(monkeypatch):
     injured = compute_qb_adjustments(
         2026, 1, slate, logs, pd.DataFrame(), DEFAULT_CONFIG, layer
     )
-    expected_loss = layer.qb_adjustment_weight * (
+    # An empty chart has no publication clock, so the proxy weight applies.
+    expected_loss = layer.qb_weight_proxy * (
         context.strengths["backup"] - context.strengths["starter"]
     )
     assert injured["new"] == pytest.approx((expected_loss, 0))
@@ -130,7 +131,7 @@ def test_starter_swap_changes_projection_without_double_counting(monkeypatch):
         injuries=report,
     )
     expected_absence = (
-        expected_loss * layer.qb_absence_weight / layer.qb_adjustment_weight
+        expected_loss * layer.qb_weight_proxy_absence / layer.qb_weight_proxy
     )
     assert confirmed["new"] == pytest.approx((expected_absence, 0))
     confirmed_projection = assemble_projections(

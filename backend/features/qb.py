@@ -36,6 +36,15 @@ def build_qb_games(pbp: pd.DataFrame) -> pd.DataFrame:
     return qb
 
 
+def identification_basis(depth_charts: pd.DataFrame) -> str:
+    """How reliably a chart identifies the pregame starter: the 2025+ snapshot
+    format is dated, so the chart in force at the cutoff is known; the weekly
+    format has no clock, so the previous week's chart stands in."""
+    from backend.model.projections import QB_BASIS_DATED, QB_BASIS_PROXY
+
+    return QB_BASIS_DATED if "pos_abb" in depth_charts.columns else QB_BASIS_PROXY
+
+
 def _overrides() -> pd.DataFrame:
     if not OVERRIDES_PATH.exists():
         return pd.DataFrame(columns=["season", "week", "team_abbr", "gsis_id"])

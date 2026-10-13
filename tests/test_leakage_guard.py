@@ -180,6 +180,7 @@ def test_calibration_uses_one_sd_contract_and_keeps_pricing_holdout_free(
                     "margin_sd": 10 * config.score_covariance_scale,
                     "total_sd": 12 * config.score_covariance_scale,
                     "rest_diff": 0.0,
+                    "qb_input_basis": c.QB_BASIS_PROXY,
                     **{f"qb_adj_{int(span)}": 0.0 for span in c.QB_SPANS},
                     **{f"qb_sum_{int(span)}": 0.0 for span in c.QB_SPANS},
                     **{f"qb_absence_adj_{int(span)}": 0.0 for span in c.QB_SPANS},
@@ -191,6 +192,11 @@ def test_calibration_uses_one_sd_contract_and_keeps_pricing_holdout_free(
         )
 
     monkeypatch.setattr(c, "generate_walk_forward", replay)
+    # Constant QB deltas carry no weight information; the selection is covered
+    # by validate-qb on real walk-forward rows.
+    monkeypatch.setattr(
+        c, "select_qb_weights", lambda predictions: (LayerConfig(market_weight=0), {})
+    )
     monkeypatch.setattr(c, "ENGINE_GRID", [engine])
     monkeypatch.setattr(c, "LAYER_GRID", [LayerConfig()])
     monkeypatch.setattr(c, "PRESEASON_GRID", [PreseasonConfig()])

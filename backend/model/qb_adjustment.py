@@ -77,15 +77,21 @@ class QbContext:
         coefficients[passer] = coefficients.get(passer, 0.0) + 1.0
         return coefficients
 
+    def confirmed_absence(
+        self, team: str, passer: str | None, unavailable: set[str]
+    ) -> bool:
+        """The dominant recent QB is explicitly ruled unavailable and replaced."""
+        mixture = self.mixtures.get(team, {})
+        if not mixture or passer is None:
+            return False
+        incumbent = max(mixture, key=mixture.get)
+        return incumbent != passer and incumbent in unavailable
+
     def absence_delta(
         self, team: str, passer: str | None, unavailable: set[str]
     ) -> float:
         """Substitution from the dominant recent QB, explicitly ruled unavailable."""
-        mixture = self.mixtures.get(team, {})
-        if not mixture or passer is None:
-            return 0.0
-        incumbent = max(mixture, key=mixture.get)
-        if incumbent == passer or incumbent not in unavailable:
+        if not self.confirmed_absence(team, passer, unavailable):
             return 0.0
         return self.adjustment(team, passer)
 
