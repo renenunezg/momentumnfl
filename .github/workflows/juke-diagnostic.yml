@@ -23,7 +23,7 @@ jobs:
           from datetime import datetime, timezone
           
           BASE = "https://www.getjuked.io/api/v3-beta/builder/board"
-          MAX_BYTES = 2_000_000
+          MAX_BYTES = 4_000_000
           SAFE_FIELDS = set("""
           id eventId event_id listingId marketId conditionId slug title question name
           league sport homeTeam awayTeam home_team away_team startTime kickoff startsAt
@@ -32,6 +32,10 @@ jobs:
           rules rule resolutionRules resolutionSource settlement settlementRules tieRule
           pushRule description endDate resolved resolution result winner finalScore
           url sourceUrl marketUrl polymarketUrl handle version arenaId code ok
+          competitionId competitionLabel eventTitle sourceEventStartAt scheduledStartAt
+          actionClosesAt eventLifecycleState resultKind resultLabel marketCount listingIds
+          contractVersion availability paperOnly official asOf label proposition sideLabels
+          marketFamily settlementPolicy settlementSource venue sourceEventId sourceMarketId
           """.split())
           PRIVATE = re.compile(r"secret|token|password|credential|authorization|api.?key", re.I)
           KEY = os.environ.pop("JUKE_API_KEY", "")
@@ -50,7 +54,7 @@ jobs:
           
           
           def schema(value, depth=0):
-              if depth > 5:
+              if depth > 8:
                   return type(value).__name__
               if isinstance(value, dict):
                   return {clean(k): schema(v, depth + 1) for k, v in list(value.items())[:70]
@@ -122,25 +126,28 @@ jobs:
                   print('{"error":"missing_or_invalid_secret_format"}')
                   return 1
               report = {"mode": "GET_ONLY", "observed_at": datetime.now(timezone.utc).isoformat(),
-                        "max_requests": 3, "credential_values_emitted": False}
+                        "max_requests": 2, "credential_values_emitted": False}
               summary, report["summary"] = read_board({"arenaId": "arena:football", "view": "SUMMARY"})
               if summary is None:
                   print(json.dumps(report, indent=2))
                   return 1
-              board, report["board"] = read_board({"arenaId": "arena:football"})
-              if board is None:
-                  print(json.dumps(report, indent=2))
-                  return 1
-              ids = sorted(event_ids(board))
-              report["nfl_event_ids"] = ids[:32]
-              report["board"]["sample"] = project(board)
+              arenas = summary.get("board", {}).get("arenas", [])
+              report["summary"]["schema"] = schema({"arenas": arenas})
+              groups = [group for arena in arenas for group in arena.get("eventGroups", [])]
+              nfl = [group for group in groups if re.search(
+                  r"(?i)nfl|national football league",
+                  str(group.get("competitionId", "")) + " " + str(group.get("competitionLabel", "")))]
+              report["event_catalogue"] = [project(group) for group in groups[:64]]
+              report["nfl_event_count"] = len(nfl)
+              ids = [group["eventId"] for group in nfl if isinstance(group.get("eventId"), str)
+                     and re.fullmatch(r"[A-Za-z0-9_:.-]{1,160}", group["eventId"])]
               if ids:
                   event, report["event"] = read_board({"arenaId": "arena:football", "eventId": ids[0]})
                   report["selected_event_id"] = ids[0]
                   if event is not None:
                       report["event"]["sample"] = project(event)
               else:
-                  report["event"] = {"status": "no_canonical_nfl_event_id_found"}
+                  report["event"] = {"status": "no_identifiable_nfl_event"}
               encoded = json.dumps(report, indent=2, ensure_ascii=True)
               # Defense in depth: sanitize the entire final output, including field names.
               encoded = encoded.replace(KEY, "[REDACTED]")
@@ -152,7 +159,7 @@ jobs:
               print(encoded)
               with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
                   stream.write("### Juke read-only diagnostic\n\n```json\n" + encoded + "\n```\n")
-              return 0 if "http_status" in report.get("event", {}) else 1
+              return 0 if report.get("event", {}).get("http_status") == 200 else 1
           
           
           if __name__ == "__main__":
