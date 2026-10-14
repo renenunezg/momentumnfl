@@ -1,0 +1,160 @@
+name: Juke read-only diagnostic
+on:
+  workflow_dispatch: {}
+permissions: {}
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Inspect official Juke board with GET only
+        shell: bash
+        env:
+          JUKE_API_KEY: ${{ secrets.JUKE_API_KEY }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+          from datetime import datetime, timezone
+          
+          BASE = "https://www.getjuked.io/api/v3-beta/builder/board"
+          MAX_BYTES = 2_000_000
+          SAFE_FIELDS = set("""
+          id eventId event_id listingId marketId conditionId slug title question name
+          league sport homeTeam awayTeam home_team away_team startTime kickoff startsAt
+          kickoff_utc status state active closed acceptingOrders marketType type outcomes
+          outcome labels yes no bid ask mid price indicative updatedAt observedAt timestamp
+          rules rule resolutionRules resolutionSource settlement settlementRules tieRule
+          pushRule description endDate resolved resolution result winner finalScore
+          url sourceUrl marketUrl polymarketUrl handle version arenaId code ok
+          """.split())
+          PRIVATE = re.compile(r"secret|token|password|credential|authorization|api.?key", re.I)
+          KEY = os.environ.pop("JUKE_API_KEY", "")
+          
+          
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+          
+          
+          def clean(value):
+              text = str(value).replace(KEY, "[REDACTED]") if KEY else str(value)
+              text = re.sub(r"jk_[A-Za-z0-9_-]+", "[REDACTED]", text)
+              text = re.sub(r"(?i)Bearer\s+\S+", "[REDACTED]", text)
+              return text[:1600]
+          
+          
+          def schema(value, depth=0):
+              if depth > 5:
+                  return type(value).__name__
+              if isinstance(value, dict):
+                  return {clean(k): schema(v, depth + 1) for k, v in list(value.items())[:70]
+                          if not PRIVATE.search(str(k))}
+              if isinstance(value, list):
+                  return {"count": len(value), "sample": [schema(v, depth + 1) for v in value[:1]]}
+              return type(value).__name__
+          
+          
+          def project(value, depth=0):
+              if depth > 9:
+                  return None
+              if isinstance(value, dict):
+                  result = {}
+                  for k, v in list(value.items())[:100]:
+                      if PRIVATE.search(str(k)):
+                          continue
+                      if isinstance(v, (dict, list)):
+                          nested = project(v, depth + 1)
+                          if nested:
+                              result[clean(k)] = nested
+                      elif k in SAFE_FIELDS:
+                          result[k] = clean(v) if isinstance(v, str) else v
+                  return result
+              if isinstance(value, list):
+                  return [item for v in value[:4] if (item := project(v, depth + 1))]
+              return clean(value) if isinstance(value, str) else value
+          
+          
+          def event_ids(value):
+              found = set()
+              if isinstance(value, dict):
+                  for k, v in value.items():
+                      if k in {"id", "eventId", "event_id"} and isinstance(v, str):
+                          if re.fullmatch(r"20\d{2}_\d{2}_[A-Z]{2,3}_[A-Z]{2,3}", v):
+                              found.add(v)
+                      if isinstance(v, (list, dict)):
+                          found.update(event_ids(v))
+              elif isinstance(value, list):
+                  for v in value:
+                      found.update(event_ids(v))
+              return found
+          
+          
+          def read_board(params):
+              # Only this fixed official HTTPS endpoint can receive the credential.
+              url = BASE + "?" + urllib.parse.urlencode(params)
+              request = urllib.request.Request(url, method="GET", headers={
+                  "Authorization": "Bearer " + KEY,
+                  "Accept": "application/json", "User-Agent": "MomentumNFL-ReadOnlyDiagnostic/1",
+              })
+              opener = urllib.request.build_opener(NoRedirect())
+              try:
+                  with opener.open(request, timeout=25) as response:
+                      raw = response.read(MAX_BYTES + 1)
+                      if len(raw) > MAX_BYTES:
+                          return None, {"error": "response_too_large"}
+                      data = json.loads(raw)
+                      return data, {"http_status": response.status, "schema": schema(data)}
+              except urllib.error.HTTPError as error:
+                  # Never print headers, request objects, or an untrusted error body.
+                  return None, {"http_status": error.code, "error": "http_error"}
+              except Exception:
+                  return None, {"error": "request_or_json_failure"}
+          
+          
+          def main():
+              if not KEY or not KEY.startswith("jk_"):
+                  print('{"error":"missing_or_invalid_secret_format"}')
+                  return 1
+              report = {"mode": "GET_ONLY", "observed_at": datetime.now(timezone.utc).isoformat(),
+                        "max_requests": 3, "credential_values_emitted": False}
+              summary, report["summary"] = read_board({"arenaId": "arena:football", "view": "SUMMARY"})
+              if summary is None:
+                  print(json.dumps(report, indent=2))
+                  return 1
+              board, report["board"] = read_board({"arenaId": "arena:football"})
+              if board is None:
+                  print(json.dumps(report, indent=2))
+                  return 1
+              ids = sorted(event_ids(board))
+              report["nfl_event_ids"] = ids[:32]
+              report["board"]["sample"] = project(board)
+              if ids:
+                  event, report["event"] = read_board({"arenaId": "arena:football", "eventId": ids[0]})
+                  report["selected_event_id"] = ids[0]
+                  if event is not None:
+                      report["event"]["sample"] = project(event)
+              else:
+                  report["event"] = {"status": "no_canonical_nfl_event_id_found"}
+              encoded = json.dumps(report, indent=2, ensure_ascii=True)
+              # Defense in depth: sanitize the entire final output, including field names.
+              encoded = encoded.replace(KEY, "[REDACTED]")
+              encoded = re.sub(r"jk_[A-Za-z0-9_-]+", "[REDACTED]", encoded)
+              if len(encoded) > 100_000:
+                  report.pop("board", None)
+                  encoded = json.dumps(report, indent=2, ensure_ascii=True).replace(KEY, "[REDACTED]")
+                  encoded = re.sub(r"jk_[A-Za-z0-9_-]+", "[REDACTED]", encoded)
+              print(encoded)
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
+                  stream.write("### Juke read-only diagnostic\n\n```json\n" + encoded + "\n```\n")
+              return 0 if "http_status" in report.get("event", {}) else 1
+          
+          
+          if __name__ == "__main__":
+              sys.exit(main())
+          PY
