@@ -36,6 +36,8 @@ jobs:
           actionClosesAt eventLifecycleState resultKind resultLabel marketCount listingIds
           contractVersion availability paperOnly official asOf label proposition sideLabels
           marketFamily settlementPolicy settlementSource venue sourceEventId sourceMarketId
+          YES NO marketLifecycleState sourceFinalityState resolvedSide rulesDigest rulesVersion
+          line period isMainLine sourceEventTitle endsAt
           """.split())
           PRIVATE = re.compile(r"secret|token|password|credential|authorization|api.?key", re.I)
           KEY = os.environ.pop("JUKE_API_KEY", "")
@@ -80,23 +82,11 @@ jobs:
                           result[k] = clean(v) if isinstance(v, str) else v
                   return result
               if isinstance(value, list):
-                  return [item for v in value[:4] if (item := project(v, depth + 1))]
+                  ordered = sorted(value, key=lambda v: 0 if isinstance(v, dict) and (
+                      v.get("sportsMarketPresentation", {}).get("marketType") == "moneyline"
+                      or v.get("marketFamily") == "family:beta:MONEYLINE") else 1)
+                  return [item for v in ordered[:4] if (item := project(v, depth + 1))]
               return clean(value) if isinstance(value, str) else value
-          
-          
-          def event_ids(value):
-              found = set()
-              if isinstance(value, dict):
-                  for k, v in value.items():
-                      if k in {"id", "eventId", "event_id"} and isinstance(v, str):
-                          if re.fullmatch(r"20\d{2}_\d{2}_[A-Z]{2,3}_[A-Z]{2,3}", v):
-                              found.add(v)
-                      if isinstance(v, (list, dict)):
-                          found.update(event_ids(v))
-              elif isinstance(value, list):
-                  for v in value:
-                      found.update(event_ids(v))
-              return found
           
           
           def read_board(params):
@@ -139,6 +129,7 @@ jobs:
                   str(group.get("competitionId", "")) + " " + str(group.get("competitionLabel", "")))]
               report["event_catalogue"] = [project(group) for group in groups[:64]]
               report["nfl_event_count"] = len(nfl)
+              report["nfl_event_states"] = sorted({str(group.get("eventLifecycleState")) for group in nfl})
               ids = [group["eventId"] for group in nfl if isinstance(group.get("eventId"), str)
                      and re.fullmatch(r"[A-Za-z0-9_:.-]{1,160}", group["eventId"])]
               if ids:
