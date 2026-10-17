@@ -57,3 +57,30 @@ def load_nextgen_stats(seasons: list[int], stat_type: str) -> pd.DataFrame:
     return normalize_teams(
         nflreadpy.load_nextgen_stats(seasons=seasons, stat_type=stat_type).to_pandas()
     )
+
+
+PARTICIPATION_URL = (
+    "https://github.com/nflverse/nflverse-data/releases/download/"
+    "pbp_participation/pbp_participation_{season}.parquet"
+)
+
+
+def load_participation(season: int) -> pd.DataFrame:
+    """Players on the field for every play, with pass rushers, pressure and
+    coverage, read straight from the nflverse release (the nflreadpy wrapper
+    fails on these files). Raises for a season that is not published."""
+    import io
+
+    import requests
+
+    response = requests.get(PARTICIPATION_URL.format(season=season), timeout=300)
+    response.raise_for_status()
+    return normalize_teams(pd.read_parquet(io.BytesIO(response.content)))
+
+
+def load_ftn_charting(seasons: list[int]) -> pd.DataFrame:
+    return nflreadpy.load_ftn_charting(seasons).to_pandas()
+
+
+def load_players() -> pd.DataFrame:
+    return nflreadpy.load_players().to_pandas()
