@@ -187,3 +187,34 @@ jobs:
           publish: 'true'
           reuse-pbp: 'true'
           database-url: ${{ secrets.DATABASE_URL }}
+      - name: Restore position grade model and season artifacts
+        if: steps.context.outputs.active == 'true' && vars.NFL_PLAYER_GRADES_ENABLED == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            backend/data/processed/players
+            backend/data/raw/pbp
+          key: nfl-players-v1-${{ hashFiles('backend/players/**/*.py') }}-${{ steps.context.outputs.season }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            nfl-players-v1-${{ hashFiles('backend/players/**/*.py') }}-${{ steps.context.outputs.season }}-
+            nfl-players-v1-${{ hashFiles('backend/players/**/*.py') }}-
+      - name: Fit the position grade when no frozen model exists
+        if: steps.context.outputs.active == 'true' && vars.NFL_PLAYER_GRADES_ENABLED == 'true'
+        shell: bash
+        env:
+          SEASON: ${{ steps.context.outputs.season }}
+        run: |
+          if ls backend/data/processed/players/models/position_grade_*.json >/dev/null 2>&1; then
+            echo "frozen position grade model present"
+          else
+            last=$((SEASON - 1))
+            poetry run python -m backend position-traits-fit \
+              --dev-seasons $(seq 2016 $((last - 1))) --validate "$last"
+          fi
+      - name: Score and publish position traits
+        if: steps.context.outputs.active == 'true' && vars.NFL_PLAYER_GRADES_ENABLED == 'true'
+        run: |
+          poetry run python -m backend position-traits --seasons ${{ steps.context.outputs.season }}
+          poetry run python -m backend publish-position-traits --season ${{ steps.context.outputs.season }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

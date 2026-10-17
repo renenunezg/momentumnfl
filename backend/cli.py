@@ -141,6 +141,23 @@ def main() -> None:
     publish_parser.add_argument("--skip-backtest", action="store_true")
     publish_parser.add_argument("--projections-only", action="store_true")
 
+    traits_fit = subparsers.add_parser(
+        "position-traits-fit",
+        help="set the position grade weights on development seasons and judge once",
+    )
+    traits_fit.add_argument("--dev-seasons", nargs="+", type=int, required=True)
+    traits_fit.add_argument("--validate", type=int, required=True)
+    traits_fit.add_argument("--rebuild", action="store_true")
+    traits_parser = subparsers.add_parser(
+        "position-traits",
+        help="score weekly position traits and grades with the frozen grade model",
+    )
+    traits_parser.add_argument("--seasons", nargs="+", type=int, required=True)
+    publish_traits = subparsers.add_parser(
+        "publish-position-traits", help="publish the latest position trait week"
+    )
+    publish_traits.add_argument("--season", type=int, required=True)
+
     grade_parser = subparsers.add_parser(
         "grade", help="grade archived pregame forecasts against completed results"
     )
@@ -753,6 +770,36 @@ def run_grade(args) -> None:
     print({"recommendations_graded": grade_picks(db.engine, schedule, args.season)})
 
 
+def run_position_traits(args) -> None:
+    if args.command == "position-traits-fit":
+        from backend.awards import ingest
+        from backend.players.backtest import (
+            ensure_play_seasons,
+            run_backtest,
+            write_backtest,
+        )
+
+        seasons = list(range(HISTORY_START_SEASON, args.validate + 1))
+        ensure_play_seasons(seasons)
+        ingest.ingest(seasons)
+        result = run_backtest(args.dev_seasons, args.validate, rebuild=args.rebuild)
+        path = write_backtest(result, max(args.dev_seasons))
+        print(f"position grade model written to {path}")
+    elif args.command == "publish-position-traits":
+        from backend.db import engine
+        from backend.publish import publish_position_traits
+
+        print(publish_position_traits(engine, args.season))
+    else:
+        from datetime import UTC, datetime
+
+        from backend.players.pipeline import run_position_traits as score_season
+
+        for season in args.seasons:
+            scored = score_season(season, datetime.now(UTC))
+            print(f"position traits {season}: {len(scored)} rows written")
+
+
 def run_publish(args) -> None:
     from backend import db, publish
     from backend.config import BACKTEST_PUBLISH_FLOOR
@@ -1219,5 +1266,8 @@ COMMANDS = {
     "odds": run_odds,
     "upcoming": run_upcoming,
     "publish": run_publish,
+    "position-traits-fit": run_position_traits,
+    "position-traits": run_position_traits,
+    "publish-position-traits": run_position_traits,
     "grade": run_grade,
 }

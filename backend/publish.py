@@ -369,6 +369,43 @@ def publish_awards(engine, season: int, week: int) -> dict:
     return {"award_boards": len(board), "award_model_meta": len(meta)}
 
 
+def publish_position_traits(engine, season: int) -> dict:
+    """Publish the latest scored week of position traits for ``season``.
+
+    The whole season's rows are replaced in one transaction: the table holds one
+    snapshot week per season and the parquet artifact keeps the history. A
+    season with no scored week leaves the table untouched.
+    """
+    from backend.players import MODEL_VERSION
+    from backend.players.pipeline import POSITION_TRAIT_COLUMNS, latest_trait_week
+
+    rows = latest_trait_week(season)
+    if rows.empty:
+        raise ValueError(
+            f"no scored position trait week for {season}; run position-traits"
+        )
+    if rows["week"].nunique() != 1 or rows["as_of"].nunique() != 1:
+        raise ValueError("Mixed position trait snapshot weeks or timestamps")
+    if not rows["model_version"].eq(MODEL_VERSION).all():
+        raise ValueError("Position trait rows from another model version")
+    if rows.duplicated(["season", "athlete_id", "trait"]).any():
+        raise ValueError("Duplicate position trait rows")
+    if not rows["trait"].eq("grade").any():
+        raise ValueError("Position trait snapshot carries no grade rows")
+    prepared = _prepare(rows, POSITION_TRAIT_COLUMNS)
+    with engine.begin() as conn:
+        conn.execute(
+            text("DELETE FROM nfl.position_traits WHERE season = :season"),
+            {"season": season},
+        )
+        _append(prepared, "position_traits", conn, chunksize=2000)
+    return {
+        "position_traits": len(prepared),
+        "week": int(rows["week"].iloc[0]),
+        "graded": int(rows["trait"].eq("grade").sum()),
+    }
+
+
 def publish_recommendations(conn, decisions):
     """Freeze picks unless verified pregame QB inputs change; archive revisions."""
     import json
