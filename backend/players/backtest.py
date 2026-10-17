@@ -75,12 +75,35 @@ SELECTION_COLUMNS = [
     "shrink_kept",
 ]
 SPLIT_COLUMNS = ["position_group", "games", "players", "correlation"]
+# In-season checkpoints: the grade at these weeks against the player's EPA credit
+# over the rest of the season, so a mid-season grade is judged on what it is for.
+CHECKPOINT_WEEKS = (4, 6, 9, 12)
+IN_SEASON_COLUMNS = [
+    "season",
+    "week",
+    "position_group",
+    "players",
+    "spearman_grade_rest_epa",
+    "spearman_epa_rest_epa",
+    "holdout",
+]
+BAND_COLUMNS = [
+    "position_group",
+    "week",
+    "players",
+    "mean_uncertainty",
+    "sd_change_to_final",
+    "within_1",
+    "within_2",
+]
 COVERAGE_COLUMNS = ["season", *grade.COVERAGE_LOSS_COLUMNS]
 TABLES = (
     "selection",
     "weights",
     "dev_pairs",
     "next_season",
+    "in_season",
+    "band_calibration",
     "reliability",
     "portability",
     "movers_count",
@@ -466,6 +489,126 @@ def next_season_table(seasons, model, validation_season: int) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=NEXT_SEASON_COLUMNS)
 
 
+def _week_grades(
+    snapshot: pd.DataFrame, model: grade.GradeModel, week: int
+) -> pd.DataFrame:
+    rows = snapshot[snapshot["week"].eq(week)]
+    if rows.empty:
+        return pd.DataFrame(columns=grade.OUTPUT_COLUMNS)
+    return grade.score_grades(rows, model)
+
+
+def _rest_of_season_epa(frames: pd.DataFrame, after_week: int) -> pd.Series:
+    """EPA credit per credited game over weeks after ``after_week``, by athlete."""
+    rows = frames[frames["trait"].eq(EPA_TRAIT) & frames["model_week"].gt(after_week)]
+    rows = rows.dropna(subset=["numerator"]).astype({"athlete_id": str})
+    return rows.groupby("athlete_id")["numerator"].mean()
+
+
+def _epa_to_date(snapshot: pd.DataFrame, week: int) -> pd.Series:
+    rows = snapshot[snapshot["trait"].eq(EPA_TRAIT) & snapshot["week"].eq(week)]
+    rows = rows.astype({"athlete_id": str}).drop_duplicates("athlete_id")
+    return rows.set_index("athlete_id")["value"]
+
+
+def in_season_table(seasons, model, validation_season: int) -> pd.DataFrame:
+    """Does a checkpoint-week grade predict the rest of the season?
+
+    Per season, checkpoint week and group, over players graded at that week with
+    at least three credited games afterwards: the Spearman of the grade with the
+    player's EPA credit per game over the remaining weeks, and of his EPA credit to
+    date with the same (the baseline). ``holdout`` marks the validation season.
+    """
+    rows = []
+    for season in sorted(seasons):
+        data = seasons[season]
+        snapshot, frames = data["snapshots"], data["frames"]
+        final_week = int(snapshot["week"].max())
+        for week in CHECKPOINT_WEEKS:
+            if week >= final_week:
+                continue
+            graded = _week_grades(snapshot, model, week)
+            if graded.empty:
+                continue
+            later = frames[
+                frames["trait"].eq(EPA_TRAIT) & frames["model_week"].gt(week)
+            ]
+            later = later.dropna(subset=["numerator"]).astype({"athlete_id": str})
+            enough = later.groupby("athlete_id")["game_id"].nunique()
+            rest = _rest_of_season_epa(frames, week)
+            to_date = _epa_to_date(snapshot, week)
+            graded = graded.assign(
+                rest=graded["athlete_id"].map(rest),
+                epa=graded["athlete_id"].map(to_date),
+                later_games=graded["athlete_id"].map(enough).fillna(0),
+            )
+            graded = graded[graded["later_games"].ge(3)]
+            for group, frame in graded.groupby("position_group"):
+                rows.append(
+                    {
+                        "season": season,
+                        "week": week,
+                        "position_group": group,
+                        "players": int(frame["rest"].notna().sum()),
+                        "spearman_grade_rest_epa": _spearman(
+                            frame["grade"], frame["rest"]
+                        ),
+                        "spearman_epa_rest_epa": _spearman(frame["epa"], frame["rest"]),
+                        "holdout": season == validation_season,
+                    }
+                )
+    return pd.DataFrame(rows, columns=IN_SEASON_COLUMNS)
+
+
+def band_calibration_table(seasons, model) -> pd.DataFrame:
+    """Is the card's uncertainty band the right size?
+
+    For each checkpoint week, the change from a player's week-``w`` grade to his
+    final-week grade, standardised by the two bands combined in quadrature
+    (``sqrt(u_w^2 + u_final^2)``). If the band is one standard deviation of
+    measurement noise, about 68 percent of changes fall within one unit and 95
+    percent within two. Pooled over the development seasons, per group.
+    """
+    parts = []
+    for season in sorted(seasons):
+        snapshot = seasons[season]["snapshots"]
+        final_week = int(snapshot["week"].max())
+        final = _week_grades(snapshot, model, final_week).set_index(
+            ["athlete_id", "position_group"]
+        )
+        for week in CHECKPOINT_WEEKS:
+            if week >= final_week:
+                continue
+            early = _week_grades(snapshot, model, week).set_index(
+                ["athlete_id", "position_group"]
+            )
+            both = early.join(final, rsuffix="_final", how="inner")
+            scale = np.sqrt(both["uncertainty"] ** 2 + both["uncertainty_final"] ** 2)
+            both = both.assign(
+                week=week,
+                z=(both["grade_final"] - both["grade"]) / scale.where(scale.gt(0)),
+                change=both["grade_final"] - both["grade"],
+            )
+            parts.append(both.reset_index())
+    if not parts:
+        return pd.DataFrame(columns=BAND_COLUMNS)
+    pooled = pd.concat(parts, ignore_index=True).dropna(subset=["z"])
+    rows = []
+    for (group, week), frame in pooled.groupby(["position_group", "week"]):
+        rows.append(
+            {
+                "position_group": group,
+                "week": int(week),
+                "players": len(frame),
+                "mean_uncertainty": float(frame["uncertainty"].mean()),
+                "sd_change_to_final": float(frame["change"].std()),
+                "within_1": float(frame["z"].abs().le(1).mean()),
+                "within_2": float(frame["z"].abs().le(2).mean()),
+            }
+        )
+    return pd.DataFrame(rows, columns=BAND_COLUMNS)
+
+
 def grade_coverage_table(seasons, model) -> pd.DataFrame:
     rows = []
     for season, data in sorted(seasons.items()):
@@ -727,6 +870,8 @@ class BacktestResult:
     weights: pd.DataFrame
     dev_pairs: pd.DataFrame
     next_season: pd.DataFrame
+    in_season: pd.DataFrame
+    band_calibration: pd.DataFrame
     reliability: pd.DataFrame
     portability: pd.DataFrame
     movers_count: pd.DataFrame
@@ -794,6 +939,10 @@ def run_backtest(
             if score_holdout
             else pd.DataFrame(columns=NEXT_SEASON_COLUMNS)
         ),
+        in_season=in_season_table(
+            seasons if score_holdout else dev, model, validation_season
+        ),
+        band_calibration=band_calibration_table(dev, model),
         reliability=reliability_table(dev, pooled, composite),
         portability=dev_portability,
         movers_count=movers_count_table(movers[movers["season"].isin(dev_seasons)]),
@@ -928,6 +1077,23 @@ def report_markdown(result: BacktestResult) -> str:
         "after it was computed.",
         "",
         markdown_table(result.next_season),
+        "",
+        "## In-season check",
+        "",
+        "A checkpoint-week grade against the player's EPA credit per game over the",
+        "rest of that season, for players with at least three credited games",
+        "afterwards, beside his EPA credit to date as the baseline. `holdout` rows",
+        "are the validation season.",
+        "",
+        markdown_table(result.in_season),
+        "",
+        "## Band calibration",
+        "",
+        "The change from the checkpoint-week grade to the final-week grade,",
+        "standardised by both bands in quadrature. A one-sd band puts about 68",
+        "percent of changes within 1 and 95 percent within 2.",
+        "",
+        markdown_table(result.band_calibration),
         "",
         "## Reliability",
         "",
