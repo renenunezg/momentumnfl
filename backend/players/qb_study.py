@@ -33,6 +33,9 @@ EXPLOSIVE_YARDS = 20
 # Numerator over denominator pairs; a rate is numerator / denominator.
 RATES = {
     "epa_db": ("epa", "dropbacks"),
+    "epa_db_adj": ("epa_adj", "dropbacks"),
+    "epa_neutral": ("epa_neutral", "dropbacks"),
+    "epa_drop_adj": ("epa_drop_adj", "ftn_db"),
     "success_db": ("success", "dropbacks"),
     "wpa_db": ("wpa", "dropbacks"),
     "cpoe": ("cpoe_sum", "cpoe_n"),
@@ -187,6 +190,10 @@ def qb_game_table(season: int, tables) -> pd.DataFrame:
     yards = rows["yards_gained"].astype(float).fillna(0.0)
     late = is_late_down(rows) | is_two_minute(rows)
     expected = expected_conversion(tables, rows)
+    incompletion_epa = float(
+        epa[rows["is_attempt"] & ~rows["is_completion"] & ~rows["is_int"]].mean()
+    )
+    completion_epa = float(epa[rows["is_completion"]].mean())
     turnover = rows["is_int"] | (
         rows["fumble_lost"].eq(1)
         & rows["fumbled_1_player_id"].astype(str).eq(rows["athlete_id"])
@@ -224,6 +231,9 @@ def qb_game_table(season: int, tables) -> pd.DataFrame:
         "late_conv": (rows["is_success"].astype(float) - expected).where(late, 0.0),
         "late_n": late.astype(float),
         "turnover_wpa": wpa.where(turnover, 0.0),
+        # Interceptions are noise game to game; a turnover play is valued as
+        # the incompletion it would have been.
+        "epa_neutral": epa.where(~turnover, incompletion_epa),
     }
     # Participation: pressure and pass rushers per dropback, time to throw.
     part = _participation(season)
@@ -293,6 +303,10 @@ def qb_game_table(season: int, tables) -> pd.DataFrame:
                     charted & rows["is_sack"] & flag("is_qb_fault_sack")
                 ).astype(float),
                 "screen_n": (charted & flag("is_screen_pass")).astype(float),
+                # A catchable ball dropped is valued as the completion it was.
+                "epa_drop_adj": epa.where(
+                    ~(att & flag("is_drop")), completion_epa
+                ).where(charted, 0.0),
                 "rpo_n": (charted & flag("is_rpo")).astype(float),
             }
         )
@@ -305,6 +319,13 @@ def qb_game_table(season: int, tables) -> pd.DataFrame:
         ["game_id", "week", "athlete_id", "team", "opponent"], as_index=False
     ).sum()
     out["season"] = season
+    # EPA net of the defense faced through the previous week.
+    from backend.players.adjust import adjust_rate
+
+    events = out[["game_id", "opponent"]].assign(
+        numerator=out["epa"].astype(float), denominator=out["dropbacks"].astype(float)
+    )
+    out["epa_adj"] = adjust_rate(events, ctx.games)["numerator"].to_numpy()
     # Game-level PFR and weekly NGS lines.
     players = pd.read_parquet(
         RAW_DIR / "players.parquet", columns=["gsis_id", "pfr_id"]
@@ -345,8 +366,8 @@ def build_qb_games(seasons: list[int]) -> pd.DataFrame:
 # Evaluation
 
 
-def rate(frame: pd.DataFrame, name: str) -> pd.Series:
-    numerator, denominator = RATES[name]
+def rate(frame: pd.DataFrame, name: str, rates: dict | None = None) -> pd.Series:
+    numerator, denominator = (rates or RATES)[name]
     if numerator not in frame or denominator not in frame:
         return pd.Series(np.nan, index=frame.index)
     den = frame[denominator].astype(float)
@@ -371,7 +392,9 @@ def _sums_through(
     return out
 
 
-def split_half(games: pd.DataFrame, min_games: int = 8) -> pd.DataFrame:
+def split_half(
+    games: pd.DataFrame, min_games: int = 8, rates: dict | None = None
+) -> pd.DataFrame:
     """Odd-game against even-game rates per measure, pooled over seasons."""
     rows = games.sort_values(["season", "athlete_id", "week"]).copy()
     rows["order"] = rows.groupby(["season", "athlete_id"]).cumcount()
@@ -385,8 +408,9 @@ def split_half(games: pd.DataFrame, min_games: int = 8) -> pd.DataFrame:
     ]
     halves = rows.groupby(["season", "athlete_id", "half"])[numeric].sum(min_count=1)
     results = []
-    for name in RATES:
-        values = rate(halves.reset_index(), name)
+    rates = rates or RATES
+    for name in rates:
+        values = rate(halves.reset_index(), name, rates)
         wide = pd.DataFrame(
             {"half": halves.index.get_level_values("half"), "value": values.to_numpy()},
             index=halves.index.droplevel("half"),
@@ -417,20 +441,26 @@ def _spearman(a: pd.Series, b: pd.Series) -> float:
 
 
 def checkpoint_prediction(
-    games: pd.DataFrame, week: int, targets=("epa_db", "success_db")
+    games: pd.DataFrame,
+    week: int,
+    targets=("epa_db", "success_db"),
+    rates: dict | None = None,
+    volume: tuple[str, float, float] = ("dropbacks", 100, 0),
 ) -> pd.DataFrame:
     """Each measure through ``week`` against the rest-of-season targets, averaged."""
     before = _sums_through(games, week)
     after = _sums_through(games, week, after=True)
     after = after[after["games"].ge(3)]
     merged = before.merge(after, on=["season", "athlete_id"], suffixes=("", "_rest"))
-    merged = merged[merged["dropbacks"].ge(100)]
+    rates = rates or RATES
+    column, floor, rest_floor = volume
+    merged = merged[merged[column].ge(floor) & merged[f"{column}_rest"].ge(rest_floor)]
     results = []
-    for name in RATES:
-        value = rate(merged, name)
+    for name in rates:
+        value = rate(merged, name, rates)
         row = {"measure": name, "week": week, "players": int(value.notna().sum())}
         for target in targets:
-            numerator, denominator = RATES[target]
+            numerator, denominator = rates[target]
             future = merged[f"{numerator}_rest"] / merged[f"{denominator}_rest"].where(
                 merged[f"{denominator}_rest"].gt(0)
             )
@@ -448,19 +478,23 @@ def checkpoint_prediction(
 
 
 def next_season_prediction(
-    games: pd.DataFrame, targets=("epa_db", "success_db")
+    games: pd.DataFrame,
+    targets=("epa_db", "success_db"),
+    rates: dict | None = None,
+    volume: tuple[str, float] = ("dropbacks", 200),
 ) -> pd.DataFrame:
     """Each measure over a full season against the passer's next season."""
+    rates = rates or RATES
     totals = _sums_through(games, None)
-    totals = totals[totals["dropbacks"].ge(200)]
+    totals = totals[totals[volume[0]].ge(volume[1])]
     nxt = totals.assign(season=totals["season"] - 1)
     merged = totals.merge(nxt, on=["season", "athlete_id"], suffixes=("", "_next"))
     results = []
-    for name in RATES:
-        value = rate(merged, name)
+    for name in rates:
+        value = rate(merged, name, rates)
         row = {"measure": name, "players": int(value.notna().sum())}
         for target in targets:
-            numerator, denominator = RATES[target]
+            numerator, denominator = rates[target]
             future = merged[f"{numerator}_next"] / merged[f"{denominator}_next"].where(
                 merged[f"{denominator}_next"].gt(0)
             )
@@ -514,6 +548,8 @@ def run_study(seasons: list[int], rebuild: bool = False) -> dict[str, pd.DataFra
 
 FEATURES = [
     "epa_db",
+    "epa_db_adj",
+    "epa_neutral",
     "success_db",
     "cpoe",
     "anya",
@@ -552,7 +588,26 @@ MODELS = {
         "prior_games",
     ],
     "all_prior": [*FEATURES, *[f"prior_{f}" for f in PRIOR_FEATURES], "prior_games"],
+    "epa_adjusted": ["epa_db_adj"],
+    "epa_neutral": ["epa_neutral"],
+    "epa_decay": ["epa_db_decay"],
+    "epa_bio": ["epa_db", "age", "experience", "draft_pick"],
+    "core_prior_bio": [
+        "epa_db",
+        "success_db",
+        "cpoe",
+        "sack_rate",
+        "pressure_to_sack",
+        "late_down_conv",
+        *[f"prior_{f}" for f in PRIOR_FEATURES],
+        "prior_games",
+        "age",
+        "experience",
+        "draft_pick",
+    ],
 }
+BIO_FEATURES = ["age", "experience", "draft_pick"]
+DECAY_HALF_LIFE_GAMES = 4.0
 CHECKPOINTS = tuple(range(4, 14))
 MIN_DROPBACKS = 60
 MIN_REST_DROPBACKS = 100
@@ -570,45 +625,109 @@ def _z_within(frame: pd.DataFrame, columns: list[str], keys: list[str]) -> pd.Da
     return out
 
 
-def checkpoint_rows(games: pd.DataFrame) -> pd.DataFrame:
-    """One row per quarterback, season and checkpoint week: rates to date, prior-season
-    rates, and the rest-of-season target."""
+def checkpoint_rows(
+    games: pd.DataFrame,
+    rates: dict | None = None,
+    features: list[str] | None = None,
+    prior_features: list[str] | None = None,
+    volume: tuple[str, float, float] = ("dropbacks", MIN_DROPBACKS, MIN_REST_DROPBACKS),
+    prior_volume: float = 100,
+    targets: dict[str, str] | None = None,
+    decay: tuple[str, str] = ("epa", "dropbacks"),
+) -> pd.DataFrame:
+    """One row per player, season and checkpoint week: rates to date, prior-season
+    rates, and the rest-of-season targets (``targets`` maps a target column to
+    the rate it is built from)."""
+    rates = rates or RATES
+    features = features or FEATURES
+    prior_features = prior_features or PRIOR_FEATURES
+    targets = targets or {"target_epa": "epa_db", "target_success": "success_db"}
+    column, floor, rest_floor = volume
     totals = _sums_through(games, None)
-    prior = totals[totals["dropbacks"].ge(100)].copy()
-    for name in PRIOR_FEATURES:
-        prior[f"prior_{name}"] = rate(prior, name)
+    prior = totals[totals[column].ge(prior_volume)].copy()
+    for name in prior_features:
+        prior[f"prior_{name}"] = rate(prior, name, rates)
     prior["prior_games"] = prior["games"].astype(float)
     prior = prior[
-        ["season", "athlete_id", *[f"prior_{f}" for f in PRIOR_FEATURES], "prior_games"]
+        ["season", "athlete_id", *[f"prior_{f}" for f in prior_features], "prior_games"]
     ]
     prior["season"] = prior["season"] + 1
+    bio = _biography(games)
     parts = []
     for week in CHECKPOINTS:
         before = _sums_through(games, week)
-        before = before[before["dropbacks"].ge(MIN_DROPBACKS)]
+        decayed = _decayed_rate(games, week, *decay)
+        before = before[before[column].ge(floor)]
         after = _sums_through(games, week, after=True)
-        after = after[after["dropbacks"].ge(MIN_REST_DROPBACKS)]
+        after = after[after[column].ge(rest_floor)]
         merged = before.merge(
             after, on=["season", "athlete_id"], suffixes=("", "_rest")
         )
         row = merged[["season", "athlete_id"]].assign(week=week)
-        for name in FEATURES:
-            row[name] = rate(merged, name).to_numpy()
-        row["target_epa"] = (merged["epa_rest"] / merged["dropbacks_rest"]).to_numpy()
-        row["target_success"] = (
-            merged["success_rest"] / merged["dropbacks_rest"]
-        ).to_numpy()
+        for name in features:
+            row[name] = rate(merged, name, rates).to_numpy()
+        row["epa_db_decay"] = (
+            merged[["season", "athlete_id"]]
+            .merge(decayed, on=["season", "athlete_id"], how="left")["decayed"]
+            .to_numpy()
+        )
+        for target, source in targets.items():
+            numerator, denominator = rates[source]
+            row[target] = (
+                merged[f"{numerator}_rest"]
+                / merged[f"{denominator}_rest"].where(
+                    merged[f"{denominator}_rest"].gt(0)
+                )
+            ).to_numpy()
         parts.append(row)
     rows = pd.concat(parts, ignore_index=True).merge(
         prior, on=["season", "athlete_id"], how="left"
     )
+    rows = rows.merge(bio, on=["season", "athlete_id"], how="left")
+    rows[BIO_FEATURES] = rows[BIO_FEATURES].fillna(rows[BIO_FEATURES].mean())
+    rows["epa_db_decay"] = rows["epa_db_decay"].fillna(rows[features[0]])
     rows["prior_games"] = rows["prior_games"].fillna(0.0)
-    prior_columns = [f"prior_{f}" for f in PRIOR_FEATURES]
+    prior_columns = [f"prior_{f}" for f in prior_features]
     rows[prior_columns] = rows[prior_columns].fillna(rows[prior_columns].mean())
-    rows[FEATURES] = rows[FEATURES].fillna(rows[FEATURES].mean())
+    rows[features] = rows[features].fillna(rows[features].mean())
     return _z_within(
-        rows, [*FEATURES, *prior_columns, "prior_games"], ["season", "week"]
+        rows,
+        [*features, *prior_columns, "prior_games", *BIO_FEATURES, "epa_db_decay"],
+        ["season", "week"],
     )
+
+
+def _biography(games: pd.DataFrame) -> pd.DataFrame:
+    """Age at the season's start, seasons of experience and draft pick (undrafted
+    counts as pick 262) per quarterback season."""
+    players = pd.read_parquet(
+        RAW_DIR / "players.parquet",
+        columns=["gsis_id", "birth_date", "rookie_season", "draft_pick"],
+    ).dropna(subset=["gsis_id"])
+    players["athlete_id"] = players["gsis_id"].astype(str)
+    seasons = games[["season", "athlete_id"]].drop_duplicates()
+    out = seasons.merge(players, on="athlete_id", how="left")
+    born = pd.to_datetime(out["birth_date"], errors="coerce")
+    start = pd.to_datetime(out["season"].astype(str) + "-09-01")
+    out["age"] = (start - born).dt.days / 365.25
+    out["experience"] = (out["season"] - out["rookie_season"]).astype(float)
+    out["draft_pick"] = out["draft_pick"].fillna(262.0).astype(float)
+    return out[["season", "athlete_id", *BIO_FEATURES]]
+
+
+def _decayed_rate(
+    games: pd.DataFrame, week: int, numerator: str, denominator: str
+) -> pd.DataFrame:
+    """A rate through ``week`` with each game weighted by 0.5 ** (weeks ago /
+    half-life), so the recent games count more."""
+    rows = games[games["week"].le(week)]
+    weight = 0.5 ** ((week - rows["week"]) / DECAY_HALF_LIFE_GAMES)
+    frame = rows[["season", "athlete_id"]].assign(
+        n=rows[numerator] * weight, d=rows[denominator] * weight
+    )
+    out = frame.groupby(["season", "athlete_id"], as_index=False).sum()
+    out["decayed"] = out["n"] / out["d"].where(out["d"].gt(0))
+    return out[["season", "athlete_id", "decayed"]]
 
 
 def _ridge_fit(x: np.ndarray, y: np.ndarray, penalty: float) -> np.ndarray:
@@ -622,13 +741,15 @@ def _predict(beta: np.ndarray, x: np.ndarray) -> np.ndarray:
     return beta[0] + x @ beta[1:]
 
 
-def combination_study(rows: pd.DataFrame, target: str = "target_epa") -> pd.DataFrame:
+def combination_study(
+    rows: pd.DataFrame, target: str = "target_epa", models: dict | None = None
+) -> pd.DataFrame:
     """Leave-one-season-out: each model's Spearman and R squared on the held-out
     season's rest-of-season target, with the penalty chosen by an inner
     leave-one-season-out on the training seasons."""
     seasons = sorted(rows["season"].unique())
     results = []
-    for name, columns in MODELS.items():
+    for name, columns in (models or MODELS).items():
         rhos, r2s, coefs = [], [], []
         for held in seasons:
             train = rows[rows["season"].ne(held)]
@@ -800,18 +921,23 @@ def lineup_study(
 # Style against quality
 
 
-def self_persistence(games: pd.DataFrame) -> pd.DataFrame:
+def self_persistence(
+    games: pd.DataFrame,
+    rates: dict | None = None,
+    volume: tuple[str, float] = ("dropbacks", 200),
+) -> pd.DataFrame:
     """Each measure's Spearman with itself one season later: a measure that
     repeats season to season is a trait of the passer, whether or not it
     predicts his production."""
+    rates = rates or RATES
     totals = _sums_through(games, None)
-    totals = totals[totals["dropbacks"].ge(200)]
+    totals = totals[totals[volume[0]].ge(volume[1])]
     nxt = totals.assign(season=totals["season"] - 1)
     merged = totals.merge(nxt, on=["season", "athlete_id"], suffixes=("", "_next"))
     rows = []
-    for name in RATES:
-        now = rate(merged, name)
-        numerator, denominator = RATES[name]
+    for name in rates:
+        now = rate(merged, name, rates)
+        numerator, denominator = rates[name]
         later = merged[f"{numerator}_next"] / merged[f"{denominator}_next"].where(
             merged[f"{denominator}_next"].gt(0)
         )
@@ -835,9 +961,7 @@ def style_table(summary: pd.DataFrame, persistence: pd.DataFrame) -> pd.DataFram
     a *style* when it is stable, repeats season to season, and does not predict
     production, and *noise* when it is not stable."""
     out = summary.merge(persistence, on="measure", how="left")
-    predictive = (
-        out[["rho_epa_db", "rho_success_db", "rho_epa_db_next"]].abs().max(axis=1)
-    )
+    predictive = out[[c for c in out.columns if c.startswith("rho_")]].abs().max(axis=1)
     stable = out["split_half"].ge(0.3) | out["self_next"].ge(0.5)
     out["kind"] = np.select(
         [~stable, predictive.ge(0.25), out["self_next"].ge(0.5)],
