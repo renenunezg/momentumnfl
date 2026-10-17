@@ -79,6 +79,36 @@ RATES = {
     "ngs_time_to_throw": ("ngs_ttt_sum", "ngs_n"),
     "ngs_cpoe": ("ngs_cpoe_sum", "ngs_n"),
     "ngs_air_yards_to_sticks": ("ngs_ays_sum", "ngs_n"),
+    # Processing: what happens past the first read, against the blitz, by
+    # coverage, and when the ball is held.
+    "beyond_first_read_rate": ("beyond_n", "read_n"),
+    "epa_first_read": ("first_epa", "first_n"),
+    "epa_beyond_first": ("beyond_epa", "beyond_n"),
+    "success_beyond_first": ("beyond_success", "beyond_n"),
+    "epa_second_read": ("second_epa", "second_n"),
+    "epa_checkdown": ("check_epa", "check_n"),
+    "epa_scramble_drill": ("sd_epa", "sd_n"),
+    "checkdown_rate": ("check_n", "read_n"),
+    "int_worthy_beyond_first": ("beyond_intw", "beyond_n"),
+    "blitz_epa_delta": ("blitz_delta", "blitz_pairs"),
+    "blitz_sack_rate": ("blitz_sacks", "blitz_n"),
+    "blitz_success": ("blitz_success", "blitz_n"),
+    "blitz_int_worthy": ("blitz_intw", "blitz_att"),
+    "no_blitz_epa": ("noblitz_epa", "noblitz_n"),
+    "pressure_scramble_rate": ("pressure_scrambles", "pressures"),
+    "pressure_throwaway_rate": ("pressure_throwaways", "pressures"),
+    "held_sack_rate": ("held_sacks", "ttt_n"),
+    "late_throw_epa": ("late_throw_epa", "late_throw_n"),
+    "quick_throw_epa": ("quick_throw_epa", "quick_throw_n"),
+    "epa_vs_man": ("man_epa", "man_n"),
+    "epa_vs_zone": ("zone_epa", "zone_n"),
+    "man_zone_delta": ("man_zone_delta", "man_zone_pairs"),
+    "epa_vs_cover0_1": ("c01_epa", "c01_n"),
+    "epa_vs_cover2_4": ("c24_epa", "c24_n"),
+    "int_worthy_vs_zone": ("zone_intw", "zone_att"),
+    "motion_rate": ("motion_n", "ftn_db"),
+    "epa_with_motion": ("motion_epa", "motion_n"),
+    "epa_without_motion": ("nomotion_epa", "nomotion_n"),
 }
 
 
@@ -107,6 +137,8 @@ def _participation(season: int) -> pd.DataFrame:
             "number_of_pass_rushers",
             "time_to_throw",
             "was_pressure",
+            "defense_man_zone_type",
+            "defense_coverage_type",
         ],
     )
     part["play_id"] = _play_key(part, "nflverse_game_id", "play_id")
@@ -157,6 +189,86 @@ def _ngs_passing(season: int) -> pd.DataFrame:
         }
     )
     return out.drop_duplicates(["week", "athlete_id"])
+
+
+def _read_sums(rows, joined, charted, att, epa) -> dict:
+    """Sums for the progression, blitz and motion measures from FTN charting.
+
+    ``read_thrown`` is 1 for the first read, 2 for the second, CHK a checkdown,
+    SD a scramble drill and DES a designed throw; 2, CHK and SD together are
+    what the passer did when the first read was not there.
+    """
+    read = pd.Series(joined["read_thrown"].to_numpy(), index=rows.index).astype(str)
+    first = att & read.eq("1")
+    second = att & read.eq("2")
+    check = att & read.eq("CHK")
+    drill = att & read.eq("SD")
+    beyond = second | check | drill
+    read_n = first | beyond
+    intw = pd.Series(joined["is_interception_worthy"].to_numpy(), index=rows.index).eq(
+        True
+    )
+    blitzers = pd.Series(joined["n_blitzers"].to_numpy(float), index=rows.index).fillna(
+        0
+    )
+    blitzed = charted & blitzers.gt(0)
+    unblitzed = charted & blitzers.eq(0)
+    motion = charted & pd.Series(joined["is_motion"].to_numpy(), index=rows.index).eq(
+        True
+    )
+    nomotion = charted & ~motion
+    success = rows["is_success"].astype(float)
+    return {
+        "read_n": read_n.astype(float),
+        "first_n": first.astype(float),
+        "first_epa": epa.where(first, 0.0),
+        "beyond_n": beyond.astype(float),
+        "beyond_epa": epa.where(beyond, 0.0),
+        "beyond_success": success.where(beyond, 0.0),
+        "beyond_intw": (beyond & intw).astype(float),
+        "second_n": second.astype(float),
+        "second_epa": epa.where(second, 0.0),
+        "check_n": check.astype(float),
+        "check_epa": epa.where(check, 0.0),
+        "sd_n": drill.astype(float),
+        "sd_epa": epa.where(drill, 0.0),
+        "blitz_n": blitzed.astype(float),
+        "blitz_epa": epa.where(blitzed, 0.0),
+        "blitz_success": success.where(blitzed, 0.0),
+        "blitz_sacks": (blitzed & rows["is_sack"]).astype(float),
+        "blitz_att": (blitzed & att).astype(float),
+        "blitz_intw": (blitzed & att & intw).astype(float),
+        "noblitz_n": unblitzed.astype(float),
+        "noblitz_epa": epa.where(unblitzed, 0.0),
+        "motion_n": motion.astype(float),
+        "motion_epa": epa.where(motion, 0.0),
+        "nomotion_n": nomotion.astype(float),
+        "nomotion_epa": epa.where(nomotion, 0.0),
+    }
+
+
+def _deltas(out: pd.DataFrame) -> pd.DataFrame:
+    """Game-level differences that only make sense once both sides have plays."""
+
+    def delta(a_epa, a_n, b_epa, b_n, name, pairs, floor=3):
+        ok = out[a_n].ge(floor) & out[b_n].ge(floor)
+        out[name] = (out[a_epa] / out[a_n] - out[b_epa] / out[b_n]).where(ok, 0.0)
+        out[pairs] = ok.astype(float)
+
+    if "blitz_epa" in out:
+        delta(
+            "blitz_epa",
+            "blitz_n",
+            "noblitz_epa",
+            "noblitz_n",
+            "blitz_delta",
+            "blitz_pairs",
+        )
+    if "man_epa" in out:
+        delta(
+            "man_epa", "man_n", "zone_epa", "zone_n", "man_zone_delta", "man_zone_pairs"
+        )
+    return out
 
 
 def qb_game_table(season: int, tables) -> pd.DataFrame:
@@ -235,6 +347,17 @@ def qb_game_table(season: int, tables) -> pd.DataFrame:
         # the incompletion it would have been.
         "epa_neutral": epa.where(~turnover, incompletion_epa),
     }
+    # FTN flags are read first because the pressure block uses them too.
+    ftn = _ftn(season)
+    ftn_flags = None
+    if not ftn.empty:
+        ftn_joined = ftn.reindex(rows["play_id"])
+        ftn_flags = {
+            name: pd.Series(ftn_joined[name].to_numpy(), index=rows.index)
+            .eq(True)
+            .to_numpy()
+            for name in ("is_interception_worthy", "is_throw_away")
+        }
     # Participation: pressure and pass rushers per dropback, time to throw.
     part = _participation(season)
     if not part.empty:
@@ -249,6 +372,23 @@ def qb_game_table(season: int, tables) -> pd.DataFrame:
         rushers = pd.Series(
             joined["number_of_pass_rushers"].to_numpy(float), index=rows.index
         )
+        man_zone = pd.Series(
+            joined["defense_man_zone_type"].to_numpy(), index=rows.index
+        )
+        coverage = pd.Series(
+            joined["defense_coverage_type"].to_numpy(), index=rows.index
+        )
+        man = man_zone.eq("MAN_COVERAGE")
+        zone = man_zone.eq("ZONE_COVERAGE")
+        c01 = coverage.isin(["COVER_0", "COVER_1"])
+        c24 = coverage.isin(["COVER_2", "COVER_3", "COVER_4", "COVER_6", "2_MAN"])
+        held = ttt.gt(3.0)
+        thrown = rows["is_attempt"] & ttt.notna()
+        intw = (
+            pd.Series(ftn_flags["is_interception_worthy"], index=rows.index)
+            if ftn_flags is not None
+            else pd.Series(False, index=rows.index)
+        )
         sums.update(
             {
                 "pressures": pressured.astype(float),
@@ -261,12 +401,35 @@ def qb_game_table(season: int, tables) -> pd.DataFrame:
                 "ttt_n": ttt.notna().astype(float),
                 "rushers_sum": rushers.fillna(0.0),
                 "rushers_n": rushers.notna().astype(float),
+                "pressure_scrambles": (pressured & rows["is_scramble"]).astype(float),
+                "pressure_throwaways": (
+                    pressured
+                    & (
+                        pd.Series(ftn_flags["is_throw_away"], index=rows.index)
+                        if ftn_flags is not None
+                        else pd.Series(False, index=rows.index)
+                    )
+                ).astype(float),
+                "held_sacks": (held & rows["is_sack"]).astype(float),
+                "late_throw_epa": epa.where(thrown & held, 0.0),
+                "late_throw_n": (thrown & held).astype(float),
+                "quick_throw_epa": epa.where(thrown & ttt.le(2.5), 0.0),
+                "quick_throw_n": (thrown & ttt.le(2.5)).astype(float),
+                "man_epa": epa.where(man, 0.0),
+                "man_n": man.astype(float),
+                "zone_epa": epa.where(zone, 0.0),
+                "zone_n": zone.astype(float),
+                "c01_epa": epa.where(c01, 0.0),
+                "c01_n": c01.astype(float),
+                "c24_epa": epa.where(c24, 0.0),
+                "c24_n": c24.astype(float),
+                "zone_intw": (zone & intw).astype(float),
+                "zone_att": (zone & rows["is_attempt"]).astype(float),
             }
         )
     # FTN charting.
-    ftn = _ftn(season)
     if not ftn.empty:
-        joined = ftn.reindex(rows["play_id"])
+        joined = ftn_joined
 
         def flag(column):
             return pd.Series(joined[column].to_numpy(), index=rows.index).eq(True)
@@ -303,6 +466,7 @@ def qb_game_table(season: int, tables) -> pd.DataFrame:
                     charted & rows["is_sack"] & flag("is_qb_fault_sack")
                 ).astype(float),
                 "screen_n": (charted & flag("is_screen_pass")).astype(float),
+                **_read_sums(rows, joined, charted, att, epa),
                 # A catchable ball dropped is valued as the completion it was.
                 "epa_drop_adj": epa.where(
                     ~(att & flag("is_drop")), completion_epa
@@ -319,6 +483,7 @@ def qb_game_table(season: int, tables) -> pd.DataFrame:
         ["game_id", "week", "athlete_id", "team", "opponent"], as_index=False
     ).sum()
     out["season"] = season
+    out = _deltas(out)
     # EPA net of the defense faced through the previous week.
     from backend.players.adjust import adjust_rate
 
