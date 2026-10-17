@@ -153,6 +153,11 @@ def main() -> None:
         help="score weekly position traits and grades with the frozen grade model",
     )
     traits_parser.add_argument("--seasons", nargs="+", type=int, required=True)
+    sources_parser = subparsers.add_parser(
+        "player-sources",
+        help="store the charting feeds the player ratings read (FTN, PFR, Next Gen)",
+    )
+    sources_parser.add_argument("--seasons", nargs="+", type=int, required=True)
     publish_traits = subparsers.add_parser(
         "publish-position-traits", help="publish the latest position trait week"
     )
@@ -785,6 +790,16 @@ def run_position_traits(args) -> None:
         result = run_backtest(args.dev_seasons, args.validate, rebuild=args.rebuild)
         path = write_backtest(result, max(args.dev_seasons))
         print(f"position grade model written to {path}")
+        from backend.players.ratings import fit_ratings
+        from backend.players.sources import ingest_player_sources
+
+        ingest_player_sources(seasons, refresh_latest=False)
+        for position, model in fit_ratings(args.dev_seasons, args.validate).items():
+            print(f"{position} rating model written to {model}")
+    elif args.command == "player-sources":
+        from backend.players.sources import ingest_player_sources
+
+        ingest_player_sources(args.seasons)
     elif args.command == "publish-position-traits":
         from backend.db import engine
         from backend.publish import publish_position_traits
@@ -1268,6 +1283,7 @@ COMMANDS = {
     "publish": run_publish,
     "position-traits-fit": run_position_traits,
     "position-traits": run_position_traits,
+    "player-sources": run_position_traits,
     "publish-position-traits": run_position_traits,
     "grade": run_grade,
 }

@@ -214,6 +214,7 @@ jobs:
       - name: Score and publish position traits
         if: steps.context.outputs.active == 'true' && vars.NFL_PLAYER_GRADES_ENABLED == 'true'
         run: |
+          poetry run python -m backend player-sources --seasons $(seq 2016 ${{ steps.context.outputs.season }})
           poetry run python -m backend position-traits --seasons ${{ steps.context.outputs.season }}
           poetry run python -m backend publish-position-traits --season ${{ steps.context.outputs.season }}
         env:

@@ -17,6 +17,7 @@ create table if not exists nfl.position_traits (
     kind text,
     in_grade boolean not null,
     uncertainty double precision,
+    reliability double precision,
     points_above_replacement double precision,
     primary key (season, athlete_id, trait)
 );

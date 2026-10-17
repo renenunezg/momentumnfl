@@ -40,6 +40,7 @@ POSITION_TRAIT_COLUMNS = [
     "kind",
     "in_grade",
     "uncertainty",
+    "reliability",
     "points_above_replacement",
 ]
 GRADE_ROW, WAR_ROW = "grade", "war"
@@ -140,6 +141,7 @@ def score_snapshot(
         key in weighted_keys for key in zip(traits["position_group"], traits["trait"])
     ]
     traits["uncertainty"] = np.nan
+    traits["reliability"] = np.nan
     traits["points_above_replacement"] = np.nan
     parts = [
         traits,
@@ -147,6 +149,7 @@ def score_snapshot(
         war_rows(snapshot, model, credited, projections),
     ]
     out = pd.concat([part for part in parts if not part.empty], ignore_index=True)
+    out["reliability"] = out.get("reliability", np.nan)
     out["season"] = int(snapshot["season"].iloc[0])
     out["as_of"] = as_of.isoformat()
     out["model_version"] = MODEL_VERSION
@@ -176,6 +179,7 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
         season, games, ingest.read("schedules", season)
     )
     out = score_snapshot(snapshot, model, built["credited"], projections, as_of)
+    out = with_fitted_ratings(out, season, as_of)
     store.write_processed(out, *position_traits_artifact(season))
     latest = int(snapshot["week"].max())
     losses = grade.coverage_losses(
@@ -194,6 +198,29 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
             row.low_coverage,
         )
     return out
+
+
+def with_fitted_ratings(
+    out: pd.DataFrame, season: int, as_of: datetime
+) -> pd.DataFrame:
+    """Replace the rated positions' trait and grade rows with the fitted ratings,
+    keeping their wins above replacement rows."""
+    from backend.players.ratings import RATED_POSITIONS, score_ratings
+
+    weeks = sorted(int(w) for w in out["week"].unique())
+    headshots = (
+        out.dropna(subset=["headshot_url"])
+        .drop_duplicates("athlete_id")
+        .set_index("athlete_id")["headshot_url"]
+    )
+    rated = score_ratings(season, weeks, as_of, headshots)
+    if rated.empty:
+        return out
+    keep = ~out["position_group"].isin(RATED_POSITIONS) | out["trait"].eq(WAR_ROW)
+    rated = rated.reindex(columns=out.columns)
+    return pd.concat([out[keep], rated], ignore_index=True).sort_values(
+        ["week", "trait", "athlete_id"], ignore_index=True
+    )
 
 
 def latest_trait_week(season: int) -> pd.DataFrame:
