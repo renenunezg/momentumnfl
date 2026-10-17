@@ -287,6 +287,27 @@ def player_presence(seen: pd.DataFrame, games: pd.DataFrame) -> pd.DataFrame:
     return out[PRESENCE_COLUMNS].reset_index(drop=True)
 
 
+ESPN_HEADSHOT = "https://a.espncdn.com/combiner/i?img=/i/headshots/nfl/players/full/{espn}.png&w=112"
+
+
+def espn_headshots(roster: pd.DataFrame) -> pd.Series:
+    """ESPN's sized portrait per gsis id, from the season roster and the player
+    crosswalk. The NFL CDN serves 3,400-pixel originals that take seconds to
+    show on a card; ESPN's combiner returns a 112-pixel image in a few
+    kilobytes."""
+    parts = [roster[["gsis_id", "espn_id"]]]
+    crosswalk = RAW_DIR / "players.parquet"
+    if crosswalk.exists():
+        parts.append(pd.read_parquet(crosswalk, columns=["gsis_id", "espn_id"]))
+    ids = pd.concat(parts, ignore_index=True).dropna(subset=["gsis_id", "espn_id"])
+    ids = ids.drop_duplicates("gsis_id")
+    espn = ids["espn_id"].astype(float).astype("int64").astype(str)
+    return pd.Series(
+        [ESPN_HEADSHOT.format(espn=e) for e in espn],
+        index=ids["gsis_id"].astype(str),
+    )
+
+
 def season_identity(
     stats: pd.DataFrame, roster: pd.DataFrame, games: pd.DataFrame
 ) -> pd.DataFrame:
@@ -329,6 +350,8 @@ def season_identity(
         )
     )
     out = pd.concat(parts, ignore_index=True).drop_duplicates("athlete_id")
+    espn = out["athlete_id"].astype(str).map(espn_headshots(roster))
+    out["headshot_url"] = espn.fillna(out["headshot_url"])
     return out[IDENTITY_COLUMNS].reset_index(drop=True)
 
 
