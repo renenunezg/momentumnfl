@@ -378,6 +378,9 @@ def publish_position_traits(engine, season: int) -> dict:
     """
     from backend.players import MODEL_VERSION
     from backend.players.pipeline import POSITION_TRAIT_COLUMNS, latest_trait_week
+    from backend.players.ratings import SPECS
+
+    versions = {MODEL_VERSION, *(spec.model_version for spec, _ in SPECS.values())}
 
     rows = latest_trait_week(season)
     if rows.empty:
@@ -386,8 +389,8 @@ def publish_position_traits(engine, season: int) -> dict:
         )
     if rows["week"].nunique() != 1 or rows["as_of"].nunique() != 1:
         raise ValueError("Mixed position trait snapshot weeks or timestamps")
-    if not rows["model_version"].eq(MODEL_VERSION).all():
-        raise ValueError("Position trait rows from another model version")
+    if not rows["model_version"].isin(versions).all():
+        raise ValueError("Position trait rows from an unknown model version")
     if rows.duplicated(["season", "athlete_id", "trait"]).any():
         raise ValueError("Duplicate position trait rows")
     if not rows["trait"].eq("grade").any():
