@@ -692,7 +692,7 @@ def _dropback_rows(season: int) -> pd.DataFrame:
     part["play_id"] = _play_key(part, "nflverse_game_id", "play_id")
     part = part.drop_duplicates("play_id").set_index("play_id")["offense_players"]
     teammates = plays["play_id"].map(part).fillna("")
-    out = plays[["game_id", "model_week", "qb", "defteam", "epa"]].copy()
+    out = plays[["game_id", "model_week", "qb", "posteam", "defteam", "epa"]].copy()
     out["teammates"] = [
         [p for p in str(line).split(";") if p and p != q]
         for line, q in zip(teammates, out["qb"])
@@ -795,3 +795,258 @@ def lineup_study(
                 )
     out = pd.DataFrame(results)
     return out.groupby(["week", "model"], as_index=False)["rho"].mean()
+
+
+# Style against quality
+
+
+def self_persistence(games: pd.DataFrame) -> pd.DataFrame:
+    """Each measure's Spearman with itself one season later: a measure that
+    repeats season to season is a trait of the passer, whether or not it
+    predicts his production."""
+    totals = _sums_through(games, None)
+    totals = totals[totals["dropbacks"].ge(200)]
+    nxt = totals.assign(season=totals["season"] - 1)
+    merged = totals.merge(nxt, on=["season", "athlete_id"], suffixes=("", "_next"))
+    rows = []
+    for name in RATES:
+        now = rate(merged, name)
+        numerator, denominator = RATES[name]
+        later = merged[f"{numerator}_next"] / merged[f"{denominator}_next"].where(
+            merged[f"{denominator}_next"].gt(0)
+        )
+        per_pair = [
+            _spearman(now[merged["season"].eq(s)], later[merged["season"].eq(s)])
+            for s in sorted(merged["season"].unique())
+        ]
+        rows.append(
+            {
+                "measure": name,
+                "self_next": float(np.nanmean(per_pair))
+                if np.isfinite(per_pair).any()
+                else np.nan,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def style_table(summary: pd.DataFrame, persistence: pd.DataFrame) -> pd.DataFrame:
+    """A measure is a *quality* when it is stable and predicts future production,
+    a *style* when it is stable, repeats season to season, and does not predict
+    production, and *noise* when it is not stable."""
+    out = summary.merge(persistence, on="measure", how="left")
+    predictive = (
+        out[["rho_epa_db", "rho_success_db", "rho_epa_db_next"]].abs().max(axis=1)
+    )
+    stable = out["split_half"].ge(0.3) | out["self_next"].ge(0.5)
+    out["kind"] = np.select(
+        [~stable, predictive.ge(0.25), out["self_next"].ge(0.5)],
+        ["noise", "quality", "style"],
+        "weak",
+    )
+    out["predictive"] = predictive
+    return out[
+        ["measure", "split_half", "self_next", "predictive", "kind"]
+    ].sort_values(["kind", "self_next"], ascending=[True, False])
+
+
+# Multi-season lineup model
+
+
+def _all_dropback_rows(seasons: list[int]) -> pd.DataFrame:
+    parts = [_dropback_rows(season).assign(season=season) for season in seasons]
+    return pd.concat(parts, ignore_index=True)
+
+
+def dynamic_lineup_fit(
+    rows: pd.DataFrame,
+    penalty_qb: float,
+    penalty_walk: float,
+    penalty_other: float,
+) -> pd.DataFrame:
+    """Ridge of play EPA on quarterback, defense and teammate effects per season,
+    with each entity's effect also pulled toward its own previous season
+    (``penalty_walk``), so roster turnover across seasons identifies the split
+    between a passer and the players around him. Returns ``entity, season,
+    effect`` for the quarterbacks."""
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.linalg import lsqr
+
+    rows = rows.reset_index(drop=True)
+    keys: dict[tuple[str, str, int], int] = {}
+
+    def column(group: str, entity: str, season: int) -> int:
+        key = (group, entity, int(season))
+        if key not in keys:
+            keys[key] = len(keys)
+        return keys[key]
+
+    data, row_index, col_index = [], [], []
+    for i, (season, qb, defense, mates) in enumerate(
+        zip(rows["season"], rows["qb"], rows["defteam"], rows["teammates"])
+    ):
+        for group, entity in (
+            ("qb", qb),
+            ("def", defense),
+            *(("mate", m) for m in mates),
+        ):
+            row_index.append(i)
+            col_index.append(column(group, entity, season))
+            data.append(1.0)
+    n_rows, n_cols = len(rows), len(keys)
+    penalty = {"qb": penalty_qb, "def": penalty_other, "mate": penalty_other}
+    # Ridge toward zero, then the random walk between consecutive seasons.
+    extra_rows, extra_cols, extra_data = [], [], []
+    r = n_rows
+    for (group, entity, season), j in keys.items():
+        extra_rows.append(r)
+        extra_cols.append(j)
+        extra_data.append(np.sqrt(penalty[group]))
+        r += 1
+        previous = keys.get((group, entity, season - 1))
+        if previous is not None:
+            extra_rows += [r, r]
+            extra_cols += [j, previous]
+            extra_data += [np.sqrt(penalty_walk), -np.sqrt(penalty_walk)]
+            r += 1
+    design = csr_matrix(
+        (
+            np.concatenate([data, extra_data]),
+            (
+                np.concatenate([row_index, extra_rows]),
+                np.concatenate([col_index, extra_cols]),
+            ),
+        ),
+        shape=(r, n_cols),
+    )
+    y = np.concatenate(
+        [rows["epa"].to_numpy(float) - rows["epa"].mean(), np.zeros(r - n_rows)]
+    )
+    beta = lsqr(design, y, atol=1e-8, btol=1e-8, iter_lim=20000)[0]
+    out = pd.DataFrame(
+        [
+            (entity, season, beta[j])
+            for (group, entity, season), j in keys.items()
+            if group == "qb"
+        ],
+        columns=["athlete_id", "season", "effect"],
+    )
+    return out
+
+
+def dynamic_lineup_study(
+    seasons: list[int],
+    weeks=(6, 9),
+    penalties=((100, 200, 500), (200, 400, 800), (400, 800, 1600)),
+) -> dict[str, pd.DataFrame]:
+    """Walk-forward test of the multi-season lineup model.
+
+    In-season: at week ``w`` of season ``t``, fit on every earlier season and
+    season ``t`` through ``w``; the passer's season-``t`` effect against his
+    rest-of-season EPA per dropback, beside raw EPA to date and a two-season
+    blend of raw EPA. Transfer: for passers who changed teams between ``t - 1``
+    and ``t``, the season ``t - 1`` effect (fit on seasons through ``t - 1``)
+    against season-``t`` EPA per dropback, beside raw season ``t - 1`` EPA; the
+    same for stayers.
+    """
+    rows = _all_dropback_rows(seasons)
+    in_season, transfer = [], []
+    for t in seasons[1:]:
+        history = rows[rows["season"].lt(t)]
+        current = rows[rows["season"].eq(t)]
+        prior_raw = (
+            history[history["season"].eq(t - 1)]
+            .groupby("qb")["epa"]
+            .agg(["mean", "size"])
+        )
+        season_raw = current.groupby("qb")["epa"].agg(["mean", "size"])
+        # Transfer test uses fits through t - 1 only.
+        for penalty_qb, penalty_walk, penalty_other in penalties:
+            fitted = dynamic_lineup_fit(
+                history, penalty_qb, penalty_walk, penalty_other
+            )
+            last = fitted[fitted["season"].eq(t - 1)].set_index("athlete_id")["effect"]
+            eligible = prior_raw.index[prior_raw["size"].ge(200)].intersection(
+                season_raw.index[season_raw["size"].ge(200)]
+            )
+            tb = (
+                history[history["season"].eq(t - 1)]
+                .groupby("qb")["posteam"]
+                .agg(lambda s: s.mode().iloc[0])
+            )
+            ta = current.groupby("qb")["posteam"].agg(lambda s: s.mode().iloc[0])
+            movers = [qb for qb in eligible if tb.get(qb) != ta.get(qb)]
+            stayers = [qb for qb in eligible if qb not in movers]
+            for label, group in (("movers", movers), ("stayers", stayers)):
+                if len(group) < 5:
+                    continue
+                target = season_raw.loc[group, "mean"]
+                transfer.append(
+                    {
+                        "season": t,
+                        "group": label,
+                        "penalties": f"{penalty_qb}/{penalty_walk}/{penalty_other}",
+                        "players": len(group),
+                        "rho_adjusted": _spearman(last.reindex(group), target),
+                        "rho_raw_prior": _spearman(
+                            prior_raw.loc[group, "mean"], target
+                        ),
+                    }
+                )
+        # In-season test.
+        for week in weeks:
+            before = current[current["week"].le(week)]
+            after = current[current["week"].gt(week)]
+            raw = before.groupby("qb")["epa"].agg(["mean", "size"])
+            rest = after.groupby("qb")["epa"].agg(["mean", "size"])
+            keep = raw.index[raw["size"].ge(MIN_DROPBACKS)].intersection(
+                rest.index[rest["size"].ge(MIN_REST_DROPBACKS)]
+            )
+            target = rest.loc[keep, "mean"]
+            blend_num = raw.loc[keep, "mean"] * raw.loc[keep, "size"] + 0.6 * prior_raw[
+                "mean"
+            ].reindex(keep).fillna(0) * prior_raw["size"].reindex(keep).fillna(0)
+            blend_den = raw.loc[keep, "size"] + 0.6 * prior_raw["size"].reindex(
+                keep
+            ).fillna(0)
+            base = [
+                ("raw_epa", raw.loc[keep, "mean"]),
+                ("blend_two_seasons", blend_num / blend_den),
+            ]
+            for name, values in base:
+                in_season.append(
+                    {
+                        "season": t,
+                        "week": week,
+                        "model": name,
+                        "players": len(keep),
+                        "rho": _spearman(values, target),
+                    }
+                )
+            fit_rows = pd.concat([history, before], ignore_index=True)
+            for penalty_qb, penalty_walk, penalty_other in penalties:
+                fitted = dynamic_lineup_fit(
+                    fit_rows, penalty_qb, penalty_walk, penalty_other
+                )
+                now = fitted[fitted["season"].eq(t)].set_index("athlete_id")["effect"]
+                in_season.append(
+                    {
+                        "season": t,
+                        "week": week,
+                        "model": (
+                            f"adjusted_{penalty_qb}/{penalty_walk}/{penalty_other}"
+                        ),
+                        "players": len(keep),
+                        "rho": _spearman(now.reindex(keep), target),
+                    }
+                )
+        log.info("dynamic lineup study: season %s done", t)
+    in_season = pd.DataFrame(in_season)
+    transfer = pd.DataFrame(transfer)
+    return {
+        "in_season": in_season.groupby(["week", "model"], as_index=False)["rho"].mean(),
+        "transfer": transfer.groupby(["group", "penalties"], as_index=False)[
+            ["players", "rho_adjusted", "rho_raw_prior"]
+        ].mean(),
+        "transfer_by_season": transfer,
+    }
