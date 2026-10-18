@@ -113,6 +113,66 @@ def regular_schedule(
     return games.sort_values(["week", "game_id"]).reset_index(drop=True)
 
 
+def win_probabilities(fit, projections):
+    scale = student_t_scale(
+        np.array([p.margin_sd for p in projections]),
+        fit.config.student_t_degrees_of_freedom,
+    )
+    probabilities = student_t.cdf(
+        np.array([p.home_margin for p in projections]) / scale,
+        fit.config.student_t_degrees_of_freedom,
+    )
+    if not np.isfinite(probabilities).all():
+        raise ValueError("Invalid game win probabilities")
+    return probabilities
+
+
+def season_outcomes(fit, remaining, projections, simulations, seed, probabilities=None):
+    """Yield bounded batches of correlated winners with published marginals."""
+    if not projections:
+        for start in range(0, simulations, 5000):
+            yield start, np.empty((min(5000, simulations - start), 0), dtype=bool)
+        return
+    rng = np.random.default_rng(seed)
+    design = np.array(
+        [
+            np.diff(fit.score_design(game), axis=0)[0] * -1
+            for game in remaining.itertuples()
+        ]
+    )
+    covariance = fit.parameter_covariance
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+    if eigenvalues.min() < -1e-8:
+        raise ValueError("Invalid strength covariance")
+    root = eigenvectors * np.sqrt(np.maximum(eigenvalues, 0))
+    residual = float(
+        np.array([1.0, -1.0]) @ fit.score_residual_covariance @ np.array([1.0, -1.0])
+    )
+    if residual <= 0 or not np.isfinite(residual):
+        raise ValueError("Invalid game residual variance")
+    sd = np.sqrt(np.einsum("ij,jk,ik->i", design, covariance, design) + residual)
+    home_probability = (
+        win_probabilities(fit, projections)
+        if probabilities is None
+        else np.asarray(probabilities)
+    )
+    if home_probability.shape != (len(projections),) or not (
+        np.isfinite(home_probability).all()
+        and ((home_probability >= 0) & (home_probability <= 1)).all()
+    ):
+        raise ValueError("Invalid scenario probabilities")
+    threshold = ndtri(1 - home_probability)
+    # Bound memory independently of the requested simulation count.
+    for start in range(0, simulations, 5000):
+        stop = min(start + 5000, simulations)
+        shared = rng.standard_normal((stop - start, len(covariance))) @ root.T
+        outcomes = (
+            shared @ design.T
+            + rng.standard_normal((stop - start, len(projections))) * np.sqrt(residual)
+        ) / sd > threshold
+        yield start, outcomes
+
+
 def project_season(
     fit: JointScoringFit,
     schedule: pd.DataFrame,
@@ -166,48 +226,13 @@ def project_season(
     expected = actual[:, 0].astype(float)
     audit = []
     if projections:
-        design = np.array(
-            [
-                np.diff(fit.score_design(game), axis=0)[0] * -1
-                for game in remaining.itertuples()
-            ]
-        )
-        covariance = fit.parameter_covariance
-        eigenvalues, eigenvectors = np.linalg.eigh(covariance)
-        if eigenvalues.min() < -1e-8:
-            raise ValueError("Invalid strength covariance")
-        root = eigenvectors * np.sqrt(np.maximum(eigenvalues, 0))
-        residual = float(
-            np.array([1.0, -1.0])
-            @ fit.score_residual_covariance
-            @ np.array([1.0, -1.0])
-        )
-        if residual <= 0 or not np.isfinite(residual):
-            raise ValueError("Invalid game residual variance")
-        sd = np.sqrt(np.einsum("ij,jk,ik->i", design, covariance, design) + residual)
-        margins = np.array([p.home_margin for p in projections], dtype=float)
-        scale = student_t_scale(
-            np.array([p.margin_sd for p in projections]),
-            fit.config.student_t_degrees_of_freedom,
-        )
-        home_probability = student_t.cdf(
-            margins / scale, fit.config.student_t_degrees_of_freedom
-        )
-        if not np.isfinite(home_probability).all():
-            raise ValueError("Invalid game win probabilities")
-        threshold = ndtri(1 - home_probability)
-        rng = np.random.default_rng(seed)
+        home_probability = win_probabilities(fit, projections)
         home_indices = np.array([index[p.home_team_abbr] for p in projections])
         away_indices = np.array([index[p.away_team_abbr] for p in projections])
-        # Bound memory independently of the requested simulation count.
-        for start in range(0, simulations, 5000):
-            stop = min(start + 5000, simulations)
-            shared = rng.standard_normal((stop - start, len(covariance))) @ root.T
-            outcomes = (
-                shared @ design.T
-                + rng.standard_normal((stop - start, len(projections)))
-                * np.sqrt(residual)
-            ) / sd > threshold
+        for start, outcomes in season_outcomes(
+            fit, remaining, projections, simulations, seed
+        ):
+            stop = start + len(outcomes)
             for column, (home, away) in enumerate(zip(home_indices, away_indices)):
                 draws[start:stop, home] += outcomes[:, column]
                 draws[start:stop, away] += ~outcomes[:, column]
@@ -261,9 +286,7 @@ def project_season(
     return frame, pd.DataFrame(audit)
 
 
-def build_season_forecast(
-    season: int, as_of: datetime | None = None
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+def prepare_season_forecast(season: int, as_of: datetime):
     as_of = as_of or datetime.now(UTC)
     schedules = regular_schedule(store.read_raw("schedules.parquet"), season, as_of)
     remaining = schedules[schedules["home_score"].isna()]
@@ -313,13 +336,23 @@ def build_season_forecast(
     adjustments = compute_qb_adjustments(
         season,
         qb_week,
-        remaining,
+        schedules,
         store.qb_games(list(range(HISTORY_START_SEASON, season + 1))),
         charts,
         fit.config,
         LayerConfig(),
         as_of=as_of,
         injuries=load_injuries(season, qb_week, as_of),
+    )
+    return fit, schedules, adjustments, charts, through_week, through_date
+
+
+def build_season_forecast(
+    season: int, as_of: datetime | None = None
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    as_of = as_of or datetime.now(UTC)
+    fit, schedules, adjustments, charts, through_week, through_date = (
+        prepare_season_forecast(season, as_of)
     )
     frame, audit = project_season(
         fit, schedules, adjustments, store.team_names(), as_of

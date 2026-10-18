@@ -44,21 +44,17 @@ def recency_by_game(
     }
 
 
-def compute_qb_adjustments(
-    season: int,
-    week: int,
-    slate: pd.DataFrame,
-    qb_games: pd.DataFrame,
-    depth_charts: pd.DataFrame,
-    config: JointScoringConfig,
-    layer_config: LayerConfig,
-    as_of: datetime | None = None,
-    injuries: pd.DataFrame | None = None,
-) -> dict[str, tuple[float, float]]:
-    """game_id -> (home_adj, away_adj) for the expected starters.
-
-    QB values use career history across seasons (game_index); baselines use
-    the recent QB workload, falling back to the previous season in preseason."""
+def forecast_qb_context(
+    season,
+    week,
+    qb_games,
+    depth_charts,
+    config,
+    layer_config,
+    as_of=None,
+    injuries=None,
+):
+    """Shared cutoff QB values, identities and reliability weights."""
     game_index = store.game_index(list(range(HISTORY_START_SEASON, season + 1)))
     eligible = game_index[
         (game_index["season"] < season)
@@ -90,6 +86,33 @@ def compute_qb_adjustments(
 
     unavailable = qb_features.ruled_out(injuries, season, week, as_of)
     basis = qb_features.identification_basis(depth_charts)
+    weights = {
+        team: layer_config.qb_weight(
+            basis, context.confirmed_absence(team, passer, unavailable)
+        )
+        for team, passer in expected.items()
+    }
+    return context, expected, weights
+
+
+def compute_qb_adjustments(
+    season: int,
+    week: int,
+    slate: pd.DataFrame,
+    qb_games: pd.DataFrame,
+    depth_charts: pd.DataFrame,
+    config: JointScoringConfig,
+    layer_config: LayerConfig,
+    as_of: datetime | None = None,
+    injuries: pd.DataFrame | None = None,
+) -> dict[str, tuple[float, float]]:
+    """game_id -> (home_adj, away_adj) for the expected starters.
+
+    QB values use career history across seasons (game_index); baselines use
+    the recent QB workload, falling back to the previous season in preseason."""
+    context, expected, weights = forecast_qb_context(
+        season, week, qb_games, depth_charts, config, layer_config, as_of, injuries
+    )
     adjustments: dict[str, tuple[float, float]] = {}
     for game in slate.itertuples():
         sides = []
@@ -98,9 +121,7 @@ def compute_qb_adjustments(
             if passer is None:
                 sides.append(0.0)
                 continue
-            weight = layer_config.qb_weight(
-                basis, context.confirmed_absence(team, passer, unavailable)
-            )
+            weight = weights[team]
             sides.append(context.adjustment(team, passer, weight))
         adjustments[str(game.game_id)] = (sides[0], sides[1])
     return adjustments

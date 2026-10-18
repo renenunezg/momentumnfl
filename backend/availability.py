@@ -112,8 +112,17 @@ def parse_snapshot(snapshot, season, week, as_of, depth, teams, schedules=None):
                 )
                 if retraction(entry, week):
                     retracted[team, gsis] = date
+            details = entry.get("details")
+            details = details if isinstance(details, dict) else {}
+            return_date = details.get("returnDate")
+            valid_return = (
+                isinstance(return_date, str)
+                and re.fullmatch(r"\d{4}-\d{2}-\d{2}", return_date)
+                and pd.notna(pd.to_datetime(return_date, errors="coerce"))
+            )
             rows.append(
                 dict(
+                    estimated_return_date=return_date if valid_return else None,
                     season=season,
                     week=week,
                     team=team,
@@ -141,6 +150,7 @@ def parse_snapshot(snapshot, season, week, as_of, depth, teams, schedules=None):
         "source_updated_at",
         "source_url",
         "starter_announcement",
+        "estimated_return_date",
     ]
     # Later practice notes may replace a player's headline. Retain a previously
     # observed announcement only for its original game and forecast cutoff.

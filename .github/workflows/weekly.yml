@@ -8,7 +8,12 @@ on:
   # Supabase pg_cron: nfl-weekly-dispatch, Tuesdays at 16:00 UTC.
   repository_dispatch:
     types: [nfl-weekly]
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      playoffs_only:
+        description: Refresh and publish only the playoff forecast
+        type: boolean
+        default: false
 
 concurrency:
   group: nfl-production
@@ -86,7 +91,7 @@ jobs:
           poetry run python -m backend ingest
           --seasons ${{ steps.context.outputs.season }}
       - name: Grade completed games
-        if: steps.context.outputs.active == 'true'
+        if: steps.context.outputs.active == 'true' && inputs.playoffs_only != true
         run: >-
           poetry run python -m backend grade
           --season ${{ steps.context.outputs.season }}
@@ -122,10 +127,10 @@ jobs:
           restore-keys: |
             nfl-artifacts-${{ runner.os }}-${{ hashFiles('backend/model/**/*.py', 'backend/features/**/*.py', 'backend/etl/**/*.py', 'backend/data_static/*', 'backend/config.py', 'pyproject.toml') }}-
       - name: Build or verify fixed-model pricing and backtest artifacts
-        if: steps.context.outputs.active == 'true'
+        if: steps.context.outputs.active == 'true' && inputs.playoffs_only != true
         run: poetry run python -m backend production-artifacts
       - name: Retain reviewable model artifacts
-        if: steps.context.outputs.active == 'true'
+        if: steps.context.outputs.active == 'true' && inputs.playoffs_only != true
         uses: actions/upload-artifact@v4
         with:
           name: nfl-production-artifacts
@@ -133,18 +138,18 @@ jobs:
           retention-days: 90
           if-no-files-found: error
       - name: Fit ratings and project next week
-        if: steps.context.outputs.active == 'true'
+        if: steps.context.outputs.active == 'true' && inputs.playoffs_only != true
         run: >-
           poetry run python -m backend fit
           --season ${{ steps.context.outputs.season }}
       - name: Project regular-season wins
-        if: steps.context.outputs.active == 'true'
+        if: steps.context.outputs.active == 'true' && inputs.playoffs_only != true
         run: >-
           poetry run python -m backend season-wins
           --season ${{ steps.context.outputs.season }}
       - name: Odds snapshot
         id: odds
-        if: steps.context.outputs.active == 'true'
+        if: steps.context.outputs.active == 'true' && inputs.playoffs_only != true
         run: >-
           poetry run python -m backend odds
           --season ${{ steps.context.outputs.season }}
@@ -157,10 +162,30 @@ jobs:
         if: steps.odds.outcome == 'failure'
         run: echo "::warning::Odds refresh failed. Publishing model forecasts without a fresh priced-market snapshot."
       - name: Publish
-        if: steps.context.outputs.active == 'true'
+        if: steps.context.outputs.active == 'true' && inputs.playoffs_only != true
         run: >-
           poetry run python -m backend publish
           --season ${{ steps.context.outputs.season }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      - name: Build playoff forecast from refreshed injury reports
+        if: steps.context.outputs.active == 'true'
+        run: >-
+          poetry run python -m backend.playoffs.forecast
+          --season ${{ steps.context.outputs.season }}
+          --require-current-injuries
+          --output output/nfl-playoffs/weekly.json
+      - name: Retain playoff forecast
+        if: steps.context.outputs.active == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nfl-playoff-forecast
+          path: output/nfl-playoffs/weekly.json
+          retention-days: 90
+          if-no-files-found: error
+      - name: Publish playoff forecast
+        if: steps.context.outputs.active == 'true' && vars.NFL_PLAYOFFS_ENABLED == 'true'
+        run: poetry run python -m backend.playoffs.publish output/nfl-playoffs/weekly.json --publish
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
       - name: Retain prospective source receipts
@@ -180,7 +205,7 @@ jobs:
           retention-days: 90
           if-no-files-found: ignore
       - name: Build and publish awards after the weekly refresh
-        if: steps.context.outputs.active == 'true' && vars.NFL_AWARDS_ENABLED == 'true'
+        if: steps.context.outputs.active == 'true' && vars.NFL_AWARDS_ENABLED == 'true' && inputs.playoffs_only != true
         uses: ./.github/actions/awards
         with:
           season: ${{ steps.context.outputs.season }}
@@ -188,7 +213,7 @@ jobs:
           reuse-pbp: 'true'
           database-url: ${{ secrets.DATABASE_URL }}
       - name: Restore position grade model and season artifacts
-        if: steps.context.outputs.active == 'true' && vars.NFL_PLAYER_GRADES_ENABLED == 'true'
+        if: steps.context.outputs.active == 'true' && vars.NFL_PLAYER_GRADES_ENABLED == 'true' && inputs.playoffs_only != true
         uses: actions/cache@v4
         with:
           path: |
@@ -199,7 +224,7 @@ jobs:
             nfl-players-v1-${{ hashFiles('backend/players/**/*.py') }}-${{ steps.context.outputs.season }}-
             nfl-players-v1-${{ hashFiles('backend/players/**/*.py') }}-
       - name: Fit the position grade when no frozen model exists
-        if: steps.context.outputs.active == 'true' && vars.NFL_PLAYER_GRADES_ENABLED == 'true'
+        if: steps.context.outputs.active == 'true' && vars.NFL_PLAYER_GRADES_ENABLED == 'true' && inputs.playoffs_only != true
         shell: bash
         env:
           SEASON: ${{ steps.context.outputs.season }}
@@ -212,7 +237,7 @@ jobs:
               --dev-seasons $(seq 2016 $((last - 1))) --validate "$last"
           fi
       - name: Score and publish position traits
-        if: steps.context.outputs.active == 'true' && vars.NFL_PLAYER_GRADES_ENABLED == 'true'
+        if: steps.context.outputs.active == 'true' && vars.NFL_PLAYER_GRADES_ENABLED == 'true' && inputs.playoffs_only != true
         run: |
           poetry run python -m backend player-sources --seasons $(seq 2016 ${{ steps.context.outputs.season }})
           poetry run python -m backend position-traits --seasons ${{ steps.context.outputs.season }}

@@ -243,6 +243,22 @@ def test_current_feed_corrects_lagging_weekly_report_and_fails_closed(
     assert old.empty and not coverage
     week5, _ = availability.parse_snapshot(frozen, 2026, 5, cutoff, depth, teams)
     assert "00-0034855" in qb.ruled_out(week5, 2026, 5, cutoff)
+    baker = week5[week5.gsis_id.eq("00-0034855")].iloc[0]
+    assert baker.estimated_return_date == "2026-09-01"
+    assert baker.date_modified == frozen["observed_at"]
+    malformed_return = copy.deepcopy(frozen)
+    malformed_return["payload"]["injuries"][0]["injuries"][0]["details"][
+        "returnDate"
+    ] = "unknown"
+    parsed, _ = availability.parse_snapshot(
+        malformed_return, 2026, 5, cutoff, depth, teams
+    )
+    assert (
+        parsed.loc[parsed.gsis_id.eq("00-0034855"), "estimated_return_date"]
+        .isna()
+        .all()
+    )
+    assert "00-0034855" in qb.ruled_out(parsed, 2026, 5, cutoff)
     # Unresolved QB IDs remove coverage, rather than silently ignoring the absence.
     unresolved = copy.deepcopy(frozen)
     unresolved["payload"]["injuries"][0]["injuries"][0]["athlete"]["links"] = []
