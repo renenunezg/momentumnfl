@@ -57,6 +57,7 @@ NEXT_SEASON_COLUMNS = [
     "spearman_grade_next_grade",
     "spearman_grade_next_epa",
     "spearman_epa_next_epa",
+    "spearman_standard_next_epa",
     "holdout",
 ]
 DEV_PAIR_COLUMNS = ["variant", *NEXT_SEASON_COLUMNS[:-1]]
@@ -85,8 +86,23 @@ IN_SEASON_COLUMNS = [
     "players",
     "spearman_grade_rest_epa",
     "spearman_epa_rest_epa",
+    "spearman_standard_rest_epa",
     "holdout",
 ]
+# The box-score stat a scout would rank each group by without the grade, as a
+# second baseline beside EPA credit: (trait frame it is read from, how). ``share``
+# is the trait's own numerator over denominator; ``numerator`` and
+# ``denominator`` are that column's sum per game present. Target share for
+# receivers, sacks plus quarterback hits for linemen, tackles for linebackers,
+# interceptions plus passes defended for defensive backs.
+STANDARD_BASELINES = {
+    "WR": ("rec.target_share", "share"),
+    "TE": ("rec.target_share", "share"),
+    "DL": ("def.finishing", "denominator"),
+    "LB": ("def.tackle_share", "numerator"),
+    "DB": ("def.ball_production", "numerator"),
+}
+PRESENCE_TRAIT = "def.every_week"
 BAND_COLUMNS = [
     "position_group",
     "week",
@@ -339,7 +355,9 @@ def half_composites(frames, people, chosen, n, model) -> pd.DataFrame:
 
 
 def composite_split_half(seasons, model, games_at) -> pd.DataFrame:
-    """Split-half reliability of the grade's composite per group at each game count."""
+    """Reliability of the grade's composite per group at each game count: the
+    correlation of its odd-game and even-game halves, stepped up to the full
+    count by ``spearman_brown``."""
     by_games: dict[int, list[pd.DataFrame]] = {n: [] for n in games_at}
     for season, data in seasons.items():
         frames = data["frames"].astype({"athlete_id": str})
@@ -367,7 +385,9 @@ def composite_split_half(seasons, model, games_at) -> pd.DataFrame:
                     "position_group": group,
                     "games": n,
                     "players": len(frame),
-                    "correlation": _pearson(frame[0], frame[1]),
+                    "correlation": snapshots.spearman_brown(
+                        _pearson(frame[0], frame[1])
+                    ),
                 }
             )
     out = pd.DataFrame(rows, columns=SPLIT_COLUMNS)
@@ -436,6 +456,41 @@ def _qualified_final_epa(snapshot: pd.DataFrame) -> pd.Series:
     return final.drop_duplicates("athlete_id").set_index("athlete_id")["value"]
 
 
+def standard_values(frames: pd.DataFrame, week: int | None = None) -> pd.Series:
+    """Each player's ``STANDARD_BASELINES`` stat through ``week`` (every week when
+    None), indexed by ``athlete_id`` and ``position_group``."""
+    rows = frames.astype({"athlete_id": str})
+    if week is not None:
+        rows = rows[rows["model_week"].le(week)]
+    present = (
+        rows[rows["trait"].eq(PRESENCE_TRAIT)]
+        .groupby("athlete_id")["game_id"]
+        .nunique()
+    )
+    parts = []
+    for group, (trait, how) in STANDARD_BASELINES.items():
+        sums = (
+            rows[rows["trait"].eq(trait)]
+            .groupby("athlete_id")[["numerator", "denominator"]]
+            .sum(min_count=1)
+        )
+        if how == "share":
+            value = sums["numerator"] / sums["denominator"].where(
+                sums["denominator"] > 0
+            )
+        else:
+            games = present.reindex(sums.index)
+            value = sums[how] / games.where(games > 0)
+        parts.append(value.to_frame("value").assign(position_group=group).reset_index())
+    out = pd.concat(parts, ignore_index=True)
+    return out.set_index(["athlete_id", "position_group"])["value"]
+
+
+def _standard_for(frame: pd.DataFrame, values: pd.Series) -> pd.Series:
+    keys = pd.MultiIndex.from_frame(frame[["athlete_id", "position_group"]])
+    return pd.Series(values.reindex(keys).to_numpy(), index=frame.index)
+
+
 def next_season_table(seasons, model, validation_season: int) -> pd.DataFrame:
     """Does a final-week grade predict next season, compared with EPA credit alone?
 
@@ -443,7 +498,8 @@ def next_season_table(seasons, model, validation_season: int) -> pd.DataFrame:
     over players graded at the final week of both seasons at the same group:
     the Spearman of the season-``t`` grade with the ``t + 1`` grade and with the
     ``t + 1`` EPA credit per game (qualified at the final week), and of the
-    season-``t`` EPA credit with the ``t + 1`` EPA credit (the baseline).
+    season-``t`` EPA credit and ``STANDARD_BASELINES`` stat with the ``t + 1``
+    EPA credit (the baselines).
     ``model`` may map each pair's first season to the model that grades both of
     its seasons (cross-fitted weights).
     """
@@ -466,6 +522,9 @@ def next_season_table(seasons, model, validation_season: int) -> pd.DataFrame:
             epa=both["athlete_id"].map(epa[season]),
             epa_next=both["athlete_id"].map(epa[later]),
         )
+        both["standard"] = _standard_for(
+            both, standard_values(seasons[season]["frames"])
+        )
         for group, frame in both.groupby("position_group"):
             complete = frame.dropna(subset=["grade", "grade_next", "epa", "epa_next"])
             used = complete if len(complete) >= MIN_PAIR_PLAYERS else frame
@@ -482,6 +541,9 @@ def next_season_table(seasons, model, validation_season: int) -> pd.DataFrame:
                         used["grade"], used["epa_next"]
                     ),
                     "spearman_epa_next_epa": _spearman(used["epa"], used["epa_next"]),
+                    "spearman_standard_next_epa": _spearman(
+                        used["standard"], used["epa_next"]
+                    ),
                     "holdout": later == validation_season
                     and season == validation_season - 1,
                 }
@@ -517,7 +579,8 @@ def in_season_table(seasons, model, validation_season: int) -> pd.DataFrame:
     Per season, checkpoint week and group, over players graded at that week with
     at least three credited games afterwards: the Spearman of the grade with the
     player's EPA credit per game over the remaining weeks, and of his EPA credit to
-    date with the same (the baseline). ``holdout`` marks the validation season.
+    date and ``STANDARD_BASELINES`` stat to date with the same (the baselines).
+    ``holdout`` marks the validation season.
     """
     rows = []
     for season in sorted(seasons):
@@ -543,6 +606,9 @@ def in_season_table(seasons, model, validation_season: int) -> pd.DataFrame:
                 later_games=graded["athlete_id"].map(enough).fillna(0),
             )
             graded = graded[graded["later_games"].ge(3)]
+            graded = graded.assign(
+                standard=_standard_for(graded, standard_values(frames, week))
+            )
             for group, frame in graded.groupby("position_group"):
                 rows.append(
                     {
@@ -554,6 +620,9 @@ def in_season_table(seasons, model, validation_season: int) -> pd.DataFrame:
                             frame["grade"], frame["rest"]
                         ),
                         "spearman_epa_rest_epa": _spearman(frame["epa"], frame["rest"]),
+                        "spearman_standard_rest_epa": _spearman(
+                            frame["standard"], frame["rest"]
+                        ),
                         "holdout": season == validation_season,
                     }
                 )
@@ -636,6 +705,41 @@ def pair_means(
     return table.groupby("position_group")[column].mean()
 
 
+def pair_values(
+    table: pd.DataFrame, column: str = "spearman_grade_next_epa"
+) -> pd.Series:
+    """The development pairs' values, indexed by group and season."""
+    return table.set_index(["position_group", "season"])[column]
+
+
+def clearly_better(candidate: pd.Series, reference: pd.Series, group: str) -> bool:
+    """Whether ``candidate`` beats ``reference`` at ``group`` by more than one
+    standard error of their paired difference over the development pairs, so a
+    change is not adopted on a gain the pairs cannot tell from noise. One
+    standard error is an evidence bar, not a tuned value."""
+    if group not in candidate.index.get_level_values(0) or group not in (
+        reference.index.get_level_values(0)
+    ):
+        return False
+    both = pd.concat(
+        [candidate.xs(group), reference.xs(group)], axis=1, keys=["new", "old"]
+    ).dropna()
+    if len(both) < 2:
+        return False
+    difference = both["new"] - both["old"]
+    return bool(difference.mean() > difference.std(ddof=1) / np.sqrt(len(difference)))
+
+
+def _kept_pairs(kept: dict[str, bool], new: pd.Series, old: pd.Series) -> pd.Series:
+    """Per group, the development pairs of ``new`` where it was kept, else ``old``."""
+    return pd.concat(
+        [
+            source[source.index.get_level_values(0) == g]
+            for g, source in ((g, new if chosen else old) for g, chosen in kept.items())
+        ]
+    )
+
+
 def _replace_groups(base: pd.DataFrame, parts: dict[str, pd.DataFrame]) -> pd.DataFrame:
     kept = base[~base["position_group"].isin(parts)]
     return pd.concat([kept, *parts.values()], ignore_index=True)[grade.WEIGHT_COLUMNS]
@@ -704,10 +808,11 @@ def select_grade_model(dev, pooled, portability_rows, orientation):
     """The grade model, chosen position by position on the development pairs.
 
     Starting from the current grade (reliability x portability weights without
-    EPA credit), each change is kept at a group only where the dev-pair mean
-    improves: (1) ``epa.credit`` as a trait; (2) weights fitted by a bounded
-    ridge of next-season EPA credit on the traits, evaluated leave-one-pair-out;
-    (3) shrinkage of the composite by games / (games + k_g).
+    EPA credit), each change is kept at a group only where it is
+    ``clearly_better`` on the development pairs: (1) ``epa.credit`` as a trait;
+    (2) weights fitted by a bounded ridge of next-season EPA credit on the
+    traits, evaluated leave-one-pair-out; (3) shrinkage of the composite by
+    games / (games + k_g).
     """
     dev_seasons = sorted(dev)
     with_epa = grade.trait_weights(pooled, portability_rows, orientation)
@@ -721,10 +826,9 @@ def select_grade_model(dev, pooled, portability_rows, orientation):
         dev_pair_table(dev, epa_model, "epa_trait"),
     ]
     base_mean, epa_mean = pair_means(tables[0]), pair_means(tables[1])
+    base_pairs, epa_pairs = pair_values(tables[0]), pair_values(tables[1])
     groups = sorted(grade.graded_groups(epa_model) | grade.graded_groups(current))
-    epa_kept = {
-        g: bool(epa_mean.get(g, np.nan) > base_mean.get(g, np.nan)) for g in groups
-    }
+    epa_kept = {g: clearly_better(epa_pairs, base_pairs, g) for g in groups}
 
     epa_rows = with_epa[with_epa["trait"].eq(EPA_TRAIT)]
     dropped_epa = epa_rows.assign(weight=0.0, status="not kept")
@@ -743,9 +847,7 @@ def select_grade_model(dev, pooled, portability_rows, orientation):
         pd.concat([without, dropped_epa], ignore_index=True), step1_parts
     )
     model1 = _model(step1, dev_seasons)
-    step1_mean = pd.Series(
-        {g: (epa_mean if epa_kept[g] else base_mean).get(g, np.nan) for g in groups}
-    )
+    step1_pairs = _kept_pairs(epa_kept, epa_pairs, base_pairs)
 
     designs, lowers = {}, {}
     for g in groups:
@@ -770,10 +872,9 @@ def select_grade_model(dev, pooled, portability_rows, orientation):
             parts[g] = grade.fitted_group_weights(step1, g, coefficients)
         cross_models[held] = _model(_replace_groups(step1, parts), dev_seasons)
     fitted_table = dev_pair_table(dev, cross_models, "fitted")
-    fitted_mean = pair_means(fitted_table)
+    fitted_mean, fitted_pairs = pair_means(fitted_table), pair_values(fitted_table)
     fitted_kept = {
-        g: g in designs and bool(fitted_mean.get(g, np.nan) > step1_mean.get(g, np.nan))
-        for g in groups
+        g: g in designs and clearly_better(fitted_pairs, step1_pairs, g) for g in groups
     }
     final_parts, penalties = {}, {}
     for g in groups:
@@ -782,12 +883,7 @@ def select_grade_model(dev, pooled, portability_rows, orientation):
             final_parts[g] = grade.fitted_group_weights(step1, g, coefficients)
     step2 = _replace_groups(step1, final_parts)
     model2 = _model(step2, dev_seasons)
-    step2_mean = pd.Series(
-        {
-            g: (fitted_mean if fitted_kept[g] else step1_mean).get(g, np.nan)
-            for g in groups
-        }
-    )
+    step2_pairs = _kept_pairs(fitted_kept, fitted_pairs, step1_pairs)
     composite = composite_split_half(dev, model2, RELIABILITY_GAMES)
     reliability = composite.dropna(subset=["correlation"])[
         grade.RELIABILITY_COLUMNS
@@ -809,7 +905,7 @@ def select_grade_model(dev, pooled, portability_rows, orientation):
     shrink_table = dev_pair_table(dev, shrink_models, "shrinkage")
     shrink_mean = pair_means(shrink_table)
     shrink_kept = {
-        g: bool(shrink_mean.get(g, np.nan) > step2_mean.get(g, np.nan)) for g in groups
+        g: clearly_better(pair_values(shrink_table), step2_pairs, g) for g in groups
     }
     model = _model(
         step2,
@@ -1046,10 +1142,15 @@ def report_markdown(result: BacktestResult) -> str:
         "final-week grade in season t with his final-week EPA credit per game in",
         "season t + 1, per position, averaged over the development pairs, among",
         "players qualified at the same position in both seasons. EPA credit alone",
-        "(season t against t + 1) is the baseline.",
+        "(season t against t + 1) is the baseline, beside the box-score stat each",
+        "group is usually ranked by (`spearman_standard_next_epa`: target share for",
+        "receivers, sacks plus quarterback hits per game for linemen, tackles per",
+        "game for linebackers, interceptions plus passes defended per game for",
+        "defensive backs).",
         "",
-        "The starting grade weights each trait by its split-half reliability at 8",
-        "games (pooled over the development seasons; under 30 players counts as",
+        "The starting grade weights each trait by its reliability at 8 games (odd",
+        "against even games, stepped up to 8 games by Spearman-Brown, pooled over",
+        "the development seasons; under 30 players counts as",
         "unmeasured) times its portability (the mover slope over the stayer slope",
         "of this season's value on last season's; imputed where fewer than 20",
         "players moved). Three changes were then tried in order and each kept at a",
@@ -1057,7 +1158,9 @@ def report_markdown(result: BacktestResult) -> str:
         "trait, weights fitted by a bounded ridge of next-season EPA credit on the",
         "trait z-scores (penalty chosen leave-one-pair-out from 61 log-spaced",
         "values), and shrinkage of the composite by games / (games + k) with k the",
-        "games at which the composite's split-half reliability reaches one half.",
+        "games at which the composite's reliability reaches one half. A change is",
+        "kept only where its mean gain over the development pairs exceeds one",
+        "standard error of the paired differences.",
         "",
         "### Selection",
         "",
@@ -1097,7 +1200,8 @@ def report_markdown(result: BacktestResult) -> str:
         "",
         "## Reliability",
         "",
-        "Split-half correlations per season and pooled; `grade` rows are the",
+        "Odd-game against even-game correlations stepped up by Spearman-Brown to",
+        "the full game count, per season and pooled; `grade` rows are the",
         "composite's curve that sets the card's uncertainty band.",
         "",
         markdown_table(result.reliability),
@@ -1127,6 +1231,14 @@ def report_markdown(result: BacktestResult) -> str:
         "  id; presence is a union of box rows, snaps and credited plays, so a",
         "  defender with none of the three in a game is treated as absent.",
         "- The offensive line is one unit per team; no lineman is tagged on any play.",
+        "- A defender's EPA credit is one-sided: he shares the value of plays he is",
+        "  tagged on that cost the offense, and nothing is charged to him for a gain",
+        "  he allowed, so defensive credit and wins above replacement grow with",
+        "  playing time. Defensive grades are judged against next-season credit built",
+        "  from the same tags.",
+        "- Punters have no production outcome to validate against; their grade is",
+        "  expected points per punt above the league, and kickers are ungraded",
+        "  because field goal accuracy does not repeat over 8 games.",
         "",
     ]
     return "\n".join(lines)

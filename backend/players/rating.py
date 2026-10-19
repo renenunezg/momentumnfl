@@ -12,7 +12,8 @@ against even games, not a formula inherited from elsewhere.
 
 A ``RatingSpec`` says what a position's version of this is: its measures
 (all from feeds that publish during the season), which carry weight, the
-kind of each (quality, processing, role, style, noise) and the target.
+kind of each (quality, processing, role, style, noise), the target and the
+fixed-weight baselines the rating must beat.
 """
 
 import json
@@ -24,6 +25,7 @@ import numpy as np
 import pandas as pd
 
 from backend.config import PROCESSED_DIR
+from backend.players.grade import reliability_at
 from backend.players.qb_study import (
     _ridge_fit,
     _spearman,
@@ -32,6 +34,7 @@ from backend.players.qb_study import (
     rate,
     split_half,
 )
+from backend.players.snapshots import spearman_brown
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +43,7 @@ PENALTY_GRID = np.logspace(-1, 4, 26)
 GRADE_MEAN, GRADE_SD, GRADE_MIN, GRADE_MAX = 50.0, 10.0, 20.0, 80.0
 RELIABILITY_GAMES = (4, 6, 8, 12)
 TARGET = "target"
+BASELINE_PREFIX = "baseline_"
 MIN_RELIABILITY_PLAYERS = 30
 
 
@@ -54,8 +58,9 @@ class RatingSpec:
     prior_features: list[str]
     # The measure the rating forecasts over the rest of the season.
     target: str
-    # The single-measure baseline the rating must beat.
-    baseline: str
+    # The baselines the rating must beat: name to fixed weights on raw measures
+    # to date. Nothing in a baseline is fitted here.
+    baselines: dict[str, dict[str, float]]
     # Volume column with its floors: to date, rest of season, prior season.
     volume: str
     min_volume: float
@@ -65,11 +70,10 @@ class RatingSpec:
     lower_is_better: frozenset[str] = frozenset()
 
     def feature_columns(self) -> list[str]:
-        return [
-            *self.rating_features,
-            *[f"prior_{f}" for f in self.prior_features],
-            "prior_games",
-        ]
+        """The rating features, then the prior season's (with its games) when
+        the position uses one."""
+        prior = [f"prior_{f}" for f in self.prior_features]
+        return [*self.rating_features, *prior, *(["prior_games"] if prior else [])]
 
     def kind_of(self, measure: str) -> str:
         for kind, names in self.kinds.items():
@@ -92,7 +96,7 @@ class RatingModel:
     residual_sd: dict[int, float]
     # Per measure: game-to-game reliability, kind and rating membership.
     measures: pd.DataFrame
-    # Split-half reliability of the rating itself at each game count.
+    # Reliability of the rating itself at each game count (``rating_reliability``).
     reliability: dict[int, float] = field(default_factory=dict)
     validation: pd.DataFrame = field(default_factory=pd.DataFrame)
 
@@ -144,8 +148,11 @@ def checkpoint_rows(games: pd.DataFrame, spec: RatingSpec) -> pd.DataFrame:
         row = merged[["season", "athlete_id"]].assign(week=week)
         for name in spec.rating_features:
             row[name] = rate(merged, name, spec.rates).to_numpy()
-        if spec.baseline not in row:
-            row[spec.baseline] = rate(merged, spec.baseline, spec.rates).to_numpy()
+        for name, weights in spec.baselines.items():
+            row[f"{BASELINE_PREFIX}{name}"] = sum(
+                weight * rate(merged, measure, spec.rates).to_numpy()
+                for measure, weight in weights.items()
+            )
         row[TARGET] = (
             merged[f"{numerator}_rest"]
             / merged[f"{denominator}_rest"].where(merged[f"{denominator}_rest"].gt(0))
@@ -156,10 +163,7 @@ def checkpoint_rows(games: pd.DataFrame, spec: RatingSpec) -> pd.DataFrame:
     )
     rows["prior_games"] = rows["prior_games"].fillna(0.0)
     rows = rows.dropna(subset=[TARGET])
-    baseline = rows[spec.baseline].copy()
-    rows = _standardise(rows, spec)
-    rows["baseline"] = baseline.to_numpy()
-    return rows
+    return _standardise(rows, spec)
 
 
 # Fitting
@@ -193,36 +197,36 @@ def _out_of_sample(
 
 
 def evaluate(rows: pd.DataFrame, prediction: np.ndarray) -> pd.DataFrame:
-    """Per week: Spearman of the forecast and of the baseline with the target,
-    averaged over seasons."""
-    frame = rows.assign(prediction=prediction)
+    """Per week: Spearman of the forecast (``rho_rating``) and of each baseline
+    (``rho_<name>``) with the target, averaged over the seasons that have one."""
+    frame = rows.assign(rating=prediction)
+    scores = {
+        "rating": "rating",
+        **{
+            column[len(BASELINE_PREFIX) :]: column
+            for column in frame.columns
+            if column.startswith(BASELINE_PREFIX)
+        },
+    }
     out = []
     for week, part in frame.groupby("week"):
-        pairs = np.array(
-            [
-                (
-                    _spearman(p["prediction"], p[TARGET]),
-                    _spearman(p["baseline"], p[TARGET]),
-                )
-                for _, p in part.groupby("season")
-            ],
-            dtype=float,
-        )
-        out.append(
-            {
-                "week": int(week),
-                "rows": len(part),
-                "rho_rating": float(np.nanmean(pairs[:, 0])) if len(pairs) else np.nan,
-                "rho_baseline": float(np.nanmean(pairs[:, 1]))
-                if len(pairs)
-                else np.nan,
-            }
-        )
+        row = {"week": int(week), "rows": len(part)}
+        for name, column in scores.items():
+            rho = [_spearman(p[column], p[TARGET]) for _, p in part.groupby("season")]
+            finite = [r for r in rho if np.isfinite(r)]
+            row[f"rho_{name}"] = float(np.mean(finite)) if finite else np.nan
+        out.append(row)
     return pd.DataFrame(out)
 
 
 def measure_table(games: pd.DataFrame, spec: RatingSpec) -> pd.DataFrame:
-    reliability = split_half(games, rates=spec.rates).set_index("measure")["split_half"]
+    """Per measure: its kind, rating membership and reliability at 8 games (the
+    split-half correlation of 4-game halves, stepped up by Spearman-Brown)."""
+    reliability = (
+        split_half(games, rates=spec.rates)
+        .set_index("measure")["split_half"]
+        .map(spearman_brown)
+    )
     rows = []
     for kind, names in spec.kinds.items():
         for name in names:
@@ -253,9 +257,13 @@ def _half_sums(games: pd.DataFrame, n: int) -> pd.DataFrame:
 def rating_reliability(
     games: pd.DataFrame, model: RatingModel, spec: RatingSpec
 ) -> dict:
-    """Correlation of the rating on a player's odd games with the rating on his
-    even games at each game count, prior-season features held at zero so only
-    the current games are tested."""
+    """The rating's reliability at each game count ``n``: the correlation of the
+    rating on a player's odd games with the rating on his even games (``n / 2``
+    each), stepped up to ``n`` games by Spearman-Brown. Both halves carry the
+    player's own prior season, as the published rating does, so the band is the
+    grade's error from which games were sampled this season, not the prior's."""
+    prior = _prior_table(games, spec)
+    prior["season"] = prior["season"] + 1
     out = {}
     for n in RELIABILITY_GAMES:
         halves = _half_sums(games, n)
@@ -263,9 +271,8 @@ def rating_reliability(
         rows = halves[["season", "athlete_id", "half"]].copy()
         for name in spec.rating_features:
             rows[name] = rate(halves, name, spec.rates).to_numpy()
-        for name in spec.prior_features:
-            rows[f"prior_{name}"] = 0.0
-        rows["prior_games"] = 0.0
+        rows = rows.merge(prior, on=["season", "athlete_id"], how="left")
+        rows["prior_games"] = rows["prior_games"].fillna(0.0)
         rows["week"] = rows["half"]
         rows = _standardise(rows, spec)
         rows["rating"] = model.predict(rows)
@@ -273,7 +280,7 @@ def rating_reliability(
             index=["season", "athlete_id"], columns="half", values="rating"
         ).dropna()
         out[n] = (
-            float(wide[0].corr(wide[1]))
+            spearman_brown(float(wide[0].corr(wide[1])))
             if len(wide) >= MIN_RELIABILITY_PLAYERS
             else np.nan
         )
@@ -281,15 +288,15 @@ def rating_reliability(
 
 
 def band_at(model: RatingModel, games: pd.Series) -> np.ndarray:
-    """GRADE_SD x sqrt(1 - r), r the rating's reliability interpolated at the
-    player's games from r = 0 at zero games, flat past the last point."""
-    table = sorted((g, r) for g, r in model.reliability.items() if np.isfinite(r))
-    if not table:
+    """GRADE_SD x sqrt(1 - r), r the rating's reliability at the player's games
+    on the position grade's curve (``grade.reliability_at``)."""
+    table = pd.DataFrame(
+        [(g, r) for g, r in model.reliability.items() if np.isfinite(r)],
+        columns=["games", "correlation"],
+    )
+    if table.empty:
         return np.full(len(games), np.nan)
-    x = np.array([0.0, *[g for g, _ in table]])
-    r = np.array([0.0, *[v for _, v in table]])
-    rel = np.clip(np.interp(games.to_numpy(float), x, r), 0.0, 1.0)
-    return GRADE_SD * np.sqrt(1.0 - rel)
+    return GRADE_SD * np.sqrt(1.0 - reliability_at(table, games))
 
 
 def fit_rating(

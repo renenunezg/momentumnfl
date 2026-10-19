@@ -1,8 +1,10 @@
 """Kicker and punter traits.
 
 A field goal is judged against what kicks of its distance usually make, from
-the frozen expectation tables; a punt against the league's gross average
-through the previous week. Neither is opponent adjusted.
+the frozen expectation tables. A punt is judged twice against the league
+through the previous week: by its gross distance, which the punter's leg owns,
+and by its expected points, which credit a short punt that pins the opponent
+from midfield and charge returns. Neither is opponent adjusted.
 """
 
 import pandas as pd
@@ -17,6 +19,7 @@ SPECIAL_TRAITS = {
     for spec in (
         TraitSpec("k.field_goal", ("K",), "counted"),
         TraitSpec("p.punt_average", ("P",), "counted"),
+        TraitSpec("p.punt_epa", ("P",), "counted"),
     )
 }
 FIELD_GOAL_RESULTS = ("made", "missed", "blocked")
@@ -46,25 +49,37 @@ def kicker_traits(ctx: SeasonContext, tables: ExpectationTables) -> pd.DataFrame
     return trait_rows(per_game(kicks, over, 1.0), SPECIAL_TRAITS["k.field_goal"])
 
 
-def punter_traits(ctx: SeasonContext) -> pd.DataFrame:
-    """Gross punt yards above the league average through the previous week, per punt."""
-    punts = _kick_rows(ctx, "punt", "punter_player_id")
-    punts = punts[punts["kick_distance"].notna()]
-    games = per_game(punts, punts["kick_distance"].astype(float), 1.0).rename(
-        columns={"numerator": "yards", "denominator": "punts"}
+def _above_league(punts: pd.DataFrame, value: pd.Series, spec) -> pd.DataFrame:
+    """Per game, ``value`` summed above the league's per-punt average through the
+    previous week; the season's first week has no average and a NaN numerator."""
+    games = per_game(punts, value.astype(float), 1.0).rename(
+        columns={"numerator": "total", "denominator": "punts"}
     )
-    league = prior_totals(games, [], ["yards", "punts"])
-    league["league_average"] = league["yards"] / league["punts"].where(
+    league = prior_totals(games, [], ["total", "punts"])
+    league["league_average"] = league["total"] / league["punts"].where(
         league["punts"] > 0
     )
     merged = games.merge(
         league[["model_week", "league_average"]], on="model_week", how="left"
     )
-    merged["numerator"] = merged["yards"] - merged["punts"] * merged["league_average"]
+    merged["numerator"] = merged["total"] - merged["punts"] * merged["league_average"]
     merged["denominator"] = merged["punts"]
-    return trait_rows(
-        merged[[*GAME_KEYS, "numerator", "denominator"]],
-        SPECIAL_TRAITS["p.punt_average"],
+    return trait_rows(merged[[*GAME_KEYS, "numerator", "denominator"]], spec)
+
+
+def punter_traits(ctx: SeasonContext) -> pd.DataFrame:
+    """Gross yards and expected points per punt, each above the league average."""
+    punts = _kick_rows(ctx, "punt", "punter_player_id")
+    gross = punts[punts["kick_distance"].notna()]
+    valued = punts[punts["epa"].notna()]
+    return pd.concat(
+        [
+            _above_league(
+                gross, gross["kick_distance"], SPECIAL_TRAITS["p.punt_average"]
+            ),
+            _above_league(valued, valued["epa"], SPECIAL_TRAITS["p.punt_epa"]),
+        ],
+        ignore_index=True,
     )
 
 

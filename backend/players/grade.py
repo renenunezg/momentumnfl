@@ -1,14 +1,14 @@
 """The position grade: a 20 to 80 scouting number built from a player's traits.
 
 Each trait's weight at a position comes from player-level evidence on the
-development seasons only: its split-half reliability at 8 games (how well a
-player's odd games predict his even games) times its portability (the share of
-its year-over-year persistence that survives a change of team), or, where it
-predicts the player's own next season better, a bounded ridge fit of next
-season's EPA credit on the traits. Unreliable traits (reliability under
-``NOISE_RELIABILITY``), traits whose reliability cannot be measured, and traits
-that do not travel (portability at or below zero) get no weight and stay on the
-card as descriptive.
+development seasons only: its reliability at 8 games (his odd games against
+his even games, stepped up to 8 games by Spearman-Brown) times its portability
+(the share of its year-over-year persistence that survives a change of team),
+or, where it predicts the player's own next season clearly better, a bounded
+ridge fit of next season's EPA credit on the traits. Unreliable traits
+(reliability under ``NOISE_RELIABILITY``), traits whose reliability cannot be
+measured, and traits that do not travel (portability at or below zero) get no
+weight and stay on the card as descriptive.
 
 A player's ``composite`` is the weighted mean of his oriented, capped trait
 z-scores among qualified players at the group that week, over the traits
@@ -425,15 +425,25 @@ def _scaled(
     return z.where(values.isna() | z.notna(), 0.0)
 
 
+def _prophecy(games: np.ndarray, at: float, r: float) -> np.ndarray:
+    """Spearman-Brown: the reliability at ``games`` from ``r`` measured at ``at``."""
+    scale = games / at
+    return scale * r / (1.0 + (scale - 1.0) * r)
+
+
 def reliability_at(table: pd.DataFrame, games: pd.Series) -> np.ndarray:
-    """Linear in games from r(0) = 0, flat past the last point, clipped to [0, 1]."""
+    """Spearman-Brown from the first measured point below it, linear between
+    measured points, flat past the last, clipped to [0, 1]."""
     table = table.dropna(subset=["correlation"])
     if table.empty:
         return np.zeros(len(games))
     table = table.sort_values("games")
-    x = np.concatenate([[0.0], table["games"].to_numpy(float)])
-    r = np.concatenate([[0.0], table["correlation"].to_numpy(float)])
-    return np.clip(np.interp(games.to_numpy(float), x, r), 0.0, 1.0)
+    x, r = table["games"].to_numpy(float), table["correlation"].to_numpy(float)
+    played = games.to_numpy(float)
+    out = np.interp(played, x, r)
+    below = played < x[0]
+    out[below] = _prophecy(played[below], x[0], r[0])
+    return np.clip(out, 0.0, 1.0)
 
 
 def graded_groups(model: GradeModel) -> set[str]:
@@ -441,22 +451,27 @@ def graded_groups(model: GradeModel) -> set[str]:
 
 
 def shrink_games_from(reliability: pd.DataFrame) -> dict[str, float]:
-    """Per group, the games at which the reliability curve (linear from r(0) = 0)
-    first reaches ``SHRINK_RELIABILITY``, or ``SHRINK_CAP_GAMES``."""
+    """Per group, the games at which the ``reliability_at`` curve first reaches
+    ``SHRINK_RELIABILITY``, or ``SHRINK_CAP_GAMES``."""
     out = {}
     for group, table in reliability.dropna(subset=["correlation"]).groupby(
         "position_group"
     ):
         table = table.sort_values("games")
-        games = np.concatenate([[0.0], table["games"].to_numpy(float)])
-        r = np.concatenate([[0.0], table["correlation"].to_numpy(float)])
-        k = SHRINK_CAP_GAMES
-        for i in range(1, len(r)):
-            if r[i] >= SHRINK_RELIABILITY:
-                k = games[i - 1] + (SHRINK_RELIABILITY - r[i - 1]) / (
-                    r[i] - r[i - 1]
-                ) * (games[i] - games[i - 1])
-                break
+        games = table["games"].to_numpy(float)
+        r = table["correlation"].to_numpy(float)
+        target, k = SHRINK_RELIABILITY, SHRINK_CAP_GAMES
+        if r[0] >= target:
+            # Below the first point the curve is Spearman-Brown, which reaches
+            # the target at games x target (1 - r) / (r (1 - target)).
+            k = games[0] * target * (1.0 - r[0]) / (r[0] * (1.0 - target))
+        else:
+            for i in range(1, len(r)):
+                if r[i] >= target:
+                    k = games[i - 1] + (target - r[i - 1]) / (r[i] - r[i - 1]) * (
+                        games[i] - games[i - 1]
+                    )
+                    break
         out[group] = float(min(k, SHRINK_CAP_GAMES))
     return out
 

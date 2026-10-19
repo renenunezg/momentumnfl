@@ -8,6 +8,7 @@ trait's registered aggregate, so a value is what was knowable at the time.
 
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 
 from backend.players import MODEL_VERSION, TRAITS, UNIT_PREFIX
@@ -241,17 +242,29 @@ def weekly_trait_snapshots(
     return out[TRAIT_SNAPSHOT_COLUMNS]
 
 
+def spearman_brown(half: float) -> float:
+    """The reliability of a full sample from the correlation of its two halves.
+
+    Two halves of ``n // 2`` games correlate at the reliability of ``n // 2``
+    games; ``2r / (1 + r)`` steps that up to ``n`` games.
+    """
+    if not np.isfinite(half) or half <= -1.0:
+        return np.nan
+    return float(2.0 * half / (1.0 + half))
+
+
 def split_half_reliability(
     frames: pd.DataFrame,
     positions: pd.DataFrame,
     games_at: tuple[int, ...] = (4, 8, 12),
 ) -> pd.DataFrame:
-    """Correlation between a trait's odd-game and even-game values per group.
+    """A trait's reliability at ``n`` games per group, from its odd and even games.
 
     ``n`` in ``games_at`` counts the player's total games: a player needs ``n``
     games with a numerator for the trait; his games in week order alternate
     between the halves, and each half aggregates its first ``n // 2`` games.
-    ``latest`` traits have no games and are skipped.
+    ``correlation`` is the halves' correlation stepped up to ``n`` games by
+    ``spearman_brown``. ``latest`` traits have no games and are skipped.
     """
     rows = frames.astype({"athlete_id": str})
     groups = position_groups(rows, positions)
@@ -288,7 +301,7 @@ def split_half_reliability(
                     "trait": trait,
                     "games": n,
                     "players": len(frame),
-                    "correlation": float(frame[0].corr(frame[1])),
+                    "correlation": spearman_brown(float(frame[0].corr(frame[1]))),
                 }
             )
     out = pd.DataFrame(results, columns=RELIABILITY_COLUMNS)

@@ -1,10 +1,14 @@
-"""The running back rating, version 2, on the shared rating engine.
+"""The running back rating, version 3, on the shared rating engine.
 
-The headline is the expected EPA per game over the rest of the season, which
-is role times efficiency. The study found no efficiency measure that repeats
-game to game for backs, and only role (carry share, touches, target rate)
-that does, so the rating is role first by evidence, the efficiency measures
-are shown with their low reliabilities, and the band says so.
+The headline is the expected EPA per game over the rest of the season. Role
+(carry share, touches, target rate) is what repeats game to game for backs,
+but on the 2016 to 2024 development seasons carry share, touches per game and
+the prior season added nothing to rest-of-season EPA per game once efficiency
+was in, and with them the ridge flipped signs between collinear role
+measures. Version 3 keeps what earned its place leaving one season out: EPA
+per touch, rushing success, yards after catch and target rate. Those
+efficiency measures repeat poorly, so the rating is an efficiency forecast
+with a wide band; the role measures stay on the card as descriptive.
 """
 
 import pandas as pd
@@ -15,7 +19,7 @@ from backend.players.rb_study import RB_RATES, build_rb_games
 
 RB_SPEC = RatingSpec(
     position="RB",
-    model_version="nfl_rb_rating_v2",
+    model_version="nfl_rb_rating_v3",
     rates=RB_RATES,
     kinds={
         "role": ["carry_share", "touches_game", "target_rate"],
@@ -42,19 +46,10 @@ RB_SPEC = RatingSpec(
             "ngs_efficiency",
         ],
     },
-    rating_features=[
-        "epa_touch",
-        "success_carry",
-        "first_down_rate",
-        "stuff_rate",
-        "yac_rec",
-        "carry_share",
-        "target_rate",
-        "touches_game",
-    ],
-    prior_features=["epa_touch", "carry_share", "touches_game"],
+    rating_features=["epa_touch", "success_carry", "yac_rec", "target_rate"],
+    prior_features=[],
     target="epa_game",
-    baseline="epa_game",
+    baselines={"epa_game": {"epa_game": 1.0}},
     volume="touches",
     min_volume=40,
     min_rest_volume=60,

@@ -68,14 +68,8 @@ def fit_ratings(dev_seasons: list[int], validation_season: int) -> dict[str, Pat
         model = fit_rating(games, spec, dev_seasons, validation_season)
         out[position] = save_model(model, model_path(spec, max(dev_seasons)))
         held = model.validation[model.validation["set"].eq("validation")]
-        log.info(
-            "%s rating validation %s: rating %.3f, baseline %.3f over weeks %s",
-            position,
-            validation_season,
-            held["rho_rating"].mean(),
-            held["rho_baseline"].mean(),
-            held["week"].min(),
-        )
+        rho = held.filter(like="rho_").mean().round(3).to_dict()
+        log.info("%s rating validation %s: mean %s", position, validation_season, rho)
     return out
 
 

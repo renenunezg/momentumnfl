@@ -1,11 +1,17 @@
-"""The quarterback rating, version 2, on the shared rating engine.
+"""The quarterback rating, version 3, on the shared rating engine.
 
 The headline is the expected EPA per dropback over the rest of the season.
 The measures that carry weight are the production core (EPA and success per
-dropback, completion over expected, sacks, pressure to sack, late-down
-conversion) and the processing measures from FTN charting (what happens past
-the first read, the checkdown rate, sacks and success when blitzed), with the
-prior season blended in. Every input publishes during the season.
+dropback, sacks, late-down conversion) and the processing measures from FTN
+charting (success past the first read, sacks and success when blitzed), with
+the prior season blended in. Every input publishes during the season.
+
+Version 3 drops completion over expected (current and prior season), pressure
+to sack, the rate of throws past the first read and the checkdown rate: on the
+2016 to 2024 development seasons each carried a standardised coefficient near
+zero, and leaving them out lowered the leave-one-season-out error and raised
+the rating's rank correlation with the rest of the season. They stay on the
+card as descriptive measures.
 """
 
 import pandas as pd
@@ -57,7 +63,7 @@ PRODUCTION_RATES = {
 
 QB_SPEC = RatingSpec(
     position="QB",
-    model_version="nfl_qb_rating_v2",
+    model_version="nfl_qb_rating_v3",
     rates=PRODUCTION_RATES,
     kinds={
         "quality": [
@@ -106,19 +112,21 @@ QB_SPEC = RatingSpec(
     rating_features=[
         "epa_db",
         "success_db",
-        "cpoe",
         "sack_rate",
-        "pfr_pressure_to_sack",
         "late_down_conv",
-        "beyond_first_read_rate",
         "success_beyond_first",
-        "checkdown_rate",
         "blitz_sack_rate",
         "blitz_success",
     ],
-    prior_features=["epa_db", "success_db", "cpoe", "sack_rate"],
+    prior_features=["epa_db", "success_db", "sack_rate"],
     target="epa_db",
-    baseline="epa_db",
+    baselines={
+        "epa_db": {"epa_db": 1.0},
+        # The public EPA + CPOE composite (Ben Baldwin, guga31bb/nfl
+        # code/season_qb_stats.R): 0.248070 x EPA per play + 0.006686 x CPOE in
+        # percentage points; the intercept does not change a rank.
+        "epa_cpoe": {"epa_db": 0.248070, "cpoe": 0.006686},
+    },
     volume="dropbacks",
     min_volume=60,
     min_rest_volume=100,

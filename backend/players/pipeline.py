@@ -141,7 +141,12 @@ def score_snapshot(
         key in weighted_keys for key in zip(traits["position_group"], traits["trait"])
     ]
     traits["uncertainty"] = np.nan
-    traits["reliability"] = np.nan
+    # The trait's pooled reliability at the grade's weight game count, so the
+    # card's r means the same thing at every position.
+    reliability = model.weights.set_index(["position_group", "trait"])["reliability"]
+    traits["reliability"] = reliability.reindex(
+        pd.MultiIndex.from_frame(traits[["position_group", "trait"]])
+    ).to_numpy(float)
     traits["points_above_replacement"] = np.nan
     parts = [
         traits,
