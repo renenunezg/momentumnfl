@@ -299,7 +299,7 @@ Grading uses `DATABASE_URL` and the same production write guard as publication.
 
 Supabase `pg_cron` owns the NFL schedules; GitHub Actions executes the dispatched jobs.
 After deploying the `repository_dispatch` workflows, apply `ops/install_nfl_crons.sql` to install or update the two named jobs and remove the retired awards job using the existing Vault `github_dispatch_pat`.
-Refresh runs at 10:00 UTC daily in January, February, and August through December; weekly runs at 16:00 UTC Tuesday in those months; awards runs after the weekly publication when `NFL_AWARDS_ENABLED=true`.
+Refresh runs at 10:00 UTC daily in January, February, and August through December; weekly runs at 8:00 AM Pacific Tuesday in those months; awards runs after the weekly publication when `NFL_AWARDS_ENABLED=true`.
 The GitHub schedule triggers are removed to avoid duplicate runs.
 Dispatch removes GitHub's scheduled-event delay, but runner queues and the shared `nfl-production` concurrency group can still delay execution.
 

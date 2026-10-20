@@ -5,7 +5,7 @@
 # saving historical raw play-by-play.
 name: weekly
 on:
-  # Supabase pg_cron: nfl-weekly-dispatch, Tuesdays at 16:00 UTC.
+  # Supabase pg_cron: nfl-weekly-dispatch, Tuesdays at 8:00 AM Pacific.
   repository_dispatch:
     types: [nfl-weekly]
   workflow_dispatch:
