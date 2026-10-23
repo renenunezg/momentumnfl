@@ -72,7 +72,9 @@ end $$;
 -- no worker is alive.
 -- A terminal row ('Final' or 'Off') ends a game's claim on the dispatcher, and
 -- the six-hour bound ends it for a game no worker ever reached.
-select cron.schedule('nfl-live-win-probability-dispatch', '*/5 * * * *', $dispatch$
+-- Minute offset 2: the NHL, CFB, and MLB dispatchers take offsets 0, 1, and 3
+-- so the four never start on the same minute of the shared database.
+select cron.schedule('nfl-live-win-probability-dispatch', '2-59/5 * * * *', $dispatch$
   select net.http_post(
     url := 'https://api.github.com/repos/renenunezg/momentumnfl/dispatches',
     headers := jsonb_build_object(
