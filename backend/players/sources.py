@@ -1,11 +1,11 @@
 """The charting and tracking feeds the player ratings read beyond play-by-play.
 
 FTN charting (reads, blitzers, play action, drops), PFR advanced stats
-(pressures, yards after contact, broken tackles), Next Gen weekly stats and
-the player id crosswalk all publish during the season and are stored under
-the raw directory by season. The participation feed (players on the field per
-play) is research only: it is published after the fact, so nothing served
-reads it.
+(pressures, yards after contact, broken tackles), Next Gen weekly stats, ESPN's
+weekly Total QBR (a baseline the quarterback rating is judged against) and the
+player id crosswalk all publish during the season and are stored under the raw
+directory by season. The participation feed (players on the field per play) is
+research only: it is published after the fact, so nothing served reads it.
 """
 
 import logging
@@ -21,6 +21,7 @@ log = logging.getLogger(__name__)
 FTN_FIRST_SEASON = 2022
 PFR_FIRST_SEASON = 2018
 NGS_FIRST_SEASON = 2016
+QBR_FIRST_SEASON = 2006
 PFR_TYPES = ("pass", "rush", "rec", "def")
 NGS_TYPES = ("passing", "rushing", "receiving")
 
@@ -59,4 +60,18 @@ def ingest_player_sources(seasons: list[int], refresh_latest: bool = True) -> No
                         "ngs",
                         f"{stat}_{season}.parquet",
                     )
+    # QBR is one file for every season, so it is fetched once and split.
+    wanted = [
+        season
+        for season in seasons
+        if season >= QBR_FIRST_SEASON
+        and (
+            (refresh_latest and season == latest)
+            or not (RAW_DIR / "espn_qbr" / f"{season}.parquet").exists()
+        )
+    ]
+    if wanted:
+        qbr = data.load_espn_qbr()
+        for season in wanted:
+            _put(qbr[qbr["season"].eq(season)], "espn_qbr", f"{season}.parquet")
     _put(data.load_players(), "players.parquet")

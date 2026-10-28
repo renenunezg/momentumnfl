@@ -59,23 +59,35 @@ def load_nextgen_stats(seasons: list[int], stat_type: str) -> pd.DataFrame:
     )
 
 
+RELEASES_URL = "https://github.com/nflverse/nflverse-data/releases/download/"
 PARTICIPATION_URL = (
-    "https://github.com/nflverse/nflverse-data/releases/download/"
-    "pbp_participation/pbp_participation_{season}.parquet"
+    RELEASES_URL + "pbp_participation/pbp_participation_{season}.parquet"
 )
+ESPN_QBR_URL = RELEASES_URL + "espn_data/qbr_week_level.parquet"
 
 
-def load_participation(season: int) -> pd.DataFrame:
-    """Players on the field for every play, with pass rushers, pressure and
-    coverage, read straight from the nflverse release (the nflreadpy wrapper
-    fails on these files). Raises for a season that is not published."""
+def _release_parquet(url: str) -> pd.DataFrame:
+    """A parquet file read straight from an nflverse release, for the files
+    nflreadpy has no loader for or fails on. Raises when it is not published."""
     import io
 
     import requests
 
-    response = requests.get(PARTICIPATION_URL.format(season=season), timeout=300)
+    response = requests.get(url, timeout=300)
     response.raise_for_status()
-    return normalize_teams(pd.read_parquet(io.BytesIO(response.content)))
+    return pd.read_parquet(io.BytesIO(response.content))
+
+
+def load_participation(season: int) -> pd.DataFrame:
+    """Players on the field for every play, with pass rushers, pressure and
+    coverage."""
+    return normalize_teams(_release_parquet(PARTICIPATION_URL.format(season=season)))
+
+
+def load_espn_qbr() -> pd.DataFrame:
+    """ESPN's weekly Total QBR (raw and opponent adjusted, with its plays and
+    points added) for every season, one file."""
+    return _release_parquet(ESPN_QBR_URL)
 
 
 def load_ftn_charting(seasons: list[int]) -> pd.DataFrame:

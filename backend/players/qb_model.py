@@ -12,12 +12,24 @@ to sack, the rate of throws past the first read and the checkdown rate: on the
 zero, and leaving them out lowered the leave-one-season-out error and raised
 the rating's rank correlation with the rest of the season. They stay on the
 card as descriptive measures.
+
+The rating is judged against the public composites to date (EPA per dropback,
+Ben Baldwin's EPA + CPOE, nflfastR's DAKOTA, ESPN's Total QBR) and against
+EPA per dropback with the prior season on this same engine, which holds the
+information fixed and asks what the other measures add.
 """
 
+import functools
+import json
+
+import numpy as np
 import pandas as pd
 
-from backend.players.qb_study import RATES, STUDY_DIR, build_qb_games
+from backend.config import STATIC_DIR
+from backend.players.qb_study import RATES, STUDY_DIR, build_qb_games, rate
 from backend.players.rating import RatingSpec
+
+DAKOTA_GAM = STATIC_DIR / "players" / "dakota_gam.json"
 
 PRODUCTION_RATES = {
     **{
@@ -60,6 +72,49 @@ PRODUCTION_RATES = {
     "pfr_pressure_rate": ("pfr_pressured", "pfr_db"),
     "pfr_pressure_to_sack": ("pfr_sacked", "pfr_pressured"),
 }
+
+
+@functools.cache
+def _dakota_gam() -> dict:
+    payload = json.loads(DAKOTA_GAM.read_text())
+    return {
+        "intercept": float(payload["intercept"]),
+        **{
+            name: {
+                "grid": np.asarray(payload[name]["grid"], dtype=float),
+                "term": np.asarray(payload[name]["term"], dtype=float),
+            }
+            for name in ("epa_per_play", "cpoe")
+        },
+    }
+
+
+def dakota(sums: pd.DataFrame) -> pd.Series:
+    """nflfastR's DAKOTA to date: its GAM (``target ~ s(cpoe) + s(epa_per_play)``
+    from nflverse's ``dakota_model.Rdata``, each term tabulated in
+    ``DAKOTA_GAM`` and read linearly) on EPA per play and CPOE over every pass
+    and rush play. An input outside the table is an error, not a clamp."""
+    gam = _dakota_gam()
+    inputs = {
+        "epa_per_play": rate(sums, "dakota_epa_play").to_numpy(float),
+        "cpoe": rate(sums, "dakota_cpoe").fillna(0.0).to_numpy(float),
+    }
+    total = np.full(len(sums), gam["intercept"])
+    for name, values in inputs.items():
+        grid, term = gam[name]["grid"], gam[name]["term"]
+        known = values[np.isfinite(values)]
+        if known.size and (known.min() < grid[0] or known.max() > grid[-1]):
+            raise ValueError(f"DAKOTA {name} outside the tabulated range")
+        total = total + np.interp(values, grid, term)
+    return pd.Series(total, index=sums.index)
+
+
+def qbr(sums: pd.DataFrame) -> pd.Series:
+    """ESPN's Total QBR (opponent adjusted) to date: the weekly figures weighted
+    by their plays, which is what publishes during the season. ESPN's own
+    season figure is a different aggregate and tracks this at Spearman 0.98."""
+    return rate(sums, "qbr")
+
 
 QB_SPEC = RatingSpec(
     position="QB",
@@ -126,11 +181,16 @@ QB_SPEC = RatingSpec(
         # code/season_qb_stats.R): 0.248070 x EPA per play + 0.006686 x CPOE in
         # percentage points; the intercept does not change a rank.
         "epa_cpoe": {"epa_db": 0.248070, "cpoe": 0.006686},
+        "dakota": dakota,
+        "qbr": qbr,
     },
     volume="dropbacks",
     min_volume=60,
     min_rest_volume=100,
     prior_min_volume=100,
+    # EPA per dropback with the prior season on the rating's own engine: the
+    # equal-information control the other measures must improve on.
+    fitted_baselines={"epa_prior": ["epa_db", "prior_epa_db", "prior_games"]},
     lower_is_better=frozenset(
         {
             "sack_rate",

@@ -57,6 +57,12 @@ PLAY_COLUMNS = [
     "epa",
     "wpa",
     "fixed_drive",
+    # nflfastR's own pass and rush flags, QB-charged EPA and passer-or-rusher
+    # id: the inputs of DAKOTA, which the quarterback rating is judged against.
+    "pass",
+    "rush",
+    "qb_epa",
+    "id",
     "passer_player_id",
     "receiver_player_id",
     "rusher_player_id",

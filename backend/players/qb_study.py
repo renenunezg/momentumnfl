@@ -109,6 +109,13 @@ RATES = {
     "motion_rate": ("motion_n", "ftn_db"),
     "epa_with_motion": ("motion_epa", "motion_n"),
     "epa_without_motion": ("nomotion_epa", "nomotion_n"),
+    # Public composites the rating is judged against, not profile measures:
+    # nflfastR's DAKOTA inputs over every pass and rush play (``qb_epa``
+    # floored at -4.5, no competitive filter) and ESPN's weekly Total QBR
+    # weighted by its plays.
+    "dakota_epa_play": ("dakota_epa", "dakota_plays"),
+    "dakota_cpoe": ("dakota_cpoe_sum", "dakota_cpoe_n"),
+    "qbr": ("qbr_weighted", "qbr_plays"),
 }
 
 
@@ -167,6 +174,55 @@ def _pfr_pass(season: int, players: pd.DataFrame) -> pd.DataFrame:
         }
     )
     return out.groupby(["game_id", "athlete_id"], as_index=False).sum()
+
+
+def _espn_qbr(season: int, players: pd.DataFrame) -> pd.DataFrame:
+    """ESPN's weekly Total QBR per passer and week, as plays-weighted sums so
+    the mean can be taken to any week; ESPN ids map to GSIS ids through the
+    players crosswalk."""
+    path = RAW_DIR / "espn_qbr" / f"{season}.parquet"
+    if not path.exists():
+        return pd.DataFrame()
+    qbr = pd.read_parquet(
+        path, columns=["season_type", "game_week", "player_id", "qb_plays", "qbr_total"]
+    )
+    qbr = qbr[qbr["season_type"].eq("Regular")]
+    ids = players.dropna(subset=["espn_id", "gsis_id"]).drop_duplicates("espn_id")
+    crosswalk = dict(zip(ids["espn_id"].astype("int64").astype(str), ids["gsis_id"]))
+    out = pd.DataFrame(
+        {
+            "week": qbr["game_week"].astype(int),
+            "athlete_id": qbr["player_id"].astype(str).map(crosswalk),
+            "qbr_weighted": qbr["qbr_total"].astype(float)
+            * qbr["qb_plays"].astype(float),
+            "qbr_plays": qbr["qb_plays"].astype(float),
+        }
+    ).dropna(subset=["athlete_id"])
+    return out.groupby(["week", "athlete_id"], as_index=False).sum()
+
+
+def _dakota_sums(plays: pd.DataFrame) -> pd.DataFrame:
+    """nflfastR ``add_dakota``'s inputs per passer and game: every pass or rush
+    play with a down and a passer or rusher (``id``), ``qb_epa`` floored at
+    -4.5, and CPOE as a sum with its count. No competitive filter applies."""
+    rows = plays[
+        (plays["pass"].eq(1) | plays["rush"].eq(1))
+        & plays["qb_epa"].notna()
+        & plays["id"].notna()
+        & plays["down"].notna()
+    ]
+    cpoe = rows["cpoe"].astype(float)
+    frame = pd.DataFrame(
+        {
+            "game_id": rows["game_id"],
+            "athlete_id": rows["id"].astype(str),
+            "dakota_plays": 1.0,
+            "dakota_epa": rows["qb_epa"].astype(float).clip(lower=-4.5),
+            "dakota_cpoe_sum": cpoe.fillna(0.0),
+            "dakota_cpoe_n": cpoe.notna().astype(float),
+        }
+    )
+    return frame.groupby(["game_id", "athlete_id"], as_index=False).sum()
 
 
 def _ngs_passing(season: int) -> pd.DataFrame:
@@ -491,9 +547,9 @@ def qb_game_table(season: int, tables) -> pd.DataFrame:
         numerator=out["epa"].astype(float), denominator=out["dropbacks"].astype(float)
     )
     out["epa_adj"] = adjust_rate(events, ctx.games)["numerator"].to_numpy()
-    # Game-level PFR and weekly NGS lines.
+    # Game-level PFR and weekly NGS lines, and the public composites.
     players = pd.read_parquet(
-        RAW_DIR / "players.parquet", columns=["gsis_id", "pfr_id"]
+        RAW_DIR / "players.parquet", columns=["gsis_id", "pfr_id", "espn_id"]
     )
     pfr = _pfr_pass(season, players)
     if not pfr.empty:
@@ -503,6 +559,13 @@ def qb_game_table(season: int, tables) -> pd.DataFrame:
     ngs = _ngs_passing(season)
     if not ngs.empty:
         out = out.merge(ngs, on=["week", "athlete_id"], how="left")
+    # DAKOTA counts the passer's whole game, competitive or not, so it comes
+    # from every play; a game where he had no competitive dropback has no row
+    # here and is left out of his to-date figure.
+    out = out.merge(_dakota_sums(ctx.plays), on=["game_id", "athlete_id"], how="left")
+    qbr = _espn_qbr(season, players)
+    if not qbr.empty:
+        out = out.merge(qbr, on=["week", "athlete_id"], how="left")
     identity = ctx.identity.set_index("athlete_id")["athlete_name"]
     out["athlete_name"] = out["athlete_id"].map(identity)
     return out[

@@ -13,11 +13,15 @@ against even games, not a formula inherited from elsewhere.
 A ``RatingSpec`` says what a position's version of this is: its measures
 (all from feeds that publish during the season), which carry weight, the
 kind of each (quality, processing, role, style, noise), the target and the
-fixed-weight baselines the rating must beat.
+baselines the rating must beat: public composites of the raw sums to date,
+and ridge fits of fewer of its own features with the same engine, penalty
+choice and leave-one-season-out treatment, so the comparison controls for
+the information the rating sees.
 """
 
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -58,9 +62,10 @@ class RatingSpec:
     prior_features: list[str]
     # The measure the rating forecasts over the rest of the season.
     target: str
-    # The baselines the rating must beat: name to fixed weights on raw measures
-    # to date. Nothing in a baseline is fitted here.
-    baselines: dict[str, dict[str, float]]
+    # The baselines the rating must beat, each from the raw sums to date: name
+    # to fixed weights on measures, or to a function of the summed game table
+    # (a published composite). Nothing in these is fitted here.
+    baselines: dict[str, dict[str, float] | Callable[[pd.DataFrame], pd.Series]]
     # Volume column with its floors: to date, rest of season, prior season.
     volume: str
     min_volume: float
@@ -68,6 +73,9 @@ class RatingSpec:
     prior_min_volume: float
     checkpoints: tuple[int, ...] = tuple(range(3, 17))
     lower_is_better: frozenset[str] = frozenset()
+    # Baselines fitted the way the rating is, on a subset of its
+    # ``feature_columns()``: the equal-information controls.
+    fitted_baselines: dict[str, list[str]] = field(default_factory=dict)
 
     def feature_columns(self) -> list[str]:
         """The rating features, then the prior season's (with its games) when
@@ -129,6 +137,19 @@ def _standardise(rows: pd.DataFrame, spec: RatingSpec) -> pd.DataFrame:
     return _z_within(rows, columns, ["season", "week"])
 
 
+def _baseline_values(
+    sums: pd.DataFrame,
+    baseline: dict[str, float] | Callable[[pd.DataFrame], pd.Series],
+    spec: RatingSpec,
+) -> np.ndarray:
+    if callable(baseline):
+        return np.asarray(baseline(sums), dtype=float)
+    return sum(
+        weight * rate(sums, measure, spec.rates).to_numpy()
+        for measure, weight in baseline.items()
+    )
+
+
 def checkpoint_rows(games: pd.DataFrame, spec: RatingSpec) -> pd.DataFrame:
     """One row per player, season and checkpoint week with standardised features
     and the rest-of-season target; a measure a season does not have sits at the
@@ -148,11 +169,8 @@ def checkpoint_rows(games: pd.DataFrame, spec: RatingSpec) -> pd.DataFrame:
         row = merged[["season", "athlete_id"]].assign(week=week)
         for name in spec.rating_features:
             row[name] = rate(merged, name, spec.rates).to_numpy()
-        for name, weights in spec.baselines.items():
-            row[f"{BASELINE_PREFIX}{name}"] = sum(
-                weight * rate(merged, measure, spec.rates).to_numpy()
-                for measure, weight in weights.items()
-            )
+        for name, baseline in spec.baselines.items():
+            row[f"{BASELINE_PREFIX}{name}"] = _baseline_values(merged, baseline, spec)
         row[TARGET] = (
             merged[f"{numerator}_rest"]
             / merged[f"{denominator}_rest"].where(merged[f"{denominator}_rest"].gt(0))
@@ -194,6 +212,31 @@ def _out_of_sample(
         beta = _ridge_fit(x[fit], y[fit], penalty)
         prediction[~fit] = beta[0] + x[~fit] @ beta[1:]
     return prediction
+
+
+def with_fitted_baselines(
+    rows: pd.DataFrame, spec: RatingSpec, dev_seasons: list[int]
+) -> pd.DataFrame:
+    """``rows`` with a ``baseline_<name>`` column per fitted baseline: a ridge
+    on its columns alone, penalty chosen leave-one-season-out on the
+    development seasons, predicted out of sample there and from the whole
+    development fit everywhere else."""
+    features = set(spec.feature_columns())
+    dev = rows["season"].isin(dev_seasons).to_numpy()
+    rows = rows.copy()
+    for name, columns in spec.fitted_baselines.items():
+        if not set(columns) <= features:
+            raise ValueError(f"fitted baseline {name} uses columns the rating lacks")
+        penalty = _choose_penalty(rows[dev], columns)
+        beta = _ridge_fit(
+            rows[dev][columns].to_numpy(float),
+            rows[dev][TARGET].to_numpy(float),
+            penalty,
+        )
+        prediction = beta[0] + rows[columns].to_numpy(float) @ beta[1:]
+        prediction[dev] = _out_of_sample(rows[dev], columns, penalty)
+        rows[f"{BASELINE_PREFIX}{name}"] = prediction
+    return rows
 
 
 def evaluate(rows: pd.DataFrame, prediction: np.ndarray) -> pd.DataFrame:
@@ -306,7 +349,7 @@ def fit_rating(
     validation_season: int,
 ) -> RatingModel:
     """Fit on ``dev_seasons``; the validation season is scored once, after."""
-    rows = checkpoint_rows(games, spec)
+    rows = with_fitted_baselines(checkpoint_rows(games, spec), spec, dev_seasons)
     dev = rows[rows["season"].isin(dev_seasons)]
     columns = spec.feature_columns()
     penalty = _choose_penalty(dev, columns)
