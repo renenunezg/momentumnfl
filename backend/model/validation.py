@@ -1,12 +1,11 @@
 """Read-only historical reconstructions and chronological season-win evaluation."""
 
-import json
 from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import pandas as pd
 
-from backend.config import DEVELOPMENT_SEASONS, STATIC_DIR
+from backend.config import DEVELOPMENT_SEASONS
 from backend.etl import store
 from backend.features.drives import build_team_games
 from backend.features.qb import (
@@ -19,10 +18,13 @@ from backend.features.scoring import build_model_games
 from backend.model import qb_adjustment
 from backend.model.joint_scoring import DEFAULT_CONFIG, fit_joint_scoring
 from backend.model.preseason import (
+    DATED,
     PreseasonConfig,
     build_preseason_prior,
     load_qb_references,
+    load_win_total_source,
     load_win_totals,
+    win_totals_known_at,
 )
 from backend.model.projections import LayerConfig
 from backend.model.season_wins import project_season, regular_schedule
@@ -105,7 +107,6 @@ def validate_season_wins(data, seasons, weeks=(1, 9), simulations=10_000):
     corrected historical PBP prevent these seasons being a pristine live replay.
     """
     summaries, audits = [], []
-    sources = json.loads((STATIC_DIR / "win_total_sources.json").read_text())
     layer = LayerConfig(market_weight=0)
     history = data.strength_history[layer.qb_span_dropbacks]
     for season in seasons:
@@ -127,9 +128,10 @@ def validate_season_wins(data, seasons, weeks=(1, 9), simulations=10_000):
             DEFAULT_CONFIG,
         )
         opener = final.start_date.min().to_pydatetime()
-        source = sources.get(str(season), {})
-        source_date = pd.to_datetime(source.get("date"), utc=True)
-        dated_preseason = pd.notna(source_date) and source_date < opener
+        source = load_win_total_source(season)
+        dated_preseason = source["basis"] == DATED and win_totals_known_at(
+            source, opener
+        )
         prior = build_preseason_prior(
             season,
             as_of=opener - timedelta(seconds=1),

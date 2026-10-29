@@ -8,7 +8,6 @@ season intervals are not yet coverage-calibrated.
 Future ratings and today's expected QB remain fixed; future ties are omitted.
 """
 
-import json
 from datetime import UTC, datetime
 
 import numpy as np
@@ -16,7 +15,7 @@ import pandas as pd
 from scipy.special import ndtri
 from scipy.stats import t as student_t
 
-from backend.config import HISTORY_START_SEASON, STATIC_DIR
+from backend.config import HISTORY_START_SEASON
 from backend.etl import store
 from backend.features.drives import kickoff_utc
 from backend.model.distributions import student_t_scale
@@ -27,7 +26,11 @@ from backend.model.fit_week import (
     market_home_spreads,
 )
 from backend.model.joint_scoring import JointScoringFit, fit_joint_scoring
-from backend.model.preseason import build_preseason_prior, load_win_totals
+from backend.model.preseason import (
+    build_preseason_prior,
+    load_win_total_source,
+    load_win_totals,
+)
 from backend.model.projections import LayerConfig, assemble_projections
 
 MODEL_VERSION = "nfl_season_wins_v3"
@@ -370,9 +373,10 @@ def build_season_forecast(
         if "dt" in charts and not charts.empty
         else None
     )
-    frame["sportsbook_win_total"] = frame["team_abbr"].map(load_win_totals(season))
-    sources = json.loads((STATIC_DIR / "win_total_sources.json").read_text())
-    source = sources.get(str(season), {})
+    frame["sportsbook_win_total"] = frame["team_abbr"].map(
+        load_win_totals(season, as_of)
+    )
+    source = load_win_total_source(season)
     for key in ("name", "date", "url"):
         frame[f"sportsbook_source_{key}"] = source.get(key)
     return frame.sort_values(

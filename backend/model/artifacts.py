@@ -66,8 +66,10 @@ def numerical_environment() -> dict:
 def preseason_input_basis() -> dict:
     """How each season's preseason inputs were obtained, so the backtest
     states which ones are hindsight proxies rather than dated captures."""
+    from backend.model.preseason import load_win_total_source
+
     references = pd.read_csv(STATIC_DIR / "preseason_qbs.csv")
-    sources = json.loads((STATIC_DIR / "win_total_sources.json").read_text())
+    seasons = pd.read_csv(STATIC_DIR / "win_totals.csv")["season"].unique()
     return {
         "qb_reference_basis": {
             basis: sorted(int(s) for s in group["season"].unique())
@@ -79,7 +81,8 @@ def preseason_input_basis() -> dict:
             "hindsight proxy, not a preseason depth chart"
         ),
         "win_total_basis": {
-            season: source.get("basis") for season, source in sources.items()
+            str(season): load_win_total_source(int(season))["basis"]
+            for season in sorted(seasons)
         },
         "win_total_note": (
             "preseason_by_construction seasons have no recorded source or "

@@ -44,6 +44,7 @@ ENVIRONMENT_CLIP_POINTS = 8.0
 # Source basis for historical totals with no recorded capture date: published
 # preseason lines, known before week 1 by construction but not dated quotes.
 PRESEASON_BY_CONSTRUCTION = "preseason_by_construction"
+DATED = "dated"
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,25 +56,42 @@ class PreseasonConfig:
     base_offseason_sd: float = BASE_OFFSEASON_SD
 
 
-def load_win_totals(season: int, as_of: datetime | None = None) -> pd.Series:
-    """The season's sportsbook win totals, empty when they postdate ``as_of``.
+def load_win_total_source(season: int) -> dict:
+    """The season's win-total provenance: a dated capture with its source, or
+    an undated line marked preseason by construction. Anything else, including
+    a season with no entry, is an error, never assumed known."""
+    sources = json.loads((STATIC_DIR / "win_total_sources.json").read_text())
+    source = sources.get(str(season))
+    if source is None:
+        raise ValueError(f"Win totals for {season} have no source entry")
+    dated = source.get("basis") == DATED and bool(source.get("date"))
+    undated = source.get("basis") == PRESEASON_BY_CONSTRUCTION and not source.get(
+        "date"
+    )
+    if not (dated or undated):
+        raise ValueError(f"Win totals for {season} have an invalid source entry")
+    return source
 
-    The cutoff guard fails closed: totals with no source entry, or an undated
-    entry not explicitly marked a preseason line, are an error, never assumed
-    known at the cutoff."""
+
+def win_totals_known_at(source: dict, as_of: datetime) -> bool:
+    """Whether totals with this provenance were public before ``as_of``: a
+    dated capture from its date, a preseason line always."""
+    if source["basis"] == PRESEASON_BY_CONSTRUCTION:
+        return True
+    return pd.to_datetime(source["date"], utc=True) < as_of
+
+
+def load_win_totals(season: int, as_of: datetime | None = None) -> pd.Series:
+    """The season's sportsbook win totals, empty when they postdate ``as_of``;
+    the cutoff guard fails closed through ``load_win_total_source``."""
     totals = pd.read_csv(STATIC_DIR / "win_totals.csv")
     totals = totals[totals["season"].eq(season)]
-    if as_of is not None and not totals.empty:
-        sources = json.loads((STATIC_DIR / "win_total_sources.json").read_text())
-        source = sources.get(str(season))
-        if source is None:
-            raise ValueError(f"Win totals for {season} have no source entry")
-        date = pd.to_datetime(source.get("date"), utc=True)
-        if pd.notna(date):
-            if date >= as_of:
-                return pd.Series(dtype=float)
-        elif source.get("basis") != PRESEASON_BY_CONSTRUCTION:
-            raise ValueError(f"Win totals for {season} have no capture date")
+    if (
+        as_of is not None
+        and not totals.empty
+        and not win_totals_known_at(load_win_total_source(season), as_of)
+    ):
+        return pd.Series(dtype=float)
     return totals.set_index("team_abbr")["win_total"]
 
 
