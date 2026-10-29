@@ -14,6 +14,9 @@ from backend.contracts import MARKET_SNAPSHOTS_COLUMNS
 from backend.model.distributions import student_t_scale
 from backend.model.market_blend import cover_push_probabilities
 
+# Feeds an offer can be priced from; recorded on every decision.
+ODDS_SOURCES = ("odds_api", "espn")
+
 REVIEW_EDGE_POINTS = 4.0
 
 
@@ -63,9 +66,13 @@ def flatten_offers(
     schedule: pd.DataFrame,
     fetched_at,
     execution_eligibility_verified: bool,
+    odds_source: str,
 ) -> pd.DataFrame:
+    if odds_source not in ODDS_SOURCES:
+        raise ValueError(f"Unknown odds source: {odds_source!r}")
     offer_columns = [
         "game_id",
+        "odds_source",
         "odds_api_event_id",
         "provider_start_date",
         "provider_key",
@@ -113,6 +120,7 @@ def flatten_offers(
                     offers.append(
                         {
                             "game_id": game_id,
+                            "odds_source": odds_source,
                             "odds_api_event_id": event.get("id"),
                             "provider_start_date": event.get("commence_time"),
                             "provider_key": bookmaker.get("key"),

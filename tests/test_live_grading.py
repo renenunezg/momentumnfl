@@ -413,6 +413,7 @@ def test_recommendation_publication_settlement_and_filtered_history(database):
                 provider_key="test",
                 provider_last_update=now,
                 market_fetched_at=now,
+                odds_source="odds_api",
                 odds_api_event_id=game,
                 provider_start_date=start,
                 match_score=1.0,

@@ -719,6 +719,7 @@ def run_odds(args) -> None:
         match_frame,
         snapshot.fetched_at,
         bool(snapshot.configured_bookmakers),
+        snapshot.source,
     )
     _write_week(offers, "market_offers", season, week)
     _write_week(consensus_lines(offers, projections), "market_snapshots", season, week)

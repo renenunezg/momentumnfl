@@ -27,6 +27,8 @@ class OddsSnapshot:
     fetched_at: datetime
     requests_remaining: int | None
     configured_bookmakers: tuple[str, ...]
+    # Which feed priced the snapshot: "odds_api" or "espn".
+    source: str
 
 
 def _header_int(response: requests.Response, name: str) -> int | None:
@@ -106,4 +108,5 @@ class OddsAPIClient:
             fetched_at=datetime.now(UTC),
             requests_remaining=_header_int(response, "x-requests-remaining"),
             configured_bookmakers=self.bookmakers,
+            source="odds_api",
         )

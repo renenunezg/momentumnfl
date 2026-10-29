@@ -11,7 +11,7 @@ from scipy.stats import t as student_t
 
 from backend.model.distributions import student_t_scale
 from backend.model.market_blend import cover_push_probabilities
-from backend.odds.markets import _american_profit
+from backend.odds.markets import ODDS_SOURCES, _american_profit
 
 POLICY_VERSION = "nfl-picks-v5"
 # Minimum points the priced line must sit beyond the offered price's
@@ -70,6 +70,7 @@ RECOMMENDATION_COLUMNS = [
     "provider",
     "provider_key",
     "market_fetched_at",
+    "odds_source",
     "odds_api_event_id",
     "provider_start_date",
     "provider_last_update",
@@ -230,6 +231,7 @@ def priced_candidates(projection, offers):
             "provider_key",
             "provider",
             "market_fetched_at",
+            "odds_source",
             "odds_api_event_id",
             "match_score",
         ):
@@ -248,7 +250,7 @@ def _offer_reason(offer, paired, now, start):
     if offer.get("execution_eligibility_verified") is not True:
         return "unverified_book_availability"
     event_id = offer["odds_api_event_id"]
-    if pd.isna(event_id) or not event_id:
+    if pd.isna(event_id) or not event_id or offer["odds_source"] not in ODDS_SOURCES:
         return "unverified_source"
     provider_start = _timestamp(offer["provider_start_date"])
     if pd.isna(provider_start) or provider_start != start:
@@ -468,6 +470,7 @@ def build_recommendations(projections, offers, distribution, *, decision_at=None
                     "provider",
                     "provider_key",
                     "market_fetched_at",
+                    "odds_source",
                     "odds_api_event_id",
                     "provider_start_date",
                     "provider_last_update",
