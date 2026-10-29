@@ -45,7 +45,14 @@ DEFAULT_QB_WEIGHT_PROXY_ABSENCE = 0.89
 # The QB layer version names the starter-identification rule and its weight;
 # the preseason producer appends the same suffix to its own version.
 QB_LAYER_VERSION = "qb_v8"
-MODEL_VERSION = f"nfl_joint_scoring_{QB_LAYER_VERSION}_{TOTALS_LAYER_VERSION}"
+
+
+def layered_version(engine_version: str) -> str:
+    """A projection's version: the rating source plus the output layers."""
+    return f"{engine_version}_{QB_LAYER_VERSION}_{TOTALS_LAYER_VERSION}"
+
+
+MODEL_VERSION = layered_version("nfl_joint_scoring")
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,6 +228,7 @@ def align_ratings_to_forecast(
             offense_points=row.offense_points,
             defense_points=row.defense_points,
             forecast_alignment_points=row.forecast_alignment_points,
+            model_version=row.model_version,
         )
         for rating, row in zip(ratings, aligned.itertuples(), strict=True)
     ]
@@ -258,4 +266,8 @@ def align_published_ratings(
     out["defense_points"] += delta / 2
     out["power_rating"] = pure + shifts
     out["forecast_alignment_points"] = shifts
+    # Published ratings mean whatever the lines they reproduce mean, so they
+    # carry those lines' model version (every version when frozen games
+    # from an earlier one are part of the week).
+    out["model_version"] = ",".join(sorted(projections["model_version"].unique()))
     return out

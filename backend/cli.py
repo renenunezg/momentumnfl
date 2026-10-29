@@ -316,6 +316,8 @@ def run_fit(args) -> None:
 
 
 def run_preseason(args) -> None:
+    from dataclasses import replace
+
     from backend.source_inputs import capture_static_inputs
 
     capture_static_inputs()
@@ -333,12 +335,11 @@ def run_preseason(args) -> None:
     )
     from backend.model.preseason import MODEL_VERSION, build_preseason_prior
     from backend.model.projections import (
-        QB_LAYER_VERSION,
         LayerConfig,
         align_ratings_to_forecast,
         assemble_projections,
+        layered_version,
     )
-    from backend.model.totals import TOTALS_LAYER_VERSION
 
     prepare(args)
     prior = build_preseason_prior(args.season, as_of=args.forecast_cutoff)
@@ -347,7 +348,6 @@ def run_preseason(args) -> None:
 
     def write_ratings(published) -> pd.DataFrame:
         frame = pd.DataFrame([rating.to_record() for rating in published])
-        frame["model_version"] = MODEL_VERSION
         frame["missing_input_count"] = frame["team_abbr"].map(
             prior.ratings_frame.set_index("team_abbr")["missing_input_count"]
         )
@@ -381,13 +381,14 @@ def run_preseason(args) -> None:
         market_home_spreads(slate),
         market_totals=market_totals(slate),
     )
+    projections = [
+        replace(projection, model_version=layered_version(MODEL_VERSION))
+        for projection in projections
+    ]
     # Published ratings reproduce the published week-1 lines.
     ratings_df = write_ratings(align_ratings_to_forecast(ratings, projections))
     projections_df = pd.DataFrame(
         [projection.to_record() for projection in projections]
-    )
-    projections_df["model_version"] = (
-        f"{MODEL_VERSION}_{QB_LAYER_VERSION}_{TOTALS_LAYER_VERSION}"
     )
     _write_week(projections_df, "projections", args.season, 1)
     finish(args, projections_df)
