@@ -78,6 +78,14 @@ def test_metrics_grade_every_source_on_the_same_finals():
     assert overall.loc["market_informed", "closer_than_market_share"] == 1.0
     assert overall.loc["market_informed", "total_games"] == 0
     assert overall.loc["pure_model", "thin_sample"]
+    # The close is scored as a probability on its own games, and the gap
+    # carries a paired interval around it.
+    assert overall.loc["closing_market", "probability_games"] == 2
+    low, high = overall.loc[
+        "pure_model",
+        ["model_minus_market_mae_ci_low", "model_minus_market_mae_ci_high"],
+    ]
+    assert low <= overall.loc["pure_model", "model_minus_market_mae"] <= high
 
     qb = metrics[metrics["segment_kind"].eq("qb_adjustment")]
     assert qb[qb["prediction_source"].eq("pure_model")]["segment"].tolist() == [

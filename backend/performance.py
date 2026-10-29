@@ -26,6 +26,13 @@ PROBABILITY_METHOD = (
 PREDICTION_SOURCES = ("pure_model", "market_informed", "closing_market")
 COVERAGE_LEVELS = (0.5, 0.8, 0.9)
 THIN_SAMPLE_GAMES = 30
+# A tied game is half a home win: Brier and log loss score it with outcome
+# 0.5, so neither side of a probability is rewarded for a tie.
+TIE_OUTCOME = 0.5
+# Paired bootstrap over games for the model-minus-market MAE interval.
+GAP_BOOTSTRAP_RESAMPLES = 4000
+GAP_BOOTSTRAP_SEED = 20261029
+GAP_INTERVAL = 0.95
 
 GRADED_GAME_COLUMNS = [
     "game_id",
@@ -91,6 +98,8 @@ PERFORMANCE_METRIC_COLUMNS = [
     "games_with_market",
     "market_mae",
     "model_minus_market_mae",
+    "model_minus_market_mae_ci_low",
+    "model_minus_market_mae_ci_high",
     "closer_than_market_share",
     "probability_games",
     "brier_score",
@@ -234,8 +243,8 @@ def _source_columns(graded: pd.DataFrame, source: str) -> tuple[pd.Series, pd.Se
 
 
 def _margin_sd(frame: pd.DataFrame, source: str) -> pd.Series:
-    """The pure model's frozen predictive sd, or for the published line the
-    dispersion its picks are priced with."""
+    """The pure model's frozen predictive sd, or for the published and
+    closing lines the dispersion picks are priced with."""
     if source == "pure_model":
         return frame["margin_sd"]
     return pd.Series(PRICING_MARGIN_SD, index=frame.index)
@@ -244,6 +253,35 @@ def _margin_sd(frame: pd.DataFrame, source: str) -> pd.Series:
 def _coverage(error: pd.Series, sd: pd.Series, df: float, level: float) -> float:
     width = student_t.ppf((1 + level) / 2, df) * student_t_scale(sd, df)
     return float((error.abs() <= width).mean())
+
+
+def _home_outcome(margin: pd.Series) -> pd.Series:
+    return pd.Series(
+        np.select([margin > 0, margin == 0], [1.0, TIE_OUTCOME], 0.0),
+        index=margin.index,
+    )
+
+
+def _probability_scores(probability: pd.Series, outcome: pd.Series) -> dict:
+    clipped = probability.clip(1e-6, 1 - 1e-6)
+    return {
+        "probability_games": int(len(probability)),
+        "brier_score": float(((probability - outcome) ** 2).mean()),
+        "log_loss": float(
+            -(outcome * np.log(clipped) + (1 - outcome) * np.log(1 - clipped)).mean()
+        ),
+    }
+
+
+def _gap_interval(difference: np.ndarray) -> tuple[float, float]:
+    """Percentile interval of the mean per-game error difference, resampling
+    games so each model error stays paired with its market error."""
+    rng = np.random.default_rng(GAP_BOOTSTRAP_SEED)
+    draws = rng.integers(0, len(difference), (GAP_BOOTSTRAP_RESAMPLES, len(difference)))
+    means = difference[draws].mean(axis=1)
+    tail = (1 - GAP_INTERVAL) / 2 * 100
+    low, high = np.percentile(means, [tail, 100 - tail])
+    return float(low), float(high)
 
 
 def _error_stats(prediction: pd.Series, actual: pd.Series) -> dict:
@@ -297,27 +335,26 @@ def compute_performance_metrics(
                 "total_bias": total["bias"],
                 "computed_at": computed_at,
             }
+            sd = _margin_sd(frame, source)
+            # Every source is scored with one Student-t: the pure model on its
+            # frozen probability, the published and closing lines on the
+            # pricing dispersion around their margins, all on the same games.
+            probability = (
+                frame["home_win_probability"]
+                if source == "pure_model"
+                else pd.Series(
+                    marginal_cdf(prediction.to_numpy(), sd, df), index=frame.index
+                )
+            )
+            row.update(
+                _probability_scores(probability, _home_outcome(frame["actual_margin"]))
+            )
             if source != "closing_market":
                 error = prediction - frame["actual_margin"]
-                sd = _margin_sd(frame, source)
                 for level in COVERAGE_LEVELS:
                     row[f"coverage_{int(level * 100)}"] = _coverage(
                         error, sd, df, level
                     )
-                probability = (
-                    frame["home_win_probability"]
-                    if source == "pure_model"
-                    else pd.Series(
-                        marginal_cdf(prediction.to_numpy(), sd, df), index=frame.index
-                    )
-                )
-                won = (frame["actual_margin"] > 0).astype(float)
-                clipped = probability.clip(1e-6, 1 - 1e-6)
-                row["probability_games"] = int(len(probability))
-                row["brier_score"] = float(((probability - won) ** 2).mean())
-                row["log_loss"] = float(
-                    -(won * np.log(clipped) + (1 - won) * np.log(1 - clipped)).mean()
-                )
                 benchmarked = frame[frame["closing_spread"].notna()]
                 row["games_with_market"] = int(len(benchmarked))
                 if not benchmarked.empty:
@@ -329,6 +366,11 @@ def compute_performance_metrics(
                     row["model_minus_market_mae"] = float(
                         model_error.mean() - market_error.mean()
                     )
+                    (
+                        row["model_minus_market_mae_ci_low"],
+                        row["model_minus_market_mae_ci_high"],
+                    ) = _gap_interval((model_error - market_error).to_numpy())
+                    # Equal errors count as not closer.
                     row["closer_than_market_share"] = float(
                         (model_error < market_error).mean()
                     )
