@@ -3,8 +3,11 @@
 Reads nfl.graded_games and nfl.recommendations through the site's public
 (anonymous) Supabase REST endpoint, recomputes the forecast accuracy with the
 same code that publishes nfl.performance_metrics, recomputes the prediction
-record with the same rules as nfl.recommendation_summary, and prints both.
-No database credentials are needed:
+record in Python, and prints both. The record deliberately does not call the
+nfl.recommendation_dashboard RPC: it mirrors the overall rules of
+nfl.recommendation_summary (sql/010_recommendation_h2h_weight_floor.sql) so the
+page's record is checked against an independent computation. No database
+credentials are needed:
 
     python -m backend.regrade --season 2026 --url https://<project>.supabase.co \
         --anon-key <public anon key>
@@ -25,13 +28,16 @@ SETTLED = ("win", "loss", "push")
 PICK_COLUMNS = ["status", "outcome", "stake_units", "profit_units"]
 
 
-def read_public(url: str, key: str, table: str, season: int) -> pd.DataFrame:
-    """Every row of one public nfl table for the season, paged."""
+def read_public(
+    url: str, key: str, table: str, season: int, order: str
+) -> pd.DataFrame:
+    """Every row of one public nfl table for the season, paged in ``order``
+    (a unique key, so pages neither overlap nor skip rows)."""
     rows, start = [], 0
     while True:
         response = requests.get(
             f"{url.rstrip('/')}/rest/v1/{table}",
-            params={"season": f"eq.{season}", "select": "*"},
+            params={"season": f"eq.{season}", "select": "*", "order": order},
             headers={
                 "apikey": key,
                 "Authorization": f"Bearer {key}",
@@ -81,7 +87,9 @@ def main() -> None:
     if not args.url or not args.anon_key:
         parser.error("--url and --anon-key (or SUPABASE_URL, SUPABASE_ANON_KEY)")
 
-    graded = read_public(args.url, args.anon_key, "graded_games", args.season)
+    graded = read_public(
+        args.url, args.anon_key, "graded_games", args.season, "game_id"
+    )
     for column in ("start_date", "forecast_as_of", "forecast_recorded_at"):
         graded[column] = pd.to_datetime(graded[column], utc=True)
     metrics = compute_performance_metrics(graded)
@@ -107,7 +115,13 @@ def main() -> None:
     print(f"Forecast accuracy, {args.season}, all graded games")
     print(overall[columns].T.round(4).to_string())
 
-    picks = read_public(args.url, args.anon_key, "recommendations", args.season)
+    picks = read_public(
+        args.url,
+        args.anon_key,
+        "recommendations",
+        args.season,
+        "game_id,market,decision_at",
+    )
     print(f"\nPrediction record, {args.season}")
     print(pick_record(picks).to_string())
     print("\nBy policy version")
