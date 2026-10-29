@@ -116,6 +116,7 @@ RATES = {
     "dakota_epa_play": ("dakota_epa", "dakota_plays"),
     "dakota_cpoe": ("dakota_cpoe_sum", "dakota_cpoe_n"),
     "qbr": ("qbr_weighted", "qbr_plays"),
+    "qbr_raw": ("qbr_raw_weighted", "qbr_plays"),
 }
 
 
@@ -184,7 +185,15 @@ def _espn_qbr(season: int, players: pd.DataFrame) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
     qbr = pd.read_parquet(
-        path, columns=["season_type", "game_week", "player_id", "qb_plays", "qbr_total"]
+        path,
+        columns=[
+            "season_type",
+            "game_week",
+            "player_id",
+            "qb_plays",
+            "qbr_total",
+            "qbr_raw",
+        ],
     )
     qbr = qbr[qbr["season_type"].eq("Regular")]
     ids = players.dropna(subset=["espn_id", "gsis_id"]).drop_duplicates("espn_id")
@@ -195,10 +204,34 @@ def _espn_qbr(season: int, players: pd.DataFrame) -> pd.DataFrame:
             "athlete_id": qbr["player_id"].astype(str).map(crosswalk),
             "qbr_weighted": qbr["qbr_total"].astype(float)
             * qbr["qb_plays"].astype(float),
+            "qbr_raw_weighted": qbr["qbr_raw"].astype(float)
+            * qbr["qb_plays"].astype(float),
             "qbr_plays": qbr["qb_plays"].astype(float),
         }
     ).dropna(subset=["athlete_id"])
     return out.groupby(["week", "athlete_id"], as_index=False).sum()
+
+
+QBR_COLUMNS = ["qbr_weighted", "qbr_raw_weighted", "qbr_plays"]
+
+
+def with_espn_qbr(games: pd.DataFrame) -> pd.DataFrame:
+    """``games`` with ESPN's weekly QBR sums (re)attached from the raw files,
+    so a cached game table gains measures added since it was built."""
+    players = pd.read_parquet(
+        RAW_DIR / "players.parquet", columns=["gsis_id", "espn_id"]
+    )
+    parts = []
+    for season, frame in games.drop(columns=QBR_COLUMNS, errors="ignore").groupby(
+        "season", sort=False
+    ):
+        qbr = _espn_qbr(int(season), players)
+        parts.append(
+            frame.merge(qbr, on=["week", "athlete_id"], how="left")
+            if not qbr.empty
+            else frame
+        )
+    return pd.concat(parts, ignore_index=True)
 
 
 def _dakota_sums(plays: pd.DataFrame) -> pd.DataFrame:

@@ -162,6 +162,17 @@ def main() -> None:
         "publish-position-traits", help="publish the latest position trait week"
     )
     publish_traits.add_argument("--season", type=int, required=True)
+    evaluation_parser = subparsers.add_parser(
+        "grade-evaluation",
+        help="regenerate the player grade head-to-heads from the frozen models",
+    )
+    evaluation_parser.add_argument("--dev-seasons", nargs="+", type=int, required=True)
+    evaluation_parser.add_argument("--validate", type=int, required=True)
+    evaluation_parser.add_argument(
+        "--publish",
+        action="store_true",
+        help="replace the payload's model versions in nfl.position_grade_evaluation",
+    )
 
     grade_parser = subparsers.add_parser(
         "grade", help="grade archived pregame forecasts against completed results"
@@ -777,6 +788,21 @@ def run_grade(args) -> None:
     print({"recommendations_graded": grade_picks(db.engine, schedule, args.season)})
 
 
+def _write_grade_evaluation(dev_seasons: list[int], validate: int) -> list[dict]:
+    """Regenerate the published grade evaluation rows and keep the payload
+    beside the frozen models it was computed from."""
+    import json
+
+    from backend.players.evaluation import evaluation_rows
+    from backend.players.rating import MODELS_DIR
+
+    rows = evaluation_rows(dev_seasons, validate)
+    path = MODELS_DIR / f"position_grade_evaluation_{max(dev_seasons)}.json"
+    path.write_text(json.dumps(rows, indent=1, allow_nan=False) + "\n")
+    print(f"{len(rows)} grade evaluation rows written to {path}")
+    return rows
+
+
 def run_position_traits(args) -> None:
     if args.command == "position-traits-fit":
         from backend.awards import ingest
@@ -798,6 +824,14 @@ def run_position_traits(args) -> None:
         ingest_player_sources(seasons, refresh_latest=False)
         for position, model in fit_ratings(args.dev_seasons, args.validate).items():
             print(f"{position} rating model written to {model}")
+        _write_grade_evaluation(args.dev_seasons, args.validate)
+    elif args.command == "grade-evaluation":
+        rows = _write_grade_evaluation(args.dev_seasons, args.validate)
+        if args.publish:
+            from backend.db import engine
+            from backend.publish import publish_position_grade_evaluation
+
+            print(publish_position_grade_evaluation(engine, rows))
     elif args.command == "player-sources":
         from backend.players.sources import ingest_player_sources
 
@@ -1287,5 +1321,6 @@ COMMANDS = {
     "position-traits": run_position_traits,
     "player-sources": run_position_traits,
     "publish-position-traits": run_position_traits,
+    "grade-evaluation": run_position_traits,
     "grade": run_grade,
 }

@@ -50,6 +50,7 @@ RB_SPEC = RatingSpec(
     prior_features=[],
     target="epa_game",
     baselines={"epa_game": {"epa_game": 1.0}},
+    prior_baselines=("epa_game",),
     volume="touches",
     min_volume=40,
     min_rest_volume=60,

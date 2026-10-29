@@ -76,6 +76,10 @@ class RatingSpec:
     # Baselines fitted the way the rating is, on a subset of its
     # ``feature_columns()``: the equal-information controls.
     fitted_baselines: dict[str, list[str]] = field(default_factory=dict)
+    # Baselines that also get a "+ last season" control, ``<name>_prior``: the
+    # baseline to date with its own prior-season value and prior games, on the
+    # rating's ridge. They give a public composite the rating's information.
+    prior_baselines: tuple[str, ...] = ()
 
     def feature_columns(self) -> list[str]:
         """The rating features, then the prior season's (with its games) when
@@ -117,13 +121,27 @@ class RatingModel:
 # Rows
 
 
-def _prior_table(games: pd.DataFrame, spec: RatingSpec) -> pd.DataFrame:
+def _prior_table(
+    games: pd.DataFrame, spec: RatingSpec, baselines: bool = False
+) -> pd.DataFrame:
+    """Prior-season features and games; with ``baselines``, also the prior
+    season's value of each prior baseline (evaluation only, never scoring)."""
     totals = _sums_through(games, None)
     prior = totals[totals[spec.volume].ge(spec.prior_min_volume)].copy()
     for name in spec.prior_features:
         prior[f"prior_{name}"] = rate(prior, name, spec.rates)
+    prior_baselines = spec.prior_baselines if baselines else ()
+    for name in prior_baselines:
+        prior[f"prior_{BASELINE_PREFIX}{name}"] = _baseline_values(
+            prior, spec.baselines[name], spec
+        )
     prior["prior_games"] = prior["games"].astype(float)
-    columns = ["season", "athlete_id", *[f"prior_{f}" for f in spec.prior_features]]
+    columns = [
+        "season",
+        "athlete_id",
+        *[f"prior_{f}" for f in spec.prior_features],
+        *[f"prior_{BASELINE_PREFIX}{name}" for name in prior_baselines],
+    ]
     return prior[[*columns, "prior_games"]]
 
 
@@ -154,7 +172,7 @@ def checkpoint_rows(games: pd.DataFrame, spec: RatingSpec) -> pd.DataFrame:
     """One row per player, season and checkpoint week with standardised features
     and the rest-of-season target; a measure a season does not have sits at the
     week's average."""
-    prior = _prior_table(games, spec)
+    prior = _prior_table(games, spec, baselines=True)
     prior["season"] = prior["season"] + 1
     numerator, denominator = spec.rates[spec.target]
     parts = []
@@ -214,28 +232,50 @@ def _out_of_sample(
     return prediction
 
 
+def _fitted_prediction(
+    rows: pd.DataFrame, columns: list[str], dev: np.ndarray
+) -> np.ndarray:
+    """A ridge on ``columns`` alone, penalty chosen leave-one-season-out on the
+    development rows, predicted out of sample there and from the whole
+    development fit everywhere else."""
+    penalty = _choose_penalty(rows[dev], columns)
+    beta = _ridge_fit(
+        rows[dev][columns].to_numpy(float), rows[dev][TARGET].to_numpy(float), penalty
+    )
+    prediction = beta[0] + rows[columns].to_numpy(float) @ beta[1:]
+    prediction[dev] = _out_of_sample(rows[dev], columns, penalty)
+    return prediction
+
+
 def with_fitted_baselines(
     rows: pd.DataFrame, spec: RatingSpec, dev_seasons: list[int]
 ) -> pd.DataFrame:
-    """``rows`` with a ``baseline_<name>`` column per fitted baseline: a ridge
-    on its columns alone, penalty chosen leave-one-season-out on the
-    development seasons, predicted out of sample there and from the whole
-    development fit everywhere else."""
+    """``rows`` with a ``baseline_<name>`` column per fitted baseline and a
+    ``baseline_<name>_prior`` column per prior baseline. Prior baselines fit
+    on standardised copies of the baseline to date, its prior-season value and
+    prior games, filled and scaled the way the rating's features are."""
     features = set(spec.feature_columns())
     dev = rows["season"].isin(dev_seasons).to_numpy()
     rows = rows.copy()
     for name, columns in spec.fitted_baselines.items():
         if not set(columns) <= features:
             raise ValueError(f"fitted baseline {name} uses columns the rating lacks")
-        penalty = _choose_penalty(rows[dev], columns)
-        beta = _ridge_fit(
-            rows[dev][columns].to_numpy(float),
-            rows[dev][TARGET].to_numpy(float),
-            penalty,
+        rows[f"{BASELINE_PREFIX}{name}"] = _fitted_prediction(rows, columns, dev)
+    for name in spec.prior_baselines:
+        sources = [
+            f"{BASELINE_PREFIX}{name}",
+            f"prior_{BASELINE_PREFIX}{name}",
+            "prior_games",
+        ]
+        scaled = [f"z_{column}" for column in sources]
+        design = rows[["season", "week", TARGET]].copy()
+        design[scaled] = rows[sources].to_numpy(float)
+        design[scaled] = design[scaled].fillna(
+            design.groupby(["season", "week"])[scaled].transform("mean")
         )
-        prediction = beta[0] + rows[columns].to_numpy(float) @ beta[1:]
-        prediction[dev] = _out_of_sample(rows[dev], columns, penalty)
-        rows[f"{BASELINE_PREFIX}{name}"] = prediction
+        design[scaled] = design[scaled].fillna(0.0)
+        design = _z_within(design, scaled, ["season", "week"])
+        rows[f"{BASELINE_PREFIX}{name}_prior"] = _fitted_prediction(design, scaled, dev)
     return rows
 
 

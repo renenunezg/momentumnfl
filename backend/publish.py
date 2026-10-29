@@ -475,6 +475,19 @@ def publish_position_traits(engine, season: int) -> dict:
     }
 
 
+def publish_position_grade_evaluation(engine, rows: list[dict]) -> dict:
+    """Replace every row of the payload's model versions in one statement
+    through nfl.publish_position_grade_evaluation."""
+    import json
+
+    with engine.begin() as conn:
+        written = conn.execute(
+            text("SELECT nfl.publish_position_grade_evaluation(CAST(:rows AS jsonb))"),
+            {"rows": json.dumps(rows, allow_nan=False)},
+        ).scalar_one()
+    return {"position_grade_evaluation": written}
+
+
 def publish_recommendations(conn, decisions):
     """Freeze picks unless verified pregame QB inputs change; archive revisions."""
     import json

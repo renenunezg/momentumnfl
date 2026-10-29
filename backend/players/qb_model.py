@@ -26,7 +26,13 @@ import numpy as np
 import pandas as pd
 
 from backend.config import STATIC_DIR
-from backend.players.qb_study import RATES, STUDY_DIR, build_qb_games, rate
+from backend.players.qb_study import (
+    RATES,
+    STUDY_DIR,
+    build_qb_games,
+    rate,
+    with_espn_qbr,
+)
 from backend.players.rating import RatingSpec
 
 DAKOTA_GAM = STATIC_DIR / "players" / "dakota_gam.json"
@@ -116,6 +122,11 @@ def qbr(sums: pd.DataFrame) -> pd.Series:
     return rate(sums, "qbr")
 
 
+def qbr_raw(sums: pd.DataFrame) -> pd.Series:
+    """ESPN's raw (not opponent adjusted) Total QBR to date, weighted the same."""
+    return rate(sums, "qbr_raw")
+
+
 QB_SPEC = RatingSpec(
     position="QB",
     model_version="nfl_qb_rating_v3",
@@ -183,6 +194,7 @@ QB_SPEC = RatingSpec(
         "epa_cpoe": {"epa_db": 0.248070, "cpoe": 0.006686},
         "dakota": dakota,
         "qbr": qbr,
+        "qbr_raw": qbr_raw,
     },
     volume="dropbacks",
     min_volume=60,
@@ -191,6 +203,7 @@ QB_SPEC = RatingSpec(
     # EPA per dropback with the prior season on the rating's own engine: the
     # equal-information control the other measures must improve on.
     fitted_baselines={"epa_prior": ["epa_db", "prior_epa_db", "prior_games"]},
+    prior_baselines=("dakota", "qbr"),
     lower_is_better=frozenset(
         {
             "sack_rate",
@@ -210,5 +223,7 @@ def games_table(seasons: list[int], rebuild: bool = False) -> pd.DataFrame:
     if path.exists() and not rebuild:
         games = pd.read_parquet(path)
         if set(seasons) <= set(games["season"].unique()):
-            return games[games["season"].isin(seasons)]
+            games = games[games["season"].isin(seasons)]
+            # Tables cached before raw QBR was a baseline lack its sums.
+            return games if "qbr_raw_weighted" in games else with_espn_qbr(games)
     return build_qb_games(seasons)

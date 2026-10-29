@@ -57,3 +57,26 @@ def test_grade_model_refuses_a_season_it_was_developed_on():
         validate_grade_model(
             GradeModel(weights=weights, dev_seasons=[2016], model_version="other"), 2025
         )
+
+
+def test_bootstrap_spearman_matches_the_published_definition():
+    """The evaluation bootstrap ranks thousands of resamples at once; each must
+    equal the backtest's pairwise-complete Spearman, including missing values,
+    ties and the minimum sample."""
+    import numpy as np
+
+    from backend.players import backtest
+    from backend.players.evaluation import _row_spearman
+
+    rng = np.random.default_rng(3)
+    x = rng.integers(0, 6, (40, 30)).astype(float)
+    y = rng.normal(size=(40, 30))
+    x[rng.random(x.shape) < 0.2] = np.nan
+    y[rng.random(y.shape) < 0.2] = np.nan
+    expected = [
+        backtest._spearman(pd.Series(a), pd.Series(b))
+        for a, b in zip(x, y, strict=True)
+    ]
+    assert np.allclose(
+        _row_spearman(x, y, backtest.MIN_PAIR_PLAYERS), expected, equal_nan=True
+    )

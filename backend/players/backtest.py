@@ -491,23 +491,21 @@ def _standard_for(frame: pd.DataFrame, values: pd.Series) -> pd.Series:
     return pd.Series(values.reindex(keys).to_numpy(), index=frame.index)
 
 
-def next_season_table(seasons, model, validation_season: int) -> pd.DataFrame:
-    """Does a final-week grade predict next season, compared with EPA credit alone?
-
-    For each consecutive pair ``(t, t + 1)`` with ``t + 1 <= validation_season``,
-    over players graded at the final week of both seasons at the same group:
-    the Spearman of the season-``t`` grade with the ``t + 1`` grade and with the
-    ``t + 1`` EPA credit per game (qualified at the final week), and of the
-    season-``t`` EPA credit and ``STANDARD_BASELINES`` stat with the ``t + 1``
-    EPA credit (the baselines).
-    ``model`` may map each pair's first season to the model that grades both of
-    its seasons (cross-fitted weights).
+def next_season_pairs(seasons, model, validation_season: int) -> pd.DataFrame:
+    """The players behind every next-season comparison, one row per player and
+    consecutive pair ``(t, t + 1)`` with ``t + 1 <= validation_season``: those
+    graded at the final week of both seasons at the same group, with the
+    season-``t`` grade, EPA credit and ``STANDARD_BASELINES`` stat and the
+    ``t + 1`` grade and EPA credit (qualified at the final week). A group keeps
+    only players with every grade and credit when at least ``MIN_PAIR_PLAYERS``
+    have them. ``model`` may map each pair's first season to the model that
+    grades both of its seasons (cross-fitted weights).
     """
     epa = {
         season: _qualified_final_epa(data["snapshots"])
         for season, data in seasons.items()
     }
-    rows = []
+    parts = []
     for season in sorted(seasons):
         later = season + 1
         if later not in seasons or later > validation_season:
@@ -519,35 +517,57 @@ def next_season_table(seasons, model, validation_season: int) -> pd.DataFrame:
             nxt, on=["athlete_id", "position_group"], suffixes=("", "_next")
         )
         both = both.assign(
+            season=season,
+            next_season=later,
             epa=both["athlete_id"].map(epa[season]),
             epa_next=both["athlete_id"].map(epa[later]),
         )
         both["standard"] = _standard_for(
             both, standard_values(seasons[season]["frames"])
         )
-        for group, frame in both.groupby("position_group"):
+        for _, frame in both.groupby("position_group"):
             complete = frame.dropna(subset=["grade", "grade_next", "epa", "epa_next"])
-            used = complete if len(complete) >= MIN_PAIR_PLAYERS else frame
-            rows.append(
-                {
-                    "season": season,
-                    "next_season": later,
-                    "position_group": group,
-                    "players": len(used),
-                    "spearman_grade_next_grade": _spearman(
-                        used["grade"], used["grade_next"]
-                    ),
-                    "spearman_grade_next_epa": _spearman(
-                        used["grade"], used["epa_next"]
-                    ),
-                    "spearman_epa_next_epa": _spearman(used["epa"], used["epa_next"]),
-                    "spearman_standard_next_epa": _spearman(
-                        used["standard"], used["epa_next"]
-                    ),
-                    "holdout": later == validation_season
-                    and season == validation_season - 1,
-                }
-            )
+            parts.append(complete if len(complete) >= MIN_PAIR_PLAYERS else frame)
+    columns = [
+        "season",
+        "next_season",
+        "position_group",
+        "athlete_id",
+        "grade",
+        "grade_next",
+        "epa",
+        "epa_next",
+        "standard",
+    ]
+    if not parts:
+        return pd.DataFrame(columns=columns)
+    return pd.concat(parts, ignore_index=True)[columns]
+
+
+def next_season_table(seasons, model, validation_season: int) -> pd.DataFrame:
+    """Does a final-week grade predict next season, compared with EPA credit alone?
+
+    Per pair and group of ``next_season_pairs``: the Spearman of the season-``t``
+    grade with the ``t + 1`` grade and with the ``t + 1`` EPA credit, and of the
+    season-``t`` EPA credit and standard stat with the ``t + 1`` EPA credit (the
+    baselines).
+    """
+    rows = [
+        {
+            "season": season,
+            "next_season": later,
+            "position_group": group,
+            "players": len(used),
+            "spearman_grade_next_grade": _spearman(used["grade"], used["grade_next"]),
+            "spearman_grade_next_epa": _spearman(used["grade"], used["epa_next"]),
+            "spearman_epa_next_epa": _spearman(used["epa"], used["epa_next"]),
+            "spearman_standard_next_epa": _spearman(used["standard"], used["epa_next"]),
+            "holdout": later == validation_season and season == validation_season - 1,
+        }
+        for (season, later, group), used in next_season_pairs(
+            seasons, model, validation_season
+        ).groupby(["season", "next_season", "position_group"], sort=True)
+    ]
     return pd.DataFrame(rows, columns=NEXT_SEASON_COLUMNS)
 
 
