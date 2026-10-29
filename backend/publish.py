@@ -35,14 +35,17 @@ def _append(frame: pd.DataFrame, table: str, conn, **kwargs) -> None:
     )
 
 
-def _archive(conn, table: str, history: str, columns: list[str], season: int) -> None:
-    """Copy the season's just-published snapshot into its append-only
-    history, naming every column so the two tables cannot drift silently."""
+def _archive(
+    conn, table: str, history: str, columns: list[str], season: int, rows: str = ""
+) -> None:
+    """Copy the season's just-published snapshot (``rows`` narrows it with an
+    extra SQL condition) into its append-only history, naming every column so
+    the two tables cannot drift silently."""
     names = ", ".join(columns)
     conn.execute(
         text(
             f"INSERT INTO {SCHEMA}.{history} ({names}) "
-            f"SELECT {names} FROM {SCHEMA}.{table} WHERE season = :season "
+            f"SELECT {names} FROM {SCHEMA}.{table} WHERE season = :season {rows} "
             "ON CONFLICT DO NOTHING"
         ),
         {"season": season},
@@ -428,12 +431,16 @@ def publish_awards(engine, season: int, week: int) -> dict:
     return {"award_boards": len(board), "award_model_meta": len(meta)}
 
 
+TRAIT_DISPLAY_COLUMNS = ("athlete_name", "headshot_url")
+
+
 def publish_position_traits(engine, season: int) -> dict:
     """Publish the latest scored week of position traits for ``season``.
 
     The whole season's rows are replaced in one transaction: the table holds one
     snapshot week per season, and nfl.position_traits_history keeps every
-    published snapshot. A season with no scored week leaves the table untouched.
+    published week's grade and war rows. A season with no scored week leaves
+    the table untouched.
     """
     from backend.players import MODEL_VERSION
     from backend.players.pipeline import POSITION_TRAIT_COLUMNS, latest_trait_week
@@ -461,12 +468,14 @@ def publish_position_traits(engine, season: int) -> dict:
             {"season": season},
         )
         _append(prepared, "position_traits", conn, chunksize=2000)
+        # History keeps the headline rows without the display columns.
         _archive(
             conn,
             "position_traits",
             "position_traits_history",
-            POSITION_TRAIT_COLUMNS,
+            [c for c in POSITION_TRAIT_COLUMNS if c not in TRAIT_DISPLAY_COLUMNS],
             season,
+            "AND trait IN ('grade', 'war')",
         )
     return {
         "position_traits": len(prepared),
