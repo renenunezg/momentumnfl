@@ -309,6 +309,8 @@ def build_recommendations(projections, offers, distribution, *, decision_at=None
     always one unit, with no compounding.
     """
     now = _timestamp(decision_at or datetime.now(UTC))
+    if not offers.empty and "odds_source" not in offers:
+        raise ValueError("Market offers predate odds_source; rerun the odds step")
     groups = (
         {game_id: group for game_id, group in offers.groupby("game_id")}
         if not offers.empty

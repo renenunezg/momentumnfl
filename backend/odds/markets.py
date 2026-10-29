@@ -91,6 +91,11 @@ def flatten_offers(
     ]
     offers = []
     for event in events:
+        # The ledger requires every priced offer to carry its feed's event id,
+        # and an ESPN id to be marked as one; refuse a feed that breaks that.
+        event_id = event.get("id")
+        if not event_id or str(event_id).startswith("espn-") != (odds_source == "espn"):
+            raise ValueError(f"Invalid {odds_source} event id: {event_id!r}")
         home_team = event.get("home_team")
         away_team = event.get("away_team")
         if not (event.get("commence_time") and home_team and away_team):
@@ -121,7 +126,7 @@ def flatten_offers(
                         {
                             "game_id": game_id,
                             "odds_source": odds_source,
-                            "odds_api_event_id": event.get("id"),
+                            "odds_api_event_id": event_id,
                             "provider_start_date": event.get("commence_time"),
                             "provider_key": bookmaker.get("key"),
                             "provider": bookmaker.get("title"),
