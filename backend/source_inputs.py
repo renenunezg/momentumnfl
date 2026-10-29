@@ -16,8 +16,8 @@ from backend import availability
 from backend.config import PROCESSED_DIR, RAW_DIR, STATIC_DIR
 from backend.features.qb import (
     OVERRIDES_PATH,
-    _overrides,
     lineup_starters,
+    load_qb_overrides,
     ruled_out,
 )
 
@@ -150,7 +150,7 @@ def attach_sources(frame):
         if teams_path.exists()
         else pd.DataFrame(columns=["team_name", "team_abbr"])
     )
-    overrides = _overrides()
+    overrides = load_qb_overrides()
     overrides = overrides[overrides.season.eq(season) & overrides.week.eq(week)]
     flags = []
     missing = {"home": [], "away": []}

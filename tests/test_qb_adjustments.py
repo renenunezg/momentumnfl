@@ -56,7 +56,7 @@ def test_starter_swap_changes_projection_without_double_counting(monkeypatch):
         "backend.model.fit_week.store.game_index", lambda seasons: index
     )
     overrides = pd.DataFrame(columns=["season", "week", "team_abbr", "gsis_id"])
-    monkeypatch.setattr(qb_features, "_overrides", lambda: overrides)
+    monkeypatch.setattr(qb_features, "load_qb_overrides", lambda: overrides)
     layer = LayerConfig(market_weight=0)
     healthy = compute_qb_adjustments(
         2026, 1, slate, logs, pd.DataFrame(), DEFAULT_CONFIG, layer

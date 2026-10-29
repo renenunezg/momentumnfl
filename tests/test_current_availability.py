@@ -29,8 +29,8 @@ def test_current_feed_corrects_lagging_weekly_report_and_fails_closed(
     monkeypatch.setattr(source_inputs, "PROCESSED_DIR", processed)
     monkeypatch.setattr(source_inputs, "ARCHIVE", processed / "source_archive")
     empty_overrides = pd.DataFrame(columns=["season", "week", "team_abbr", "gsis_id"])
-    monkeypatch.setattr(qb, "_overrides", lambda: empty_overrides)
-    monkeypatch.setattr(source_inputs, "_overrides", lambda: empty_overrides)
+    monkeypatch.setattr(qb, "load_qb_overrides", lambda: empty_overrides)
+    monkeypatch.setattr(source_inputs, "load_qb_overrides", lambda: empty_overrides)
     teams = pd.DataFrame(
         {
             "team_abbr": ["TB", "LA"],

@@ -71,10 +71,6 @@ def load_qb_overrides(path=OVERRIDES_PATH) -> pd.DataFrame:
     return overrides
 
 
-def _overrides() -> pd.DataFrame:
-    return load_qb_overrides()
-
-
 def _depth_chart_qbs(
     depth_charts: pd.DataFrame, season: int, week: int, as_of=None
 ) -> pd.DataFrame | None:
@@ -247,7 +243,7 @@ def expected_starters(
             result = recent.combine_first(result)
 
     overrides = (
-        _overrides()
+        load_qb_overrides()
         if use_overrides
         else pd.DataFrame(columns=["season", "week", "team_abbr", "gsis_id"])
     )

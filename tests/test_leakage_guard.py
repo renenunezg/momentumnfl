@@ -309,7 +309,7 @@ def test_recommendation_qb_freshness_uses_the_selected_player(tmp_path, monkeypa
     monkeypatch.setattr(source_inputs, "receipt_for", lambda path: None)
     monkeypatch.setattr(
         source_inputs,
-        "_overrides",
+        "load_qb_overrides",
         lambda: pd.DataFrame(columns=["season", "week", "team_abbr", "gsis_id"]),
     )
     (tmp_path / "depth_charts").mkdir()
