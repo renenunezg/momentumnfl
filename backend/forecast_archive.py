@@ -14,11 +14,13 @@ from pathlib import Path
 import pandas as pd
 
 from backend.config import HISTORY_START_SEASON, PROCESSED_DIR, REPO_ROOT
+from backend.features.qb import OVERRIDE_COLUMNS, OVERRIDES_PATH
 from backend.source_inputs import receipt_for
 
 ARCHIVE = PROCESSED_DIR / "forecast_archive"
 REPLAY_CUTOFF = "MOMENTUMNFL_REPLAY_CUTOFF"
 PACKAGES = ("numpy", "pandas", "scipy", "pyarrow")
+OVERRIDES_FILE = OVERRIDES_PATH.relative_to(REPO_ROOT)
 
 
 def _digest(data):
@@ -41,7 +43,7 @@ def prepare(args):
         if p.name != "margin_distribution.csv"
     ]
     paths += [REPO_ROOT / "pyproject.toml", REPO_ROOT / "poetry.lock"]
-    paths += [REPO_ROOT / "overrides/qb_starters.csv"]
+    paths += [REPO_ROOT / OVERRIDES_FILE]
     paths += [
         REPO_ROOT / "backend/data/raw" / name
         for name in (
@@ -151,7 +153,7 @@ def replay(path: Path):
                 raise ValueError(f"Corrupt archived input: {name}")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
-        from backend.features.qb import lineup_starters
+        from backend.features.qb import lineup_starters, load_qb_overrides
 
         raw = workspace / "backend/data/raw"
         depth = pd.read_parquet(raw / f"depth_charts/{season}.parquet")
@@ -181,10 +183,10 @@ def replay(path: Path):
                 for side in ("home", "away")
             ):
                 raise ValueError("Missing archived current injury coverage")
-        override_path = workspace / "overrides/qb_starters.csv"
-        overrides = pd.DataFrame(columns=["season", "week", "team_abbr", "gsis_id"])
+        override_path = workspace / OVERRIDES_FILE
+        overrides = pd.DataFrame(columns=list(OVERRIDE_COLUMNS))
         if override_path.exists():
-            overrides = pd.read_csv(override_path)
+            overrides = load_qb_overrides(override_path)
         starters, _ = lineup_starters(depth, season, week, cutoff, injuries, overrides)
         for row in manifest["forecasts"]:
             for side in ("home", "away"):

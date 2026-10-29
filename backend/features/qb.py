@@ -3,9 +3,11 @@
 import pandas as pd
 
 from backend.config import REPO_ROOT
+from backend.nflverse.data import TEAM_NORMALIZATION
 
-# Optional manual starter overrides: season, week, team_abbr, gsis_id.
+# Manual starter overrides: season, week, team_abbr, gsis_id, with provenance.
 OVERRIDES_PATH = REPO_ROOT / "overrides" / "qb_starters.csv"
+OVERRIDE_COLUMNS = ("season", "week", "team_abbr", "gsis_id")
 # Injury-report statuses that remove a quarterback from the expected lineup.
 UNAVAILABLE_STATUSES = ("Out", "Doubtful")
 
@@ -45,10 +47,32 @@ def identification_basis(depth_charts: pd.DataFrame) -> str:
     return QB_BASIS_DATED if "pos_abb" in depth_charts.columns else QB_BASIS_PROXY
 
 
+def load_qb_overrides(path=OVERRIDES_PATH) -> pd.DataFrame:
+    """Verified starter overrides, parsed once: a malformed file is an error,
+    never an empty frame."""
+    overrides = pd.read_csv(path, dtype=str, keep_default_na=False)
+    missing = set(OVERRIDE_COLUMNS) - set(overrides.columns)
+    if missing:
+        raise ValueError(f"QB overrides missing columns: {sorted(missing)}")
+    for column in ("season", "week"):
+        if not overrides[column].str.fullmatch(r"\d+").all():
+            raise ValueError(f"QB overrides need an integer {column}")
+        overrides[column] = overrides[column].astype(int)
+    teams = overrides["team_abbr"]
+    if (
+        not teams.str.fullmatch(r"[A-Z]{2,3}").all()
+        or teams.isin(TEAM_NORMALIZATION.keys()).any()
+    ):
+        raise ValueError("QB overrides need current-franchise team codes")
+    if not overrides["gsis_id"].str.fullmatch(r"\d{2}-\d{7}").all():
+        raise ValueError("QB overrides need gsis ids like 00-0012345")
+    if overrides.duplicated(["season", "week", "team_abbr"]).any():
+        raise ValueError("QB overrides repeat a team week")
+    return overrides
+
+
 def _overrides() -> pd.DataFrame:
-    if not OVERRIDES_PATH.exists():
-        return pd.DataFrame(columns=["season", "week", "team_abbr", "gsis_id"])
-    return pd.read_csv(OVERRIDES_PATH)
+    return load_qb_overrides()
 
 
 def _depth_chart_qbs(
