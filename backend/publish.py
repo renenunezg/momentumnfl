@@ -35,6 +35,20 @@ def _append(frame: pd.DataFrame, table: str, conn, **kwargs) -> None:
     )
 
 
+def _archive(conn, table: str, history: str, columns: list[str], season: int) -> None:
+    """Copy the season's just-published snapshot into its append-only
+    history, naming every column so the two tables cannot drift silently."""
+    names = ", ".join(columns)
+    conn.execute(
+        text(
+            f"INSERT INTO {SCHEMA}.{history} ({names}) "
+            f"SELECT {names} FROM {SCHEMA}.{table} WHERE season = :season "
+            "ON CONFLICT DO NOTHING"
+        ),
+        {"season": season},
+    )
+
+
 def _upsert(frame: pd.DataFrame, table: str, conn) -> None:
     if frame.empty:
         return
@@ -135,6 +149,13 @@ def publish_week(
                 _prepare(season_win_totals, SEASON_WIN_TOTALS_COLUMNS),
                 "season_win_totals",
                 conn,
+            )
+            _archive(
+                conn,
+                "season_win_totals",
+                "season_win_total_history",
+                SEASON_WIN_TOTALS_COLUMNS,
+                season,
             )
         if ratings is not None:
             conn.execute(text(f"DELETE FROM {SCHEMA}.teams"))
@@ -411,8 +432,8 @@ def publish_position_traits(engine, season: int) -> dict:
     """Publish the latest scored week of position traits for ``season``.
 
     The whole season's rows are replaced in one transaction: the table holds one
-    snapshot week per season and the parquet artifact keeps the history. A
-    season with no scored week leaves the table untouched.
+    snapshot week per season, and nfl.position_traits_history keeps every
+    published snapshot. A season with no scored week leaves the table untouched.
     """
     from backend.players import MODEL_VERSION
     from backend.players.pipeline import POSITION_TRAIT_COLUMNS, latest_trait_week
@@ -440,6 +461,13 @@ def publish_position_traits(engine, season: int) -> dict:
             {"season": season},
         )
         _append(prepared, "position_traits", conn, chunksize=2000)
+        _archive(
+            conn,
+            "position_traits",
+            "position_traits_history",
+            POSITION_TRAIT_COLUMNS,
+            season,
+        )
     return {
         "position_traits": len(prepared),
         "week": int(rows["week"].iloc[0]),

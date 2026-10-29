@@ -35,6 +35,17 @@ def publish(path):
                 "payload": json.dumps(payload, separators=(",", ":"), allow_nan=False),
             },
         ).scalar_one_or_none()
+        if changed is not None:
+            # Keep every published snapshot so the odds can be graded later.
+            conn.execute(
+                text("""
+                    insert into nfl.playoff_forecast_history
+                      (season,published_at,payload)
+                    select season,published_at,payload from nfl.playoff_forecasts
+                    where season=:season
+                """),
+                {"season": changed},
+            )
     print(json.dumps({"published": changed is not None, "season": payload["season"]}))
 
 
