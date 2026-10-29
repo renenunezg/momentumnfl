@@ -36,9 +36,10 @@ from backend.players.rating import (
 )
 
 # The first published ratings used 1,000 and 250 resamples. At 2,000 the
-# rating interval ends still move by up to 0.01 between seeds (measured on the
-# 2016 to 2024 and 2025 rows), so a verdict whose end lies within 0.01 of
-# zero is not settled by the interval; the trait ends move by about 0.002.
+# rating interval ends still move by up to about 0.02 between independent
+# draws (measured on the 2016 to 2024 and 2025 rows), so a verdict whose end
+# lies that close to zero is not settled by the interval; the trait ends move
+# by about 0.002.
 TRAIT_RESAMPLES = 4000
 RATING_RESAMPLES = 2000
 BOOTSTRAP_SEED = 20261029
@@ -233,24 +234,8 @@ def trait_rows(
     return rows
 
 
-def _week_season_means(frame: pd.DataFrame, columns: list[str]) -> np.ndarray:
-    """``evaluate``'s summary for each column: Spearman with the target per
-    week and season, averaged over seasons per week, then over weeks."""
-    by_week = []
-    for _, week in frame.groupby("week"):
-        per_season = []
-        for _, part in week.groupby("season"):
-            target = part[TARGET].to_numpy(float)[None, :]
-            values = part[columns].to_numpy(float).T
-            per_season.append(
-                _row_spearman(values, np.repeat(target, len(columns), axis=0), 20)
-            )
-        by_week.append(_nanmean(np.vstack(per_season)))
-    return _nanmean(np.vstack(by_week))
-
-
 def _nanmean(values: np.ndarray) -> np.ndarray:
-    """Column means over finite entries; NaN where a column has none."""
+    """Means over the first axis's finite entries; NaN where there are none."""
     finite = np.isfinite(values)
     counts = finite.sum(axis=0)
     sums = np.where(finite, values, 0.0).sum(axis=0)
@@ -260,22 +245,27 @@ def _nanmean(values: np.ndarray) -> np.ndarray:
 def _rating_bootstrap(
     frame: pd.DataFrame, columns: list[str], resamples: int, rng
 ) -> np.ndarray:
-    """``(resamples, len(columns))`` summaries, resampling players with
-    replacement within each season and keeping all their checkpoint weeks."""
-    groups = {
-        season: [part.index.to_numpy() for _, part in rows.groupby("athlete_id")]
-        for season, rows in frame.groupby("season")
-    }
-    out = np.zeros((resamples, len(columns)))
-    for b in range(resamples):
-        chosen = [
-            np.concatenate(
-                [players[i] for i in rng.integers(0, len(players), len(players))]
-            )
-            for players in groups.values()
-        ]
-        out[b] = _week_season_means(frame.loc[np.concatenate(chosen)], columns)
-    return out
+    """``(resamples, len(columns))`` summaries in ``evaluate``'s form (Spearman
+    per week and season, averaged over seasons, then weeks), resampling
+    players with replacement within each season with all their checkpoint
+    weeks. Each season's draws are one index array; a drawn player missing a
+    week is missing from that week's correlation."""
+    by_week: dict[int, list[np.ndarray]] = {}
+    for _, season in frame.groupby("season"):
+        players = {a: i for i, a in enumerate(season["athlete_id"].unique())}
+        draws = rng.integers(0, len(players), (resamples, len(players)))
+        for week, rows in season.groupby("week"):
+            position = rows["athlete_id"].map(players).to_numpy()
+            target = np.full(len(players), np.nan)
+            target[position] = rows[TARGET].to_numpy(float)
+            rho = np.empty((resamples, len(columns)))
+            for k, column in enumerate(columns):
+                values = np.full(len(players), np.nan)
+                values[position] = rows[column].to_numpy(float)
+                rho[:, k] = _row_spearman(values[draws], target[draws], 20)
+            by_week.setdefault(int(week), []).append(rho)
+    weekly = np.stack([_nanmean(np.stack(seasons)) for seasons in by_week.values()])
+    return _nanmean(weekly)
 
 
 def rating_rows(

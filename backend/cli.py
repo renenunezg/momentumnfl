@@ -824,7 +824,6 @@ def run_position_traits(args) -> None:
         ingest_player_sources(seasons, refresh_latest=False)
         for position, model in fit_ratings(args.dev_seasons, args.validate).items():
             print(f"{position} rating model written to {model}")
-        _write_grade_evaluation(args.dev_seasons, args.validate)
     elif args.command == "grade-evaluation":
         rows = _write_grade_evaluation(args.dev_seasons, args.validate)
         if args.publish:
