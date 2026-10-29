@@ -138,7 +138,6 @@ def main() -> None:
     )
     publish_parser.add_argument("--season", type=int)
     publish_parser.add_argument("--week", type=int)
-    publish_parser.add_argument("--skip-backtest", action="store_true")
     publish_parser.add_argument("--projections-only", action="store_true")
 
     traits_fit = subparsers.add_parser(
@@ -878,11 +877,8 @@ def run_publish(args) -> None:
         unit_ratings = backtest = None
     else:
         unit_ratings = read_optional("unit_ratings")
-        backtest = (
-            None
-            if args.skip_backtest
-            else publish.build_backtest_frame(BACKTEST_PUBLISH_FLOOR)
-        )
+        # Replaced only when its generation changed (publish._backtest_changed).
+        backtest = publish.build_backtest_frame(BACKTEST_PUBLISH_FLOOR)
     import pandas as pd
 
     from backend.forecast_archive import publication_bundle

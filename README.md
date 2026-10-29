@@ -183,7 +183,7 @@ poetry run python -m backend refresh-inputs --season 2026
 poetry run python -m backend fit --season 2026
 poetry run python -m backend season-wins --season 2026
 poetry run python -m backend odds --season 2026
-poetry run python -m backend publish --season 2026 --skip-backtest
+poetry run python -m backend publish --season 2026
 ```
 
 `fit`, `odds`, and `publish` infer the season and week from the next unplayed
@@ -206,7 +206,7 @@ game of the season has been played yet.
 | `qbs --season --week --team BUF [--context]` | Inspect starter/backup strengths, recorded and effective samples, and substitutions; optionally show context effects and model uncertainty. |
 | `odds [--season --week]` | Snapshot Odds API offers and price them against the projections. |
 | `upcoming --season [--hours]` | Exit 0 when an unplayed game kicks off within the window, 3 otherwise. |
-| `publish [--season --week] [--skip-backtest] [--projections-only]` | Write the week to the `nfl` schema. |
+| `publish [--season --week] [--projections-only]` | Write the week to the `nfl` schema; the backtest is replaced only when its generation changes. |
 | `grade --season` | Update completed results and grade preserved pregame forecasts. |
 
 Publishing refuses to touch the database unless `MOMENTUMNFL_DB_WRITES=1` is
