@@ -338,3 +338,92 @@ def test_calibration_identity_includes_availability_and_missingness(
     assert artifacts.fingerprint() == missing
     with pytest.raises(FileNotFoundError, match="bootstrap-history"):
         artifacts.ensure()
+
+
+def test_backtest_layers_reproduce_the_published_projection():
+    """calibration.apply_layers and projections.assemble_projections are two
+    implementations of the output layers; the backtest is only evidence for
+    the published line while they agree."""
+    from backend.model.calibration import apply_layers
+    from backend.model.joint_scoring import DEFAULT_CONFIG, JointScoringFit
+    from backend.model.projections import (
+        QB_BASIS_DATED,
+        QB_BASIS_PROXY,
+        LayerConfig,
+        assemble_projections,
+    )
+
+    teams = [f"T{i:02d}" for i in range(32)]
+    fit = JointScoringFit(
+        season=2026,
+        week=5,
+        as_of=datetime(2026, 10, 1, tzinfo=UTC),
+        teams=teams,
+        offense_ppd=np.linspace(-0.15, 0.15, 32),
+        defense_ppd=np.linspace(0.1, -0.1, 32),
+        pace=np.zeros(32),
+        base_ppd=2.2,
+        base_drives=10.0,
+        hfa_ppd=0.2,
+        parameter_covariance=np.eye(65) * 0.01,
+        score_residual_covariance=np.eye(2) * 50,
+        config=DEFAULT_CONFIG,
+    )
+    slate = pd.DataFrame(
+        [
+            dict(
+                game_id=f"g{i}",
+                season=2026,
+                week=5,
+                home_team=teams[i],
+                away_team=teams[-i - 1],
+                neutral_site=i == 3,
+                home_rest=7 + i % 4,
+                away_rest=7,
+            )
+            for i in range(8)
+        ]
+    )
+    layer = LayerConfig()
+    deltas = {f"g{i}": (1.5 - i * 0.4, 0.3 * (i % 3)) for i in range(8)}
+    spreads = {f"g{i}": -3.0 + i for i in range(8)}
+    rows = []
+    for game in slate.itertuples():
+        engine = fit.engine_projection(game)
+        home_delta, away_delta = deltas[game.game_id]
+        rows.append(
+            dict(
+                engine_margin=engine.expected_home - engine.expected_away,
+                engine_total=engine.expected_home + engine.expected_away,
+                rest_diff=float(np.clip(game.home_rest - game.away_rest, -3, 3)),
+                market_margin=-spreads[game.game_id],
+                qb_input_basis=QB_BASIS_DATED if game.Index % 2 else QB_BASIS_PROXY,
+                **{
+                    f"qb_adj_{int(layer.qb_span_dropbacks)}": home_delta - away_delta,
+                    f"qb_sum_{int(layer.qb_span_dropbacks)}": home_delta + away_delta,
+                    f"qb_absence_adj_{int(layer.qb_span_dropbacks)}": 0.0,
+                    f"qb_absence_sum_{int(layer.qb_span_dropbacks)}": 0.0,
+                },
+            )
+        )
+    backtest = apply_layers(pd.DataFrame(rows), layer)
+    weights = [
+        layer.qb_weight(basis, confirmed_absence=False)
+        for basis in backtest["qb_input_basis"]
+    ]
+    published = assemble_projections(
+        fit,
+        slate,
+        fit.as_of,
+        {},
+        {
+            game_id: (w * home, w * away)
+            for (game_id, (home, away)), w in zip(deltas.items(), weights, strict=True)
+        },
+        spreads,
+        layer,
+    )
+    for row, projection in zip(backtest.itertuples(), published, strict=True):
+        assert row.pure_model_margin == pytest.approx(projection.pure_home_margin)
+        assert row.model_margin == pytest.approx(projection.home_margin)
+        assert row.model_total == pytest.approx(projection.model_total)
