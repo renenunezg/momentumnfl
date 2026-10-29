@@ -182,7 +182,7 @@ def publish_week(
                 },
             )
             _append(snapshot, "market_snapshots", conn)
-        if backtest is not None:
+        if backtest is not None and _backtest_changed(conn, backtest):
             # DELETE rather than TRUNCATE: TRUNCATE takes an exclusive lock
             # that stalls frontend reads for the whole insert.
             conn.execute(text(f"DELETE FROM {SCHEMA}.backtest_predictions"))
@@ -228,12 +228,48 @@ def fallback_market_comparisons(projections: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def _backtest_changed(conn, backtest: pd.DataFrame) -> bool:
+    """The backtest is replaced only when its generation changes, so the
+    public history is stable between production-artifact runs."""
+    published = conn.execute(
+        text(
+            f"SELECT DISTINCT model_version, generated_at "
+            f"FROM {SCHEMA}.backtest_predictions"
+        )
+    ).all()
+    generation = backtest[["model_version", "generated_at"]].drop_duplicates()
+    return len(published) != 1 or (
+        published[0].model_version,
+        pd.Timestamp(published[0].generated_at),
+    ) != (
+        generation.iloc[0].model_version,
+        pd.Timestamp(generation.iloc[0].generated_at),
+    )
+
+
 def build_backtest_frame(floor_season: int) -> pd.DataFrame:
+    """The walk-forward predictions of the current production artifacts,
+    stamped with their model version and generation time."""
+    import hashlib
+    import json
+
+    from backend.config import PROCESSED_DIR
+    from backend.model.artifacts import MANIFEST_PATH
+
+    predictions_path = PROCESSED_DIR / "calibration" / "predictions.parquet"
+    manifest = json.loads(MANIFEST_PATH.read_text())
+    if (
+        manifest.get("artifacts", {}).get(predictions_path.name)
+        != hashlib.sha256(predictions_path.read_bytes()).hexdigest()
+    ):
+        raise ValueError("Backtest predictions do not match the production manifest")
     predictions = store.read_processed("calibration", "predictions.parquet")
     if not {"forecast_cutoff", "home_expected_qb", "away_expected_qb"}.issubset(
         predictions.columns
     ):
         raise ValueError("Regenerate legacy backtests with forecast-time QB inputs")
+    if predictions["model_version"].nunique() != 1:
+        raise ValueError("Backtest predictions must come from one model version")
     predictions = predictions[predictions["season"].ge(floor_season)].copy()
     return pd.DataFrame(
         {
@@ -251,6 +287,8 @@ def build_backtest_frame(floor_season: int) -> pd.DataFrame:
             "model_margin": predictions["model_margin"],
             "pure_model_margin": predictions["pure_model_margin"],
             "actual_margin": predictions["actual_margin"],
+            "model_version": predictions["model_version"],
+            "generated_at": pd.Timestamp(manifest["created_at"]),
         }
     )
 

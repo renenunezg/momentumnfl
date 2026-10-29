@@ -137,6 +137,8 @@ BACKTEST_COLUMNS = [
     "model_margin",
     "pure_model_margin",
     "actual_margin",
+    "model_version",
+    "generated_at",
 ]
 
 SEASON_WIN_TOTALS_COLUMNS = [
