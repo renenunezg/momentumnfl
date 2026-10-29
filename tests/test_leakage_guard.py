@@ -410,3 +410,22 @@ def test_unit_ratings_ignore_later_games_and_adjust_for_opponents():
     raw = units[~later].groupby("team").pass_epa.mean()
     assert rated.pass_offense.abs().max() < 0.5 * raw.sub(raw.mean()).abs().max()
     assert rated.pass_defense.corr(pd.Series(strength)) > 0.9
+
+
+def test_win_totals_without_a_capture_date_or_preseason_marker_fail_closed(
+    tmp_path, monkeypatch
+):
+    from backend.model import preseason
+
+    pd.DataFrame(
+        {"season": [2030, 2031], "team_abbr": ["A", "A"], "win_total": [8.5, 9.5]}
+    ).to_csv(tmp_path / "win_totals.csv", index=False)
+    (tmp_path / "win_total_sources.json").write_text(
+        '{"2031": {"date": null, "basis": "unknown"}}'
+    )
+    monkeypatch.setattr(preseason, "STATIC_DIR", tmp_path)
+    cutoff = datetime(2031, 9, 1, tzinfo=UTC)
+    for season in (2030, 2031):
+        with pytest.raises(ValueError):
+            preseason.load_win_totals(season, cutoff)
+    assert preseason.load_win_totals(2032, cutoff).empty

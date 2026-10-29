@@ -63,6 +63,31 @@ def numerical_environment() -> dict:
     }
 
 
+def preseason_input_basis() -> dict:
+    """How each season's preseason inputs were obtained, so the backtest
+    states which ones are hindsight proxies rather than dated captures."""
+    references = pd.read_csv(STATIC_DIR / "preseason_qbs.csv")
+    sources = json.loads((STATIC_DIR / "win_total_sources.json").read_text())
+    return {
+        "qb_reference_basis": {
+            basis: sorted(int(s) for s in group["season"].unique())
+            for basis, group in references.groupby("reference_basis")
+        },
+        "qb_reference_note": (
+            "week_1_proxy seasons take the quarterback who actually started "
+            "week 1 as the lineup priced into the preseason win total: a "
+            "hindsight proxy, not a preseason depth chart"
+        ),
+        "win_total_basis": {
+            season: source.get("basis") for season, source in sources.items()
+        },
+        "win_total_note": (
+            "preseason_by_construction seasons have no recorded source or "
+            "capture date; only dated seasons are timestamped quotes"
+        ),
+    }
+
+
 def ensure(force: bool = False) -> dict:
     from backend.model.calibration import (
         EVAL_SEASONS,
@@ -130,6 +155,7 @@ def ensure(force: bool = False) -> dict:
         "retrospective_engine_totals": summary["holdout_engine_totals"],
         "development_model_totals": summary["dev_model_totals"],
         "retrospective_model_totals": summary["holdout_model_totals"],
+        "preseason_inputs": preseason_input_basis(),
         "artifacts": {
             p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in paths
         },

@@ -1,7 +1,86 @@
 {
+  "2015": {
+    "name": null,
+    "date": null,
+    "url": null,
+    "basis": "preseason_by_construction",
+    "provenance": "unknown: committed without a source or capture date in f8c3cb0 on 2026-08-17; treated as a preseason line, not a dated quote"
+  },
+  "2016": {
+    "name": null,
+    "date": null,
+    "url": null,
+    "basis": "preseason_by_construction",
+    "provenance": "unknown: committed without a source or capture date in f8c3cb0 on 2026-08-17; treated as a preseason line, not a dated quote"
+  },
+  "2017": {
+    "name": null,
+    "date": null,
+    "url": null,
+    "basis": "preseason_by_construction",
+    "provenance": "unknown: committed without a source or capture date in f8c3cb0 on 2026-08-17; treated as a preseason line, not a dated quote"
+  },
+  "2018": {
+    "name": null,
+    "date": null,
+    "url": null,
+    "basis": "preseason_by_construction",
+    "provenance": "unknown: committed without a source or capture date in f8c3cb0 on 2026-08-17; treated as a preseason line, not a dated quote"
+  },
+  "2019": {
+    "name": null,
+    "date": null,
+    "url": null,
+    "basis": "preseason_by_construction",
+    "provenance": "unknown: committed without a source or capture date in f8c3cb0 on 2026-08-17; treated as a preseason line, not a dated quote"
+  },
+  "2020": {
+    "name": null,
+    "date": null,
+    "url": null,
+    "basis": "preseason_by_construction",
+    "provenance": "unknown: committed without a source or capture date in f8c3cb0 on 2026-08-17; treated as a preseason line, not a dated quote"
+  },
+  "2021": {
+    "name": null,
+    "date": null,
+    "url": null,
+    "basis": "preseason_by_construction",
+    "provenance": "unknown: committed without a source or capture date in f8c3cb0 on 2026-08-17; treated as a preseason line, not a dated quote"
+  },
+  "2022": {
+    "name": null,
+    "date": null,
+    "url": null,
+    "basis": "preseason_by_construction",
+    "provenance": "unknown: committed without a source or capture date in f8c3cb0 on 2026-08-17; treated as a preseason line, not a dated quote"
+  },
+  "2023": {
+    "name": null,
+    "date": null,
+    "url": null,
+    "basis": "preseason_by_construction",
+    "provenance": "unknown: committed without a source or capture date in f8c3cb0 on 2026-08-17; treated as a preseason line, not a dated quote"
+  },
+  "2024": {
+    "name": null,
+    "date": null,
+    "url": null,
+    "basis": "preseason_by_construction",
+    "provenance": "unknown: committed without a source or capture date in f8c3cb0 on 2026-08-17; treated as a preseason line, not a dated quote"
+  },
+  "2025": {
+    "name": null,
+    "date": null,
+    "url": null,
+    "basis": "preseason_by_construction",
+    "provenance": "unknown: committed without a source or capture date in f8c3cb0 on 2026-08-17; treated as a preseason line, not a dated quote"
+  },
   "2026": {
     "name": "BetMGM",
     "date": "2026-09-01",
-    "url": "https://sports.betmgm.com/en/blog/nfl/nfl-over-under-wins-2026-win-totals-all-32-teams-bm16/"
+    "url": "https://sports.betmgm.com/en/blog/nfl/nfl-over-under-wins-2026-win-totals-all-32-teams-bm16/",
+    "basis": "dated",
+    "provenance": "retrieved 2026-09-07 before kickoff and frozen for the season (README)"
   }
 }

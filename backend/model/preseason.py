@@ -41,6 +41,9 @@ SLOPE_REFERENCE_CONFIG = JointScoringConfig(
     strength_prior_sd_ppd=0.35,
 )
 ENVIRONMENT_CLIP_POINTS = 8.0
+# Source basis for historical totals with no recorded capture date: published
+# preseason lines, known before week 1 by construction but not dated quotes.
+PRESEASON_BY_CONSTRUCTION = "preseason_by_construction"
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,13 +56,24 @@ class PreseasonConfig:
 
 
 def load_win_totals(season: int, as_of: datetime | None = None) -> pd.Series:
-    if as_of is not None:
-        sources = json.loads((STATIC_DIR / "win_total_sources.json").read_text())
-        date = pd.to_datetime(sources.get(str(season), {}).get("date"), utc=True)
-        if pd.notna(date) and date >= as_of:
-            return pd.Series(dtype=float)
+    """The season's sportsbook win totals, empty when they postdate ``as_of``.
+
+    The cutoff guard fails closed: totals with no source entry, or an undated
+    entry not explicitly marked a preseason line, are an error, never assumed
+    known at the cutoff."""
     totals = pd.read_csv(STATIC_DIR / "win_totals.csv")
     totals = totals[totals["season"].eq(season)]
+    if as_of is not None and not totals.empty:
+        sources = json.loads((STATIC_DIR / "win_total_sources.json").read_text())
+        source = sources.get(str(season))
+        if source is None:
+            raise ValueError(f"Win totals for {season} have no source entry")
+        date = pd.to_datetime(source.get("date"), utc=True)
+        if pd.notna(date):
+            if date >= as_of:
+                return pd.Series(dtype=float)
+        elif source.get("basis") != PRESEASON_BY_CONSTRUCTION:
+            raise ValueError(f"Win totals for {season} have no capture date")
     return totals.set_index("team_abbr")["win_total"]
 
 
