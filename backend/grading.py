@@ -5,6 +5,7 @@ import pandas as pd
 
 from backend.contracts import prepare_rows as _prepare
 from backend.features.drives import kickoff_utc
+from backend.features.scoring import closing_home_spread
 
 RESULT_COLUMNS = [
     "game_id",
@@ -67,8 +68,7 @@ def result_frame(schedules, season, names, fetched_at) -> pd.DataFrame:
         if games[f"{side}_team"].isna().any():
             raise ValueError("Unknown team in completed-game schedule")
     games["neutral_site"] = games["location"].eq("Neutral")
-    # nflverse spread_line is the implied home margin; UI uses home spread.
-    games["closing_spread"] = -pd.to_numeric(games["spread_line"])
+    games["closing_spread"] = closing_home_spread(games["spread_line"])
     if np.isinf(games["closing_spread"].to_numpy(dtype=float)).any():
         raise ValueError("Invalid closing spread")
     games["source"] = "nflverse schedules"

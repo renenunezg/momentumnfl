@@ -9,6 +9,7 @@ from backend.config import HISTORY_START_SEASON
 from backend.etl import store
 from backend.features import qb as qb_features
 from backend.features.drives import kickoff_utc
+from backend.features.scoring import closing_home_spread
 from backend.model import qb_adjustment as qb_layer
 from backend.model.joint_scoring import (
     DEFAULT_CONFIG,
@@ -163,7 +164,7 @@ def week_slate(season: int, week: int) -> pd.DataFrame:
 def market_home_spreads(slate: pd.DataFrame) -> dict[str, float]:
     """game_id -> sportsbook home line from the nflverse schedule."""
     return {
-        str(row.game_id): -float(row.spread_line)
+        str(row.game_id): float(closing_home_spread(row.spread_line))
         for row in slate.itertuples()
         if pd.notna(getattr(row, "spread_line", None))
     }

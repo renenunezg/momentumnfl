@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 import requests
 
+from backend.odds.espn import Quote, draftkings_quote
+
 SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
 # ESPN abbreviations that differ from the nflverse codes projections use.
 TEAM_CODES = {"WSH": "WAS", "LAR": "LA"}
@@ -26,6 +28,9 @@ class LiveState:
     yards_to_goal: int | None = None
     home_timeouts: int | None = None
     away_timeouts: int | None = None
+    # DraftKings' pregame prices as the scoreboard carried them; only on a
+    # scheduled game, since a started game's prices are live, not closing.
+    quote: Quote | None = None
 
 
 def _whole(value) -> int | None:
@@ -63,7 +68,7 @@ def parse_event(event: dict) -> tuple[tuple[str, str], LiveState]:
         return key, LiveState("off")
     state = STATES[status["type"]["state"]]
     if state == "scheduled":
-        return key, LiveState(state)
+        return key, LiveState(state, quote=draftkings_quote(competition))
     scores = {side: _whole(team.get("score")) for side, team in sides.items()}
     if None in scores.values():
         raise ValueError("Missing or invalid score")

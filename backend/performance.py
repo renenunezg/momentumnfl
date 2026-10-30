@@ -1,9 +1,11 @@
 """Live-season forecast grading: frozen pregame forecasts against finals.
 
 Every graded row pairs the last forecast published before kickoff (an
-immutable ``forecast_snapshots`` row) with the final score and the nflverse
-closing line recorded in ``game_results``. Nothing is re-fit or re-priced
-once a result is known; the closing line is the benchmark, never an input.
+immutable ``forecast_snapshots`` row) with the final score and the closing
+line: the row the live worker captured before kickoff (``closing_lines``)
+when there is one, otherwise the nflverse value recorded in ``game_results``,
+with ``closing_source`` naming which. Nothing is re-fit or re-priced once a
+result is known; the closing line is the benchmark, never an input.
 The aggregates feed the site's performance page directly, so the database
 only ever serves these small precomputed rows.
 """
@@ -15,6 +17,7 @@ import pandas as pd
 from scipy.stats import t as student_t
 
 from backend.model.distributions import student_t_scale
+from backend.odds.closing import NFLVERSE_SOURCE
 from backend.recommendations import PRICING_MARGIN_SD, marginal_cdf
 
 PROBABILITY_METHOD = (
@@ -128,7 +131,9 @@ def build_graded_games(
 ) -> pd.DataFrame:
     """One graded row per completed game with a pregame forecast.
 
-    ``frozen`` is the joined record of ``game_results`` and the last eligible
+    ``frozen`` is the joined record of ``game_results``, the captured
+    ``closing_lines`` row when one exists (``captured_home_spread``,
+    ``captured_total``, ``captured_source``), and the last eligible
     ``forecast_snapshots`` row per game, as served by
     ``publish.fetch_frozen_forecasts``; ``totals`` maps game_id to the
     nflverse closing total. Rows are rebuilt from those frozen inputs on
@@ -150,10 +155,7 @@ def build_graded_games(
     required += ["degrees_of_freedom", "home_points", "away_points"]
     if out[required].isna().any().any():
         raise ValueError("Frozen forecast is missing a graded field")
-    out["closing_total"] = out["game_id"].map(totals)
-    out["closing_source"] = np.where(
-        out["closing_spread"].notna(), out["score_source"], None
-    )
+    out = _with_closing_line(out, totals)
     out["actual_margin"] = (out["home_points"] - out["away_points"]).astype(int)
     out["actual_total"] = (out["home_points"] + out["away_points"]).astype(int)
     out["home_win_probability"] = _home_win_probability(out)
@@ -164,6 +166,26 @@ def build_graded_games(
         .sort_values(["start_date", "game_id"], kind="stable")
         .reset_index(drop=True)
     )
+
+
+def _with_closing_line(frame: pd.DataFrame, totals: pd.Series) -> pd.DataFrame:
+    """The captured close where the worker wrote one, the nflverse value
+    otherwise; ``closing_source`` labels the spread's origin and the total
+    follows the same preference field by field."""
+    out = frame.copy()
+    captured = out["captured_home_spread"].notna()
+    out["closing_spread"] = out["captured_home_spread"].where(
+        captured, out["closing_spread"]
+    )
+    out["closing_total"] = out["captured_total"].where(
+        out["captured_total"].notna(), out["game_id"].map(totals)
+    )
+    out["closing_source"] = np.select(
+        [captured, out["closing_spread"].notna()],
+        [out["captured_source"], NFLVERSE_SOURCE],
+        default=None,
+    )
+    return out
 
 
 def _home_win_probability(frame: pd.DataFrame) -> pd.Series:

@@ -1258,10 +1258,11 @@ def run_ingame_backtest(args) -> None:
 
 def run_live_win_probability(args) -> None:
     import logging
+    import os
     import sys
     from datetime import UTC, datetime, timedelta
 
-    from backend import live_feed, live_publish
+    from backend import closing_capture, live_feed, live_publish
     from backend.db import writes_allowed
     from backend.model.ingame_nflfastr import load_model
 
@@ -1272,12 +1273,28 @@ def run_live_win_probability(args) -> None:
     if args.publish and not writes_allowed():
         raise SystemExit("publication requires MOMENTUMNFL_DB_WRITES=1")
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
+    # The Odds API prices the close when a key is present; ESPN's scoreboard
+    # quote, already fetched for the live states, is the fallback either way.
+    fetch_odds = None
+    if os.getenv("ODDS_API_KEY"):
+        from backend.odds.client import OddsAPIClient
+
+        fetch_odds = OddsAPIClient().get_nfl_odds
+    else:
+        logging.getLogger(__name__).info(
+            "ODDS_API_KEY is not set; closing lines come from ESPN DraftKings only"
+        )
+    closing = closing_capture.ClosingCapture(
+        fetch_odds=fetch_odds,
+        write=closing_capture.write_closing_lines if args.publish else None,
+    )
     publisher = live_publish.LivePublisher(
         load_model(),
         load_games=live_publish.load_games,
         load_saved=live_publish.load_saved,
         fetch_states=live_feed.fetch_states,
         write=live_publish.write_snapshots if args.publish else None,
+        closing=closing,
         expires_at=(
             datetime.now(UTC) + timedelta(seconds=args.duration)
             if args.duration

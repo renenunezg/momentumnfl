@@ -622,6 +622,8 @@ select r.game_id, r.season, r.week, r.season_type, r.start_date, r.neutral_site,
   r.home_team_abbr, r.away_team_abbr, r.home_team, r.away_team,
   r.home_points, r.away_points, r.closing_spread,
   r.source as score_source, r.source_fetched_at,
+  c.home_spread as captured_home_spread, c.total as captured_total,
+  c.source as captured_source,
   p.week as forecast_week, p.as_of as forecast_as_of,
   p.recorded_at as forecast_recorded_at, p.model_version, p.div_game,
   p.home_qb_adjustment, p.away_qb_adjustment, p.rest_adjustment,
@@ -630,6 +632,7 @@ select r.game_id, r.season, r.week, r.season_type, r.start_date, r.neutral_site,
   p.model_total, p.market_informed_total, p.margin_sd, p.total_sd,
   p.distribution, p.degrees_of_freedom
 from {SCHEMA}.game_results r
+left join {SCHEMA}.closing_lines c on c.game_id = r.game_id
 join lateral (
   select f.* from {SCHEMA}.forecast_snapshots f
   where f.game_id = r.game_id and f.season = r.season

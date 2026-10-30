@@ -29,6 +29,8 @@ class OddsSnapshot:
     configured_bookmakers: tuple[str, ...]
     # Which feed priced the snapshot: "odds_api" or "espn".
     source: str
+    # Credits the request consumed (x-requests-last); None for a free feed.
+    last_request_cost: int | None = None
 
 
 def _header_int(response: requests.Response, name: str) -> int | None:
@@ -109,4 +111,5 @@ class OddsAPIClient:
             requests_remaining=_header_int(response, "x-requests-remaining"),
             configured_bookmakers=self.bookmakers,
             source="odds_api",
+            last_request_cost=_header_int(response, "x-requests-last"),
         )

@@ -205,6 +205,38 @@ def test_published_forecasts_freeze_and_grade_on_identical_cohort(database):
     revised["as_of"] = pd.Timestamp.now(tz="UTC")
     assert publish(revised)["forecast_snapshots"] == 6
     assert publish(projections)["forecast_snapshots"] == 6  # stale artifact
+
+    # The live worker captures one close per game before kickoff; a quote
+    # stamped at or after kickoff is dropped, and nothing captured ever moves.
+    def capture(game_id, home_spread, fetched_at):
+        with database.begin() as conn:
+            return conn.execute(
+                text("""
+                insert into nfl.closing_lines
+                  (game_id, season, start_date, source, observed_at, fetched_at,
+                   home_spread, total, n_offers, price_book)
+                values (:game_id, 2026, :start, 'espn:draftkings', :fetched,
+                  :fetched, :spread, 47.5, 1, 'draftkings')
+                on conflict (game_id) do nothing
+            """),
+                {
+                    "game_id": game_id,
+                    "start": kickoff.to_pydatetime(),
+                    "fetched": fetched_at,
+                    "spread": home_spread,
+                },
+            ).rowcount
+
+    assert capture("frozen", -5.0, kickoff.to_pydatetime() - timedelta(minutes=1)) == 1
+    assert capture("frozen", -9.0, kickoff.to_pydatetime() - timedelta(minutes=1)) == 0
+    assert capture("tie", -1.5, kickoff.to_pydatetime()) == 0
+    for statement in (
+        "update nfl.closing_lines set home_spread = 0",
+        "delete from nfl.closing_lines",
+        "truncate nfl.closing_lines",
+    ):
+        with pytest.raises(DBAPIError), database.begin() as conn:
+            conn.execute(text(statement))
     with database.connect() as conn:
         conn.execute(
             text(
@@ -296,13 +328,14 @@ def test_published_forecasts_freeze_and_grade_on_identical_cohort(database):
 
     original_results = results(schedules)
     metrics = grade_season(database, original_results, 2026)
+    # frozen grades against its captured -5 (error 1), tie against nflverse.
     assert metrics == dict(
         completed_games=4,
         frozen_forecasts=3,
         benchmark_games=2,
         blended_mae=1.5,
         pure_mae=2.0,
-        closing_mae=0.75,
+        closing_mae=1.0,
     )
     with database.connect() as conn:
         accuracy = conn.execute(
@@ -312,7 +345,8 @@ def test_published_forecasts_freeze_and_grade_on_identical_cohort(database):
         assert accuracy["overall"]["games"] == 2
         assert accuracy["overall"]["modelMae"] == 1.5
         assert accuracy["overall"]["pureMae"] == 2.0
-        assert accuracy["overall"]["marketMae"] == 0.75
+        assert accuracy["overall"]["marketMae"] == 1.0
+        assert accuracy["closingSources"] == {"espn:draftkings": 1, "nflverse": 1}
         assert (
             conn.execute(text("select nfl.forecast_accuracy('backtest')")).scalar_one()[
                 "completed"
@@ -323,7 +357,8 @@ def test_published_forecasts_freeze_and_grade_on_identical_cohort(database):
     schedules.loc[0, ["home_score", "result", "spread_line"]] = [27, 7, 4]
     corrected = grade_season(database, results(schedules), 2026)
     assert corrected["blended_mae"] == 3.0
-    assert corrected["closing_mae"] == 2.0
+    # A revised nflverse line does not reach a game with a captured close.
+    assert corrected["closing_mae"] == 1.5
     assert grade_season(database, original_results, 2026) == corrected
     with database.begin() as conn:
         conn.execute(text("set local role anon"))

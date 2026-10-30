@@ -1,10 +1,12 @@
 """Publish live win probabilities across the Supabase boundary.
 
-One scoreboard call covers the whole slate. None is made before a tracked
-game's scheduled kickoff or after every tracked game is terminal, and the
-worker exits as soon as nothing is left to watch. Each state is scored by the
-in-game model against the projection published before kickoff, which is
-frozen into the row at first sight; pregame tables are never written here.
+One scoreboard call covers the whole slate. None is made more than half an
+hour before a tracked game's scheduled kickoff or after every tracked game is
+terminal, and the worker exits as soon as nothing is left to watch. Each state
+is scored by the in-game model against the projection published before
+kickoff, which is frozen into the row at first sight. The same scoreboard
+polls feed the closing-line capture (``backend.closing_capture``); pregame
+forecast tables are never written here.
 """
 
 import hashlib
@@ -17,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 import numpy as np
 import pandas as pd
 
+from backend.closing_capture import QUOTE_WINDOW, ClosingCapture
 from backend.contracts import SCHEMA
 from backend.features.ingame import KICKOFF, REGULATION_SECONDS, SCRIMMAGE
 from backend.live_feed import LiveState
@@ -257,12 +260,14 @@ class LivePublisher:
         fetch_states,
         write=None,
         expires_at: datetime | None = None,
+        closing: ClosingCapture | None = None,
     ):
         self.model = model
         self.load_games = load_games
         self.load_saved = load_saved
         self.fetch_states = fetch_states
         self.write = write
+        self.closing = closing
         self.expires_at = expires_at.isoformat() if expires_at else None
         self.games: dict[str, Game] = {}
         self.payloads: dict[str, dict] = {}
@@ -307,9 +312,12 @@ class LivePublisher:
         open_games = [g for g in self.games.values() if g.game_id not in self.done]
         if not open_games:
             return False
-        # Before the first scheduled kickoff the database alone is enough.
-        board_fetched = any(game.start <= now for game in open_games)
+        # The scoreboard is first asked inside the closing-line window; until
+        # a game's own kickoff its state is not scored, only its quote held.
+        board_fetched = any(game.start - now <= QUOTE_WINDOW for game in open_games)
         states = self.fetch_states() if board_fetched else {}
+        if self.closing is not None:
+            self.closing.observe(open_games, states, now)
         changed, finished = [], []
         for game in open_games:
             payload = score_game(

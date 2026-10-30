@@ -69,7 +69,9 @@ begin
 end $$;
 
 -- Live win probability: dispatch only around unfinished games, and only when
--- no worker is alive.
+-- no worker is alive. The window opens fifteen minutes before kickoff, the
+-- worker's own lead, so it is polling the scoreboard and holding the closing
+-- line before the game starts rather than coming up after it.
 -- A terminal row ('Final' or 'Off') ends a game's claim on the dispatcher, and
 -- the six-hour bound ends it for a game no worker ever reached.
 -- Minute offset 2: the NHL, CFB, and MLB dispatchers take offsets 0, 1, and 3
@@ -90,7 +92,7 @@ select cron.schedule('nfl-live-win-probability-dispatch', '2-59/5 * * * *', $dis
     select 1 from nfl.game_projections as g
     left join nfl.live_win_probability as live using (game_id)
     where g.start_date between now() - interval '6 hours'
-                           and now() + interval '5 minutes'
+                           and now() + interval '15 minutes'
       and coalesce(live.payload->>'abstract_state', '') not in ('Final', 'Off')
   ) and not exists (
     -- Fresh writes are the heartbeat. Queue a handoff before the bounded

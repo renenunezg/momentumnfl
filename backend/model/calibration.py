@@ -23,6 +23,7 @@ from backend.config import (
 )
 from backend.etl import store
 from backend.features.qb import expected_starters, identification_basis, ruled_out
+from backend.features.scoring import closing_home_spread
 from backend.model import qb_adjustment as qb_layer
 from backend.model.distributions import student_t_scale
 from backend.model.fit_week import load_depth_charts, load_injuries
@@ -250,11 +251,7 @@ def generate_walk_forward(
                         if pd.notna(game.spread_line)
                         else np.nan
                     ),
-                    "closing_spread": (
-                        -float(game.spread_line)
-                        if pd.notna(game.spread_line)
-                        else np.nan
-                    ),
+                    "closing_spread": float(closing_home_spread(game.spread_line)),
                     "actual_margin": float(game.home_points - game.away_points),
                     "actual_total": float(game.home_points + game.away_points),
                     "home_team": game.home_team,

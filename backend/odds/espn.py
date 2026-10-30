@@ -4,9 +4,11 @@ Fallback for when The Odds API monthly quota is exhausted. Selected with
 ODDS_SOURCE=espn; unset that variable to return to The Odds API. Events are
 returned in The Odds API's shape, so offer flattening and grading are unchanged.
 ESPN carries one book and no quote timestamp, so each price is stamped with
-the fetch time.
+the fetch time. The live worker reads the same quote off the scoreboard it
+already polls (``draftkings_quote``) to hold a game's closing line.
 """
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import requests
@@ -39,31 +41,77 @@ def _point(quote: dict) -> float | None:
         return None
 
 
-def _markets(odds: dict, home_team: str, away_team: str, updated: str) -> list[dict]:
+@dataclass(frozen=True, slots=True)
+class Quote:
+    """One bookmaker's pregame prices for a game in sportsbook notation: the
+    home line (negative when the home team is favored), the total, and
+    American prices. A moneyline counts only when both sides are priced."""
+
+    home_spread: float | None = None
+    spread_home_price: int | None = None
+    spread_away_price: int | None = None
+    total: float | None = None
+    over_price: int | None = None
+    under_price: int | None = None
+    home_moneyline: int | None = None
+    away_moneyline: int | None = None
+
+
+EMPTY_QUOTE = Quote()
+
+
+def _quote(odds: dict) -> Quote:
     def close(market: str, side: str) -> dict:
         return (odds.get(market) or {}).get(side, {}).get("close") or {}
 
-    sides = (("home", home_team), ("away", away_team))
+    home_moneyline = _price(close("moneyline", "home"))
+    away_moneyline = _price(close("moneyline", "away"))
+    if home_moneyline is None or away_moneyline is None:
+        home_moneyline = away_moneyline = None
+    home_spread = _point(close("pointSpread", "home"))
+    if home_spread is None:
+        away_line = _point(close("pointSpread", "away"))
+        home_spread = None if away_line is None else -away_line
+    total = _point(close("total", "over"))
+    if total is None:
+        total = _point(close("total", "under"))
+    return Quote(
+        home_spread=home_spread,
+        spread_home_price=_price(close("pointSpread", "home")),
+        spread_away_price=_price(close("pointSpread", "away")),
+        total=total,
+        over_price=_price(close("total", "over")),
+        under_price=_price(close("total", "under")),
+        home_moneyline=home_moneyline,
+        away_moneyline=away_moneyline,
+    )
+
+
+def draftkings_quote(competition: dict) -> Quote | None:
+    """DraftKings' quote from one scoreboard competition, None when absent."""
+    for odds in competition.get("odds") or []:
+        if str((odds.get("provider") or {}).get("id")) in ESPN_BOOKMAKERS:
+            quote = _quote(odds)
+            return None if quote == EMPTY_QUOTE else quote
+    return None
+
+
+def _markets(quote: Quote, home_team: str, away_team: str, updated: str) -> list[dict]:
+    sides = ((home_team, quote.home_moneyline), (away_team, quote.away_moneyline))
+    away_spread = None if quote.home_spread is None else 0.0 - quote.home_spread
     outcomes = {
-        "h2h": [
-            {"name": team, "price": _price(close("moneyline", side))}
-            for side, team in sides
-        ],
+        "h2h": [{"name": team, "price": price} for team, price in sides],
         "spreads": [
             {
-                "name": team,
-                "price": _price(close("pointSpread", side)),
-                "point": _point(close("pointSpread", side)),
-            }
-            for side, team in sides
+                "name": home_team,
+                "price": quote.spread_home_price,
+                "point": quote.home_spread,
+            },
+            {"name": away_team, "price": quote.spread_away_price, "point": away_spread},
         ],
         "totals": [
-            {
-                "name": side.title(),
-                "price": _price(close("total", side)),
-                "point": _point(close("total", side)),
-            }
-            for side in ("over", "under")
+            {"name": "Over", "price": quote.over_price, "point": quote.total},
+            {"name": "Under", "price": quote.under_price, "point": quote.total},
         ],
     }
     return [
@@ -133,7 +181,7 @@ class EspnOddsClient:
                         "title": title,
                         "last_update": updated,
                         "markets": _markets(
-                            odds, teams["home"], teams["away"], updated
+                            _quote(odds), teams["home"], teams["away"], updated
                         ),
                     }
                 )

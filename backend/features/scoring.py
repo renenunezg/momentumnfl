@@ -3,6 +3,16 @@
 import pandas as pd
 
 
+def closing_home_spread(spread_line):
+    """Sportsbook home line from nflverse ``spread_line``.
+
+    nflverse stores the expected home margin (positive when the home team is
+    favored); sportsbook notation flips the sign, so a 3.5-point home
+    favorite is -3.5. Takes a Series or a scalar; missing stays missing.
+    """
+    return -pd.to_numeric(spread_line)
+
+
 def max_regular_week(schedules: pd.DataFrame) -> pd.Series:
     """Per-season maximum regular-season week (17 through 2020, 18 after)."""
     regular = schedules[schedules["game_type"].eq("REG")]
@@ -22,8 +32,6 @@ def build_model_games(
     games["model_week"] = (
         games["week"] + needs_offset.astype(int) * regular_max
     ).astype(int)
-    # nflverse spread_line is positive when the home team is favored (an
-    # expected home margin); sportsbook home-line notation flips the sign.
-    games["closing_spread"] = -games["spread_line"]
+    games["closing_spread"] = closing_home_spread(games["spread_line"])
     games["actual_margin"] = games["home_points"] - games["away_points"]
     return games
