@@ -29,6 +29,8 @@ TEAM_RATINGS_COLUMNS = [
     "power_rating_sd",
     "missing_input_count",
     "forecast_alignment_points",
+    "market_rating",
+    "market_rating_games",
 ]
 TEAM_UNIT_RATINGS_COLUMNS = [
     "season",

@@ -16,6 +16,7 @@ from backend.model.joint_scoring import (
     JointScoringFit,
     fit_joint_scoring,
 )
+from backend.model.market_rating import with_market_ratings
 from backend.model.outputs import GameProjection, TeamRating
 from backend.model.preseason import (
     WIN_TOTAL_BLEND,
@@ -224,6 +225,11 @@ def fit_and_project(
     # the published lines.
     return (
         fit,
-        align_ratings_to_forecast(fit.ratings(team_names), projections),
+        with_market_ratings(
+            align_ratings_to_forecast(fit.ratings(team_names), projections),
+            season,
+            week,
+            as_of,
+        ),
         projections,
     )

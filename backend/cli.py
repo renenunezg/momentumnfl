@@ -343,6 +343,7 @@ def run_preseason(args) -> None:
         market_totals,
         week_slate,
     )
+    from backend.model.market_rating import with_market_ratings
     from backend.model.preseason import MODEL_VERSION, build_preseason_prior
     from backend.model.projections import (
         LayerConfig,
@@ -354,7 +355,9 @@ def run_preseason(args) -> None:
     prepare(args)
     prior = build_preseason_prior(args.season, as_of=args.forecast_cutoff)
     team_names = store.team_names()
-    ratings = prior.ratings(team_names)
+    ratings = with_market_ratings(
+        prior.ratings(team_names), args.season, 1, prior.as_of
+    )
 
     def write_ratings(published) -> pd.DataFrame:
         frame = pd.DataFrame([rating.to_record() for rating in published])

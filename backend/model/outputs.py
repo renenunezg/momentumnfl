@@ -45,6 +45,8 @@ class TeamRating:
     expected_drives: float
     power_rating_sd: float
     forecast_alignment_points: float = 0.0
+    market_rating: float | None = None
+    market_rating_games: int | None = None
 
     def __post_init__(self) -> None:
         _validate_identity(self.team_abbr, self.team, "team")
@@ -90,6 +92,8 @@ class TeamRating:
             "expected_drives": self.expected_drives,
             "power_rating_sd": self.power_rating_sd,
             "forecast_alignment_points": self.forecast_alignment_points,
+            "market_rating": self.market_rating,
+            "market_rating_games": self.market_rating_games,
         }
 
 
