@@ -50,6 +50,25 @@ def _frozen(game_id, pure, blended, closing, home, away, qb=0.0, captured=None):
     }
 
 
+def test_metrics_grade_when_no_closing_line_has_been_captured():
+    frozen = pd.DataFrame(
+        [
+            _frozen("g1", pure=4.0, blended=3.0, closing=-2.0, home=27, away=20),
+            _frozen("g2", pure=-6.0, blended=-5.0, closing=-4.0, home=17, away=24),
+        ]
+    )
+    totals = pd.Series({"g1": 45.5, "g2": 41.0})
+    graded = build_graded_games(frozen, totals, graded_at=KICKOFF + timedelta(days=2))
+    assert graded["closing_source"].tolist() == ["nflverse", "nflverse"]
+
+    metrics = compute_performance_metrics(graded, computed_at=KICKOFF)
+    overall = metrics[metrics["segment_kind"].eq("overall")].set_index(
+        "prediction_source"
+    )
+    assert overall.loc["closing_market", "games"] == 2
+    assert overall.loc["closing_market", "probability_games"] == 2
+
+
 def test_metrics_grade_every_source_on_the_same_finals():
     frozen = pd.DataFrame(
         [

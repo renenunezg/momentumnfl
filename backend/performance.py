@@ -173,12 +173,14 @@ def _with_closing_line(frame: pd.DataFrame, totals: pd.Series) -> pd.DataFrame:
     otherwise; ``closing_source`` labels the spread's origin and the total
     follows the same preference field by field."""
     out = frame.copy()
-    captured = out["captured_home_spread"].notna()
-    out["closing_spread"] = out["captured_home_spread"].where(
-        captured, out["closing_spread"]
-    )
-    out["closing_total"] = out["captured_total"].where(
-        out["captured_total"].notna(), out["game_id"].map(totals)
+    # A left join with no captured rows reads back as an all-None object column,
+    # and .where would carry that dtype into the Student-t scoring.
+    captured_spread = pd.to_numeric(out["captured_home_spread"])
+    captured_total = pd.to_numeric(out["captured_total"])
+    captured = captured_spread.notna()
+    out["closing_spread"] = captured_spread.where(captured, out["closing_spread"])
+    out["closing_total"] = captured_total.where(
+        captured_total.notna(), out["game_id"].map(totals)
     )
     out["closing_source"] = np.select(
         [captured, out["closing_spread"].notna()],
