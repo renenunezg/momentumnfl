@@ -42,6 +42,8 @@ jobs:
           # Closing lines: one Odds API request per kickoff cluster, skipped
           # when the shared key's remaining credits fall below the reserve.
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          # The same books as the decision-time pulls, Pinnacle included.
+          ODDS_API_BOOKMAKERS: ${{ vars.ODDS_API_BOOKMAKERS }}
           ODDS_API_CLOSING_RESERVE: ${{ vars.ODDS_API_CLOSING_RESERVE || '60' }}
         # Hand off before the six-hour runner limit; the queued replacement
         # starts after this worker exits. Idle slates exit early.

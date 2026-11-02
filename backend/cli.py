@@ -889,9 +889,12 @@ def run_publish(args) -> None:
     from backend.recommendations import build_recommendations
 
     offers = read_optional("market_offers")
+    from backend.teaser_legs import qualifying_legs
+
+    offers = offers if offers is not None else pd.DataFrame()
     decisions = build_recommendations(
         projections,
-        offers if offers is not None else pd.DataFrame(),
+        offers,
         load_pricing(),
         picked_games=publish.picked_games(db.engine, projections.game_id),
     )
@@ -901,6 +904,8 @@ def run_publish(args) -> None:
         week,
         recommendations=decisions,
         archive_bundle=publication_bundle(season, week, projections),
+        offers=offers,
+        teaser_legs=qualifying_legs(projections, offers),
         ratings=ratings,
         unit_ratings=unit_ratings,
         projections=projections,
@@ -1290,6 +1295,7 @@ def run_live_win_probability(args) -> None:
     closing = closing_capture.ClosingCapture(
         fetch_odds=fetch_odds,
         write=closing_capture.write_closing_lines if args.publish else None,
+        write_quotes=closing_capture.write_closing_quotes if args.publish else None,
     )
     publisher = live_publish.LivePublisher(
         load_model(),

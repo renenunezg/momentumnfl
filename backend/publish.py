@@ -98,6 +98,8 @@ def publish_week(
     season_win_totals: pd.DataFrame | None = None,
     recommendations: pd.DataFrame | None = None,
     archive_bundle: dict | None = None,
+    offers: pd.DataFrame | None = None,
+    teaser_legs: pd.DataFrame | None = None,
 ) -> dict[str, int]:
     """One transaction; read-back counts returned for the caller to print.
     ratings=None leaves teams and team ratings untouched, and
@@ -218,6 +220,19 @@ def publish_week(
             )
         if recommendations is not None:
             publish_recommendations(conn, recommendations)
+        if offers is not None:
+            insert_book_quotes(conn, offers, "decision")
+        if teaser_legs is not None and not teaser_legs.empty:
+            from backend.teaser_legs import LEG_COLUMNS
+
+            # The first qualifying observation of a game is the leg.
+            conn.execute(
+                insert(
+                    Table("teaser_legs", MetaData(), schema=SCHEMA, autoload_with=conn)
+                )
+                .values(_prepare(teaser_legs, LEG_COLUMNS).to_dict("records"))
+                .on_conflict_do_nothing(index_elements=["game_id"])
+            )
         if archive_bundle is not None:
             from backend.forecast_archive import persist
 
@@ -497,6 +512,40 @@ def publish_position_grade_evaluation(engine, rows: list[dict]) -> dict:
     return {"position_grade_evaluation": written}
 
 
+BOOK_QUOTE_COLUMNS = [
+    "game_id",
+    "source",
+    "fetched_at",
+    "provider_key",
+    "market",
+    "selection",
+    "point",
+    "price",
+    "provider_last_update",
+]
+
+
+def insert_book_quotes(conn, offers: pd.DataFrame, source: str) -> int:
+    """Append every bookmaker's pregame quote from one odds pull; a repeated
+    pull is a no-op and nothing fetched at or after kickoff is kept."""
+    if offers.empty:
+        return 0
+    fetched = pd.to_datetime(offers["market_fetched_at"], utc=True)
+    quotes = offers[
+        offers["price"].notna()
+        & offers["provider_key"].notna()
+        & (fetched < pd.to_datetime(offers["provider_start_date"], utc=True))
+    ].assign(source=source, fetched_at=fetched)
+    if quotes.empty:
+        return 0
+    table = Table("book_quotes", MetaData(), schema=SCHEMA, autoload_with=conn)
+    return conn.execute(
+        insert(table)
+        .values(_prepare(quotes, BOOK_QUOTE_COLUMNS).to_dict("records"))
+        .on_conflict_do_nothing()
+    ).rowcount
+
+
 def picked_games(engine, game_ids) -> set[str]:
     """Games that already hold a frozen recommended pick in any market."""
     with engine.connect() as conn:
@@ -612,6 +661,7 @@ def grade_picks(engine, schedule, season):
             conn,
             params={"season": season},
         )
+        _grade_teaser_legs(conn, games)
         grades = grade_recommendations(picks, games)
         if not grades.empty:
             columns = [
@@ -629,6 +679,26 @@ def grade_picks(engine, schedule, season):
                 _prepare(grades, SETTLEMENT_COLUMNS).to_dict("records"),
             )
         return len(grades)
+
+
+def _grade_teaser_legs(conn, games) -> None:
+    from backend.teaser_legs import GRADE_COLUMNS, grade_legs
+
+    legs = pd.read_sql_query(
+        text("select * from nfl.teaser_legs where outcome = 'pending' for update"),
+        conn,
+    )
+    grades = grade_legs(legs, games, graded_at=pd.Timestamp.now(tz="UTC"))
+    if not grades.empty:
+        conn.execute(
+            text(
+                "update nfl.teaser_legs set outcome = :outcome, "
+                "home_points = :home_points, away_points = :away_points, "
+                "graded_at = :graded_at where game_id = :game_id "
+                "and outcome = 'pending'"
+            ),
+            _prepare(grades, GRADE_COLUMNS).to_dict("records"),
+        )
 
 
 FROZEN_FORECAST_SQL = f"""

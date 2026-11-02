@@ -1043,3 +1043,95 @@ def test_slate_fills_with_model_side_leans_after_frozen_picks():
     assert picks.reason.eq("ranked_lean").all() and picks.market.eq("spreads").all()
     assert picks.side.eq("home").all() and picks.expected_value_per_unit.lt(0).all()
     assert sorted(picks.game_id) == ["g6", "g7", "g8"] and SLATE_SIZE == 5
+
+
+def test_teaser_legs_use_the_consensus_line_freeze_and_grade(database):
+    """A leg is the lower-middle dog line across books, Pinnacle counted like
+    any other; the first qualifying pull is frozen, only grading may change
+    it, and every pregame book quote is archived."""
+    from backend.publish import _grade_teaser_legs, insert_book_quotes
+    from backend.teaser_legs import qualifying_legs
+
+    now = pd.Timestamp.now(tz="UTC")
+    start = now + timedelta(days=2)
+    games = pd.DataFrame(
+        dict(game_id=["a", "b", "c"], season=2026, week=9, start_date=start)
+    ).assign(home_team=["HA", "HB", "HC"], away_team=["AA", "AB", "AC"])
+
+    def offers(fetched, lines):
+        return pd.DataFrame(
+            dict(
+                game_id=game,
+                market="spreads",
+                selection=side,
+                point=home if side == "home" else -home,
+                price=-110,
+                provider_key=book,
+                market_fetched_at=fetched,
+                provider_last_update=fetched,
+                provider_start_date=start,
+            )
+            for game, book, home in lines
+            for side in ("home", "away")
+        )
+
+    # a: home dog +2.5 at two of three books, Pinnacle +3.5: the middle is +2.5.
+    # b: away dog +2.0 at both books.
+    # c: Pinnacle has the away dog +2.5 but the middle of three is +3.0.
+    first = offers(
+        now,
+        [
+            ("a", "pinnacle", 3.5),
+            ("a", "draftkings", 2.5),
+            ("a", "fanduel", 2.5),
+            ("b", "draftkings", -2.0),
+            ("b", "fanduel", -2.0),
+            ("c", "pinnacle", -2.5),
+            ("c", "draftkings", -3.0),
+            ("c", "fanduel", -3.5),
+        ],
+    )
+    legs = qualifying_legs(games, first).set_index("game_id")
+    assert list(legs.index) == ["a", "b"]
+    assert legs.loc["a", ["side", "point", "books", "teased_point"]].tolist() == [
+        "home",
+        2.5,
+        3,
+        8.5,
+    ]
+    assert legs.loc["b", ["side", "team", "books"]].tolist() == ["away", "AB", 2]
+    later = offers(now + timedelta(hours=1), [("a", "draftkings", 1.5)])
+    with database.begin() as conn:
+        from sqlalchemy import MetaData, Table
+        from sqlalchemy.dialects.postgresql import insert
+
+        table = Table("teaser_legs", MetaData(), schema="nfl", autoload_with=conn)
+        for pull in (first, later):
+            rows = qualifying_legs(games, pull).to_dict("records")
+            conn.execute(
+                insert(table)
+                .values(rows)
+                .on_conflict_do_nothing(index_elements=["game_id"])
+            )
+            assert insert_book_quotes(conn, pull, "decision") == len(pull)
+        assert insert_book_quotes(conn, first, "decision") == 0
+        frozen = conn.execute(
+            text("select point from nfl.teaser_legs where game_id = 'a'")
+        ).scalar_one()
+        assert frozen == 2.5
+    with pytest.raises(DBAPIError, match="frozen"):
+        with database.begin() as conn:
+            conn.execute(text("update nfl.teaser_legs set point = 1.5"))
+    schedule = games.assign(
+        game_status="final",
+        completed=True,
+        home_points=[20, 10, 0],
+        away_points=[27, 17, 0],
+    )
+    with database.begin() as conn:
+        _grade_teaser_legs(conn, schedule)
+        graded = dict(
+            conn.execute(text("select game_id, outcome from nfl.teaser_legs")).all()
+        )
+    # a: home dog loses by 7 with +8.5 (win); b: away dog wins outright (win).
+    assert graded == {"a": "win", "b": "win"}

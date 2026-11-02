@@ -16,11 +16,12 @@ import os
 from datetime import datetime, timedelta
 
 import pandas as pd
+from sqlalchemy.exc import SQLAlchemyError
 
 from backend.contracts import SCHEMA
 from backend.odds.client import OddsAPIError
 from backend.odds.closing import ClosingLine, from_odds_api_event, from_quote
-from backend.odds.markets import match_event
+from backend.odds.markets import flatten_offers, match_event
 
 log = logging.getLogger(__name__)
 
@@ -37,9 +38,18 @@ class ClosingCapture:
     """One game's close is whatever was held when it started: never a later
     quote, never a second row."""
 
-    def __init__(self, *, fetch_odds=None, write=None, reserve: int | None = None):
+    def __init__(
+        self,
+        *,
+        fetch_odds=None,
+        write=None,
+        write_quotes=None,
+        reserve: int | None = None,
+    ):
         self.fetch_odds = fetch_odds
         self.write = write
+        # Every book's closing quote, kept for CLV against Pinnacle.
+        self.write_quotes = write_quotes
         self.reserve = (
             int(os.getenv(RESERVE_ENV, DEFAULT_RESERVE)) if reserve is None else reserve
         )
@@ -157,6 +167,19 @@ class ClosingCapture:
                 if line is not None:
                     self.offers[game.game_id] = line
                     matched += 1
+            if self.write_quotes is not None:
+                try:
+                    self.write_quotes(
+                        flatten_offers(
+                            snapshot.events,
+                            schedule,
+                            snapshot.fetched_at,
+                            bool(snapshot.configured_bookmakers),
+                            snapshot.source,
+                        )
+                    )
+                except (SQLAlchemyError, ValueError) as error:
+                    log.warning("Closing book quotes not recorded: %r", error)
             log.info(
                 "Odds API closing request for %d games: %d priced, cost %s, "
                 "%s credits remaining",
@@ -165,6 +188,14 @@ class ClosingCapture:
                 snapshot.last_request_cost,
                 snapshot.requests_remaining,
             )
+
+
+def write_closing_quotes(offers: pd.DataFrame) -> int:
+    from backend.db import engine
+    from backend.publish import insert_book_quotes
+
+    with engine.begin() as conn:
+        return insert_book_quotes(conn, offers, "closing")
 
 
 def write_closing_lines(lines: list[ClosingLine]) -> int:
