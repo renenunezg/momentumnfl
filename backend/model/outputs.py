@@ -29,9 +29,8 @@ class TeamRating:
 
     Offense is points scored above average.
     Defense is points prevented above average, so higher is better.
-    forecast_alignment_points is the part of the power rating added so that
-    rating difference plus home field equals the team's published line; the
-    market-free fitted rating is the power rating minus it.
+    forecast_alignment_points is the part of the power rating that is not the
+    fitted rating. Published ratings are the fitted ratings, so it is zero.
     """
 
     season: int

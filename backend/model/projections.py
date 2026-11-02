@@ -1,7 +1,7 @@
 """Assemble published game projections: engine numbers, then the QB and rest
 layers on expected points, then the market blend (total-invariant shift)."""
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 from math import isfinite
 
@@ -10,7 +10,7 @@ import pandas as pd
 
 from backend.model.joint_scoring import JointScoringFit
 from backend.model.market_blend import blend_margin, capped_weight
-from backend.model.outputs import GameProjection, TeamRating
+from backend.model.outputs import GameProjection
 from backend.model.qb_adjustment import DEFAULT_SPAN_DROPBACKS
 from backend.model.totals import (
     DEFAULT_TOTALS_CONFIG,
@@ -205,69 +205,3 @@ def assemble_projections(
             )
         )
     return projections
-
-
-def align_ratings_to_forecast(
-    ratings: list[TeamRating], projections: list[GameProjection]
-) -> list[TeamRating]:
-    """Shift team ratings so they reproduce the week's published lines.
-
-    The fitted ratings carry no market, quarterback, or rest information, so
-    their difference plus home field can sit points away from the published
-    line. Each game's gap is split evenly between its two teams (the
-    minimum-norm solution, which also handles a team with two games), leaving
-    teams on a bye unchanged. Offense and defense each take half of a team's
-    shift, so the scoring environment is unchanged.
-    """
-    frame = pd.DataFrame([rating.to_record() for rating in ratings])
-    games = pd.DataFrame([game.to_record() for game in projections])
-    aligned = align_published_ratings(frame, games)
-    return [
-        replace(
-            rating,
-            offense_points=row.offense_points,
-            defense_points=row.defense_points,
-            forecast_alignment_points=row.forecast_alignment_points,
-            model_version=row.model_version,
-        )
-        for rating, row in zip(ratings, aligned.itertuples(), strict=True)
-    ]
-
-
-def align_published_ratings(
-    ratings: pd.DataFrame, projections: pd.DataFrame
-) -> pd.DataFrame:
-    """Align ratings to accepted forecasts, including frozen games."""
-    out = ratings.copy()
-    if out.empty or projections.empty:
-        return out
-    previous = out["forecast_alignment_points"].fillna(0.0).to_numpy(dtype=float)
-    pure = out["power_rating"].to_numpy(dtype=float) - previous
-    index = {team: i for i, team in enumerate(out["team_abbr"])}
-    games = np.zeros((len(projections), len(out)))
-    gaps = np.zeros(len(projections))
-    for row, game in enumerate(projections.itertuples()):
-        home, away = index[game.home_team_abbr], index[game.away_team_abbr]
-        games[row, home], games[row, away] = 1.0, -1.0
-        gaps[row] = game.home_margin - (
-            pure[home] - pure[away] + game.home_field_points
-        )
-    if not np.isfinite(gaps).all():
-        raise ValueError(
-            "Rating alignment requires finite accepted margins and home fields"
-        )
-    shifts = np.linalg.lstsq(games, gaps, rcond=None)[0]
-    if not np.allclose(games @ shifts, gaps, atol=1e-8):
-        raise ValueError(
-            "Accepted forecasts cannot be represented by one set of team ratings"
-        )
-    delta = shifts - previous
-    out["offense_points"] += delta / 2
-    out["defense_points"] += delta / 2
-    out["power_rating"] = pure + shifts
-    out["forecast_alignment_points"] = shifts
-    # Published ratings mean whatever the lines they reproduce mean, so they
-    # carry those lines' model version (every version when frozen games
-    # from an earlier one are part of the week).
-    out["model_version"] = ",".join(sorted(projections["model_version"].unique()))
-    return out

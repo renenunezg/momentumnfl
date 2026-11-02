@@ -295,8 +295,7 @@ def run_fit(args) -> None:
     )
     _write_week(projections_df, "projections", args.season, args.week)
     finish(args, projections_df)
-    # Published ratings follow the published lines, so a reprojection
-    # rewrites them too.
+    # A reprojection refits at its own cutoff, so it rewrites the ratings too.
     ratings_df = pd.DataFrame([rating.to_record() for rating in ratings])
     _write_week(ratings_df, "ratings", args.season, args.week)
     if args.projections_only:
@@ -347,7 +346,6 @@ def run_preseason(args) -> None:
     from backend.model.preseason import MODEL_VERSION, build_preseason_prior
     from backend.model.projections import (
         LayerConfig,
-        align_ratings_to_forecast,
         assemble_projections,
         layered_version,
     )
@@ -359,17 +357,14 @@ def run_preseason(args) -> None:
         prior.ratings(team_names), args.season, 1, prior.as_of
     )
 
-    def write_ratings(published) -> pd.DataFrame:
-        frame = pd.DataFrame([rating.to_record() for rating in published])
-        frame["missing_input_count"] = frame["team_abbr"].map(
-            prior.ratings_frame.set_index("team_abbr")["missing_input_count"]
-        )
-        _write_week(frame, "ratings", args.season, 1)
-        return frame
+    ratings_df = pd.DataFrame([rating.to_record() for rating in ratings])
+    ratings_df["missing_input_count"] = ratings_df["team_abbr"].map(
+        prior.ratings_frame.set_index("team_abbr")["missing_input_count"]
+    )
+    _write_week(ratings_df, "ratings", args.season, 1)
 
     slate = week_slate(args.season, 1)
     if slate.empty:
-        write_ratings(ratings)
         print(f"preseason {args.season}: no week-1 schedule yet; ratings only")
         return
     week1_fit = prior.week1_fit()
@@ -398,8 +393,6 @@ def run_preseason(args) -> None:
         replace(projection, model_version=layered_version(MODEL_VERSION))
         for projection in projections
     ]
-    # Published ratings reproduce the published week-1 lines.
-    ratings_df = write_ratings(align_ratings_to_forecast(ratings, projections))
     projections_df = pd.DataFrame(
         [projection.to_record() for projection in projections]
     )
@@ -873,8 +866,8 @@ def run_publish(args) -> None:
         print("no odds snapshot; publishing nflverse-line market comparisons")
     snapshot = read_optional("market_snapshots")
 
-    # Ratings follow the published lines, so a projections-only refresh
-    # republishes them; unit ratings and the backtest do not change.
+    # A projections-only refresh refits at its own cutoff, so it republishes
+    # the ratings; unit ratings and the backtest do not change.
     ratings = store.read_processed("ratings", stem)
     if args.projections_only:
         unit_ratings = backtest = None

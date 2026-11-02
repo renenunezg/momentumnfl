@@ -132,18 +132,6 @@ def publish_week(
         _upsert(
             _prepare(projections, GAME_PROJECTIONS_COLUMNS), "game_projections", conn
         )
-        if ratings is not None:
-            from backend.model.projections import align_published_ratings
-
-            effective = pd.read_sql_query(
-                text(
-                    f"SELECT * FROM {SCHEMA}.game_projections "
-                    "WHERE season = :s AND week = :w"
-                ),
-                conn,
-                params=week_key,
-            )
-            ratings = align_published_ratings(ratings, effective)
 
         if season_win_totals is not None:
             conn.execute(
