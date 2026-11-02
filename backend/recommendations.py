@@ -14,11 +14,6 @@ from backend.model.market_blend import cover_push_probabilities
 from backend.odds.markets import ODDS_SOURCES, _american_profit
 
 POLICY_VERSION = "nfl-picks-v6"
-# Minimum points the priced line must sit beyond the offered price's
-# break-even line. Measured in margin or total points, the same yardstick for
-# favourites and underdogs, so a mispriced tail cannot clear the gate on one
-# side only. A versioned starting policy, not a fit to live-season outcomes.
-MIN_EDGE_POINTS = 2.0
 # Dispersion of actual results around the priced (blended) line, from the
 # chronological calibration replay of 2019 through 2025 (1,960 games with a
 # closing spread and total). The engine's predictive spread carries rating
@@ -27,17 +22,31 @@ MIN_EDGE_POINTS = 2.0
 # width, and it does not vary with the engine's per-game spread.
 PRICING_MARGIN_SD = 12.82
 PRICING_TOTAL_SD = 13.28
-# Weights of the model in the numbers that price picks: the median posted
-# line at decision time moved this far toward the pure margin (spreads and
+# Weights of the model in the numbers that price picks: the devigged market
+# number at decision time moved this far toward the pure margin (spreads and
 # moneylines) or the model total (totals). Least-squares slope of the result
 # minus the closing line on the model minus the closing line, without an
 # intercept as priced, on the 2016 through 2021 development seasons (1,622
 # games): margin 0.045 (se 0.11), total -0.15 (se 0.10), held at zero. The
-# 2022 through 2025 seasons agree (margin -0.12, total -0.05). Pricing from
-# the published 0.5 blend instead made every 2-point edge a 5-point model
-# disagreement with the market, which the model does not predict.
+# 2022 through 2025 seasons agree (margin -0.09, total -0.01), and on 2026
+# decision-time lines the close moved 0.05 (se 0.04) toward the pure margin
+# and -0.05 (se 0.03) toward the model total. No segment (division, rest, QB
+# absence, weather, season phase, spread size) survives a held-out check.
+# Pricing from the published 0.5 blend instead made every 2-point edge a
+# 5-point model disagreement with the market, which the model does not predict.
 SIDE_MODEL_WEIGHT = 0.045
 TOTAL_MODEL_WEIGHT = 0.0
+# Picks per model week. Offers with positive expected value against the
+# devigged market are always picks (POSITIVE_EV); when fewer than SLATE_SIZE
+# games have a pick, the highest-EV sides fill the slate as RANKED_LEAN, one
+# per game. Leans carry their honest win probability, near a coin flip, and
+# negative expected value at most prices: a product volume choice, recorded
+# under its own reason so the ledger grades the two tiers apart. Totals are
+# never leans because the model total carries no weight.
+SLATE_SIZE = 5
+POSITIVE_EV = "positive_ev"
+RANKED_LEAN = "ranked_lean"
+LEAN_MARKETS = ("h2h", "spreads")
 EDGE_SEARCH_POINTS = 200.0
 MAX_OFFER_AGE = timedelta(hours=1)
 MAX_FORECAST_AGE = timedelta(days=7)
@@ -138,22 +147,67 @@ def _probabilities(projection, offer, distribution):
     return win, push, loss
 
 
-def _anchored_projection(projection, game_offers):
-    """The projection re-anchored on the decision-time market: the median
-    posted home margin moved SIDE_MODEL_WEIGHT toward the pure margin and the
-    median posted total moved TOTAL_MODEL_WEIGHT toward the model total.
+def _market_center(projection, market, candidates, distribution):
+    """Median across books of the mean that reproduces each book's devigged
+    two-way price, so the vig and price differences inform the market number,
+    not only the posted points. NaN without a paired quote."""
+    first = "over" if market == "totals" else "home"
+    field = "model_total" if market == "totals" else "home_margin"
+    means = []
+    for offer in candidates:
+        if offer["market"] != market or offer["side"] != first:
+            continue
+        other_point = -offer["point"] if market == "spreads" else offer["point"]
+        other = next(
+            (
+                o
+                for o in candidates
+                if o["market"] == market
+                and o["side"] != first
+                and o["provider_key"] == offer["provider_key"]
+                and o["point"] == other_point
+                and o["provider_last_update"] == offer["provider_last_update"]
+            ),
+            None,
+        )
+        if other is None:
+            continue
+        mine, theirs = (1 / (_american_profit(o["price"]) + 1) for o in (offer, other))
+        fair = mine / (mine + theirs)
+        base = {"totals": offer["point"], "spreads": -(offer["point"] or 0.0)}.get(
+            market, 0.0
+        )
 
-    A field is NaN without its posted line or model number, so that market is
-    never priced from the published blend or the model alone.
+        def gap(mean, offer=offer, fair=fair):
+            win, _, loss = _probabilities(
+                projection._replace(**{field: mean}), offer, distribution
+            )
+            return win / (win + loss) - fair
+
+        try:
+            means.append(brentq(gap, base - 60.0, base + 60.0, xtol=1e-6))
+        except ValueError:
+            continue
+    return float(np.median(means)) if means else float("nan")
+
+
+def _anchored_projection(projection, market, candidates, distribution):
+    """The projection re-anchored on the decision-time market: the devigged
+    market number moved SIDE_MODEL_WEIGHT toward the pure margin (sides) or
+    TOTAL_MODEL_WEIGHT toward the model total (totals).
+
+    Returns the projection and the market number. The priced field is NaN
+    without a paired quote or a model number, so a market is never priced
+    from the published blend or the model alone.
     """
+    center = _market_center(projection, market, candidates, distribution)
+    if market == "totals":
+        total = center + TOTAL_MODEL_WEIGHT * (projection.model_total - center)
+        return projection._replace(model_total=total), center
     pure = getattr(projection, "pure_home_margin", None)
     pure = np.nan if pure is None or pd.isna(pure) else float(pure)
-    market = -_consensus_spread(game_offers)
-    total = _consensus_total(game_offers)
-    return projection._replace(
-        home_margin=market + SIDE_MODEL_WEIGHT * (pure - market),
-        model_total=total + TOTAL_MODEL_WEIGHT * (projection.model_total - total),
-    )
+    margin = center + SIDE_MODEL_WEIGHT * (pure - center)
+    return projection._replace(home_margin=margin), center
 
 
 def _edge_points(projection, offer, distribution, implied):
@@ -188,16 +242,6 @@ def _consensus_total(game_offers):
         game_offers.loc[game_offers["market"].eq("totals"), "point"], errors="coerce"
     ).dropna()
     return float(points.median()) if len(points) else float("nan")
-
-
-def _consensus_spread(game_offers):
-    """Median posted home spread across a game's offers, or NaN without one."""
-    if game_offers.empty or "market" not in game_offers:
-        return float("nan")
-    spreads = game_offers[game_offers["market"].eq("spreads")]
-    points = pd.to_numeric(spreads["point"], errors="coerce")
-    home = points.where(spreads["selection"].eq("home"), -points).dropna()
-    return float(home.median()) if len(home) else float("nan")
 
 
 def priced_candidates(projection, offers):
@@ -291,22 +335,23 @@ def _offer_reason(offer, paired, now, start):
     return None
 
 
-def build_recommendations(projections, offers, distribution, *, decision_at=None):
-    """One best eligible side per game and market, or an explicit No Play.
+def build_recommendations(
+    projections, offers, distribution, *, decision_at=None, picked_games=()
+):
+    """The best eligible offer per game and market, recommended or No Play.
 
-    Every market is priced from the median posted line at decision time moved
-    the evidence-fit model weight toward the model (_anchored_projection), not
-    from the published blend, whose model share the model has not earned
-    against the market. Each pick records the median posted total.
-    Everything is priced with the empirical dispersion around the priced
-    line, not the engine's wider predictive spread. An offer qualifies when
-    the priced line sits at least MIN_EDGE_POINTS beyond the price's
-    break-even line and expected value is positive; the best offer per market
-    is the one with the most points of edge, never the largest payout. There
-    is no volume target: a week without a qualifying offer publishes No Play.
-    Historical calibration is diagnostic and never gates forward
-    recommendations or replaces their probabilities. Stakes are always one
-    unit, with no compounding.
+    Every market is priced from the devigged market number at decision time
+    moved the evidence-fit model weight toward the model
+    (_anchored_projection), not from the published blend, whose model share
+    the model has not earned against the market. Each row records the median
+    posted total. Everything is priced with the empirical dispersion around
+    the priced line, not the engine's wider predictive spread. The best offer
+    per market is the one with the highest expected value. Offers with
+    positive expected value are picks; the slate is then filled to SLATE_SIZE
+    games, counting picked_games (games already holding a frozen pick), with
+    the highest-EV sides as ranked leans. Historical calibration is
+    diagnostic and never gates forward recommendations or replaces their
+    probabilities. Stakes are always one unit, with no compounding.
     """
     now = _timestamp(decision_at or datetime.now(UTC))
     if not offers.empty and "odds_source" not in offers:
@@ -316,7 +361,7 @@ def build_recommendations(projections, offers, distribution, *, decision_at=None
         if not offers.empty
         else {}
     )
-    rows = []
+    rows, model_sides = [], []
     for projection in projections.itertuples():
         start, forecast = (
             _timestamp(projection.start_date),
@@ -368,15 +413,27 @@ def build_recommendations(projections, offers, distribution, *, decision_at=None
         game_offers = groups.get(projection.game_id, offers.iloc[:0])
         candidates = priced_candidates(projection, game_offers)
         market_total = _consensus_total(game_offers)
-        priced_projection = _anchored_projection(
-            projection._replace(margin_sd=PRICING_MARGIN_SD, total_sd=PRICING_TOTAL_SD),
-            game_offers,
+        priced_projection = projection._replace(
+            margin_sd=PRICING_MARGIN_SD, total_sd=PRICING_TOTAL_SD
         )
         for market in MARKETS:
             field = "model_total" if market == "totals" else "home_margin"
-            market_projection = (
-                priced_projection
-                if np.isfinite(getattr(priced_projection, field))
+            market_projection, center = _anchored_projection(
+                priced_projection,
+                market,
+                [c for c in candidates if c["market"] == market],
+                distribution,
+            )
+            lean = getattr(market_projection, field) - center
+            if not np.isfinite(lean):
+                market_projection = None
+            # The side the model leans to; a ranked lean must take it, never
+            # the other side for its price alone.
+            model_sides.append(
+                ("over" if market == "totals" else "home")
+                if lean > 0
+                else ("under" if market == "totals" else "away")
+                if lean < 0
                 else None
             )
             row = {
@@ -442,31 +499,27 @@ def build_recommendations(projections, offers, distribution, *, decision_at=None
                 implied = 1 / (profit + 1)
                 edge = win / (win + loss) - implied if win + loss > 0 else float("nan")
                 ev = win * profit - loss
-                points = (
-                    _edge_points(market_projection, candidate, distribution, implied)
-                    if win + loss > 0
-                    else float("nan")
-                )
                 block = reason or _offer_reason(candidate, priced, now, start)
                 if (
-                    not np.isfinite([win, push, loss, edge, ev, points]).all()
+                    not np.isfinite([win, push, loss, edge, ev]).all()
                     or not 0 < win < 1
                     or loss <= 0
                 ):
-                    block = "invalid_probability"
-                if block is None and (points < MIN_EDGE_POINTS or ev <= 0):
-                    block = "below_edge_threshold"
-                evaluated.append((block, points, candidate, win, push, edge, ev))
-            # A blocked offer must never hide a qualifying offer with less edge.
+                    block, ev = "invalid_probability", float("-inf")
+                evaluated.append((block, implied, candidate, win, push, edge, ev))
+            # A blocked offer must never hide an eligible offer with less value.
             if evaluated:
-                block, points, best, win, push, edge, ev = max(
+                block, implied, best, win, push, edge, ev = max(
                     evaluated,
                     key=lambda item: (
                         item[0] is None,
-                        item[1],
+                        item[6],
                         str(item[2]["provider_key"]),
                     ),
                 )
+                points = _edge_points(market_projection, best, distribution, implied)
+                if block is None and not np.isfinite(points):
+                    block = "invalid_probability"
                 for key in (
                     "selection",
                     "side",
@@ -489,14 +542,34 @@ def build_recommendations(projections, offers, distribution, *, decision_at=None
                     probability_edge=edge,
                     edge_points=points,
                     expected_value_per_unit=ev,
-                    status="recommended" if block is None else "no_play",
-                    reason=block or "qualifying_edge",
-                    stake_units=1.0 if block is None else 0.0,
+                    reason=block or "outside_slate",
                 )
             else:
                 row["reason"] = empty_reason
             rows.append(row)
-    return pd.DataFrame(rows, columns=RECOMMENDATION_COLUMNS)
+    decisions = pd.DataFrame(rows, columns=RECOMMENDATION_COLUMNS)
+    eligible = decisions["reason"].eq("outside_slate")
+    value = eligible & decisions["expected_value_per_unit"].gt(0)
+    picked = set(picked_games) | set(decisions.loc[value, "game_id"])
+    leans = (
+        decisions[
+            eligible
+            & ~value
+            & decisions["market"].isin(LEAN_MARKETS)
+            & decisions["side"].eq(pd.Series(model_sides, index=decisions.index))
+            & ~decisions["game_id"].isin(picked)
+        ]
+        .sort_values("expected_value_per_unit", ascending=False)
+        .drop_duplicates("game_id")
+        .index[: max(SLATE_SIZE - len(picked), 0)]
+    )
+    for index, label in ((decisions.index[value], POSITIVE_EV), (leans, RANKED_LEAN)):
+        decisions.loc[index, ["status", "reason", "stake_units"]] = [
+            "recommended",
+            label,
+            1.0,
+        ]
+    return decisions
 
 
 def grade_recommendations(recommendations, games, *, graded_at=None):

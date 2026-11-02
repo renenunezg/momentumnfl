@@ -890,7 +890,10 @@ def run_publish(args) -> None:
 
     offers = read_optional("market_offers")
     decisions = build_recommendations(
-        projections, offers if offers is not None else pd.DataFrame(), load_pricing()
+        projections,
+        offers if offers is not None else pd.DataFrame(),
+        load_pricing(),
+        picked_games=publish.picked_games(db.engine, projections.game_id),
     )
     counts = publish.publish_week(
         db.engine,

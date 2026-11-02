@@ -483,16 +483,22 @@ def test_recommendation_publication_settlement_and_filtered_history(database):
         & offers.selection.eq("home"),
         "price",
     ] = -100.0
-    # Two unbettable books set the market every pick is priced from; it
-    # favours the away side of pick-048 and the under of pick-050.
-    consensus = offers[~offers.market.eq("h2h")].assign(
+    # Two unbettable books set the market every pick is priced from: it
+    # favours the home side by ten (the away side of pick-048) and the over
+    # (the under of pick-050), so every bettable quote has positive value.
+    consensus = offers.assign(
         execution_eligibility_verified=False,
         point=lambda o: np.select(
-            [o.market.eq("totals"), o.selection.eq("home")],
-            [np.where(o.game_id.eq("pick-050"), 38.0, 52.0), -10.0],
+            [o.market.eq("h2h"), o.market.eq("totals"), o.selection.eq("home")],
+            [np.nan, np.where(o.game_id.eq("pick-050"), 38.0, 52.0), -10.0],
             10.0,
         )
         * np.where(o.game_id.eq("pick-048") & o.market.eq("spreads"), -1, 1),
+        price=lambda o: np.select(
+            [o.market.eq("h2h") & o.selection.eq("home"), o.market.eq("h2h")],
+            [-500, 380],
+            o.price,
+        ),
     )
     offers = pd.concat(
         [offers]
@@ -502,18 +508,19 @@ def test_recommendation_publication_settlement_and_filtered_history(database):
     weights = np.ones(len(MARGINS))
     decisions = build_recommendations(forecasts, offers, weights, decision_at=now)
     assert len(decisions) == 159 and decisions.status.eq("recommended").all()
-    # Totals price from the median posted total; the model total has no weight.
+    assert decisions.reason.eq("positive_ev").all()
+    assert decisions.provider_key.eq("test").all()
+    # Totals price from the market total alone; the model total has no weight.
     totals = decisions[decisions.market.eq("totals")].set_index("game_id")
-    assert totals.market_total.eq(totals.model_total).all()
-    assert totals.model_total.drop("pick-050").eq(52.0).all()
-    assert totals.side.eq("over").sum() == 52 and totals.provider_key.eq("test").all()
-    # Sides price from the median posted line, not the published margin.
+    assert totals.market_total.drop("pick-050").eq(52.0).all()
+    assert totals.model_total.drop("pick-050").nunique() == 1
+    assert totals.model_total.iloc[0] == pytest.approx(52.0, abs=0.5)
+    assert totals.side.eq("over").sum() == 52 and totals.side["pick-050"] == "under"
+    # Sides price from the devigged market margin, not the published margin.
     spreads = decisions[decisions.market.eq("spreads")].set_index("game_id")
     assert spreads.side.eq("home").sum() == 52 and spreads.side["pick-048"] == "away"
-    assert (
-        spreads.model_home_margin.drop("pick-048")
-        .eq(10.0 + 0.045 * (-8.0 - 10.0))
-        .all()
+    assert spreads.model_home_margin.drop("pick-048").to_numpy() == pytest.approx(
+        10.0 + 0.045 * (-8.0 - 10.0)
     )
     for pick in decisions.itertuples():
         profit = pick.price / 100 if pick.price > 0 else 100 / abs(pick.price)
@@ -944,3 +951,95 @@ def test_recommendation_publication_settlement_and_filtered_history(database):
         )
     with pytest.raises(DBAPIError):
         publish(decisions.iloc[:1].assign(game_id="late", decision_at=now))
+
+
+def test_slate_fills_with_model_side_leans_after_frozen_picks():
+    """Without positive value, the five-game slate counts frozen picks and fills
+    with the highest-value sides the model leans to, never totals."""
+    import json
+
+    import numpy as np
+
+    from backend.model.market_blend import MARGINS
+    from backend.recommendations import SLATE_SIZE, build_recommendations
+
+    now = pd.Timestamp.now(tz="UTC")
+    start = now + timedelta(hours=2)
+    at = (now - timedelta(minutes=5)).isoformat()
+    source = {
+        name: {"observed_at": at, "sha256": "a" * 64}
+        for name in (
+            "schedule",
+            "depth_charts",
+            "qb_overrides",
+            "win_totals",
+            "win_total_sources",
+            "preseason_qbs",
+        )
+    }
+    flags = {
+        f"{side}_{key}": value
+        for side in ("home", "away")
+        for key, value in (("expected_qb", "qb"), ("qb_source_at", at))
+    }
+    # The pure margin sits i points above the 3-point market line.
+    forecasts = pd.DataFrame(
+        dict(
+            game_id=f"g{i}",
+            season=2026,
+            week=1,
+            start_date=start,
+            as_of=now - timedelta(minutes=1),
+            model_version="test",
+            home_team=f"H{i}",
+            away_team=f"A{i}",
+            pure_home_margin=3.0 + i,
+            home_margin=3.0,
+            model_total=60.0,
+            margin_sd=13.0,
+            total_sd=13.0,
+            degrees_of_freedom=7.0,
+            home_missing_input_count=0,
+            away_missing_input_count=0,
+            source_timestamps=json.dumps(source),
+            data_flags=json.dumps(flags),
+        )
+        for i in range(1, 9)
+    )
+    offers = pd.DataFrame(
+        dict(
+            game_id=game,
+            market=market,
+            selection=side,
+            price=price,
+            point=point,
+            provider="Book",
+            provider_key="book",
+            provider_last_update=now,
+            market_fetched_at=now,
+            odds_source="odds_api",
+            odds_api_event_id=game,
+            provider_start_date=start,
+            match_score=1.0,
+            execution_eligibility_verified=True,
+        )
+        for game in forecasts.game_id
+        # The away side's cheaper price never outranks the model's home side.
+        for market, side, point, price in (
+            ("spreads", "home", -3.0, -110),
+            ("spreads", "away", 3.0, -102),
+            ("totals", "over", 44.0, -110),
+            ("totals", "under", 44.0, -110),
+        )
+    )
+    decisions = build_recommendations(
+        forecasts,
+        offers,
+        np.ones(len(MARGINS)),
+        decision_at=now,
+        picked_games={"g1", "other-game"},
+    )
+    picks = decisions[decisions.status.eq("recommended")]
+    assert picks.reason.eq("ranked_lean").all() and picks.market.eq("spreads").all()
+    assert picks.side.eq("home").all() and picks.expected_value_per_unit.lt(0).all()
+    assert sorted(picks.game_id) == ["g6", "g7", "g8"] and SLATE_SIZE == 5

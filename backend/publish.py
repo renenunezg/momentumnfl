@@ -497,6 +497,20 @@ def publish_position_grade_evaluation(engine, rows: list[dict]) -> dict:
     return {"position_grade_evaluation": written}
 
 
+def picked_games(engine, game_ids) -> set[str]:
+    """Games that already hold a frozen recommended pick in any market."""
+    with engine.connect() as conn:
+        return set(
+            conn.execute(
+                text(
+                    f"select distinct game_id from {SCHEMA}.recommendations "
+                    "where status = 'recommended' and game_id = any(:ids)"
+                ),
+                {"ids": list(map(str, game_ids))},
+            ).scalars()
+        )
+
+
 def publish_recommendations(conn, decisions):
     """Freeze picks unless verified pregame QB inputs change; archive revisions."""
     import json

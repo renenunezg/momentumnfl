@@ -1,9 +1,11 @@
 begin;
 
--- nfl-picks-v6 prices every market from the median posted line at decision
--- time moved a development-fit model weight toward the model (sides 0.045,
--- totals 0) instead of from the published 0.5 blend, and drops the weekly
--- volume floor, so every v6 pick clears the 2-point edge gate.
+-- nfl-picks-v6 prices every market from the devigged market number at
+-- decision time moved a development-fit model weight toward the model
+-- (sides 0.045, totals 0) instead of from the published 0.5 blend. Offers
+-- with positive expected value are picks (positive_ev); the weekly slate is
+-- filled to five games with the highest-EV model-side spreads and moneylines
+-- (ranked_lean), whose honest expected value may be slightly negative.
 alter table nfl.recommendations drop constraint recommendation_eligibility_v5;
 alter table nfl.recommendations add constraint recommendation_eligibility_v6
 check ((status = 'no_play' and stake_units = 0) or
@@ -32,11 +34,14 @@ check ((status = 'no_play' and stake_units = 0) or
      win_probability > 0 and win_probability < 1 and
      push_probability >= 0 and win_probability + push_probability <= 1 and
      probability_edge > -1 and probability_edge < 1 and
-     ((policy_version in ('nfl-picks-v1', 'nfl-picks-v2') and probability_edge >= 0.045) or
-      (policy_version = 'nfl-picks-v3' and edge_points >= 2 and edge_points < 'Infinity'::float8) or
-      (policy_version in ('nfl-picks-v4', 'nfl-picks-v5') and edge_points > 0 and edge_points < 'Infinity'::float8) or
-      (policy_version = 'nfl-picks-v6' and edge_points >= 2 and edge_points < 'Infinity'::float8)) and
-     expected_value_per_unit > 0 and expected_value_per_unit < 'Infinity'::float8) is true);
+     ((((policy_version in ('nfl-picks-v1', 'nfl-picks-v2') and probability_edge >= 0.045) or
+        (policy_version = 'nfl-picks-v3' and edge_points >= 2 and edge_points < 'Infinity'::float8) or
+        (policy_version in ('nfl-picks-v4', 'nfl-picks-v5') and edge_points > 0 and edge_points < 'Infinity'::float8)) and
+       expected_value_per_unit > 0) or
+      (policy_version = 'nfl-picks-v6' and abs(edge_points) < 'Infinity'::float8 and
+       ((reason = 'positive_ev' and expected_value_per_unit > 0) or
+        (reason = 'ranked_lean' and market in ('spreads', 'h2h') and expected_value_per_unit > -1)))) and
+     expected_value_per_unit < 'Infinity'::float8) is true);
 
 notify pgrst, 'reload schema';
 commit;
