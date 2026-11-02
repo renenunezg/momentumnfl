@@ -483,18 +483,36 @@ def test_recommendation_publication_settlement_and_filtered_history(database):
         & offers.selection.eq("home"),
         "price",
     ] = -100.0
+    # Two unbettable books set the market every pick is priced from; it
+    # favours the away side of pick-048 and the under of pick-050.
+    consensus = offers[~offers.market.eq("h2h")].assign(
+        execution_eligibility_verified=False,
+        point=lambda o: np.select(
+            [o.market.eq("totals"), o.selection.eq("home")],
+            [np.where(o.game_id.eq("pick-050"), 38.0, 52.0), -10.0],
+            10.0,
+        )
+        * np.where(o.game_id.eq("pick-048") & o.market.eq("spreads"), -1, 1),
+    )
+    offers = pd.concat(
+        [offers]
+        + [consensus.assign(provider_key=key, provider=key) for key in ("c1", "c2")],
+        ignore_index=True,
+    )
     weights = np.ones(len(MARGINS))
     decisions = build_recommendations(forecasts, offers, weights, decision_at=now)
     assert len(decisions) == 159 and decisions.status.eq("recommended").all()
-    # Totals price from the published total; the posted total is recorded.
-    totals = decisions[decisions.market.eq("totals")]
-    assert totals.market_total.eq(45.0).all()
-    assert totals[~totals.game_id.eq("pick-050")].model_total.eq(50.0).all()
-    assert totals[totals.game_id.eq("pick-050")].model_total.eq(40.0).all()
-    # Sides price from the blended margin; an opposite-sign pure margin is ignored.
+    # Totals price from the median posted total; the model total has no weight.
+    totals = decisions[decisions.market.eq("totals")].set_index("game_id")
+    assert totals.market_total.eq(totals.model_total).all()
+    assert totals.model_total.drop("pick-050").eq(52.0).all()
+    assert totals.side.eq("over").sum() == 52 and totals.provider_key.eq("test").all()
+    # Sides price from the median posted line, not the published margin.
+    spreads = decisions[decisions.market.eq("spreads")].set_index("game_id")
+    assert spreads.side.eq("home").sum() == 52 and spreads.side["pick-048"] == "away"
     assert (
-        decisions[decisions.market.eq("spreads") & ~decisions.game_id.eq("pick-048")]
-        .side.eq("home")
+        spreads.model_home_margin.drop("pick-048")
+        .eq(10.0 + 0.045 * (-8.0 - 10.0))
         .all()
     )
     for pick in decisions.itertuples():

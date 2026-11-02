@@ -141,7 +141,7 @@ def test_early_totals_stabilization_preserves_published_spread_and_moneyline(
         assemble_projections,
     )
     from backend.model.totals import TotalsConfig
-    from backend.recommendations import _h2h_projection, _probabilities
+    from backend.recommendations import _anchored_projection, _probabilities
 
     as_of = datetime(2026, 9, 15, tzinfo=UTC)
     teams = [f"T{i:02d}" for i in range(32)]
@@ -278,12 +278,13 @@ def test_early_totals_stabilization_preserves_published_spread_and_moneyline(
         assert new.total_sd == old.total_sd
         old_row = next(pd.DataFrame([old.to_record()]).itertuples())
         new_row = next(pd.DataFrame([new.to_record()]).itertuples())
+        posted = pd.DataFrame(
+            dict(market="spreads", selection=["home", "away"], point=[-3.5, 3.5])
+        )
         for market in ("spreads", "h2h"):
             offer = dict(market=market, side="home", point=-3.5)
             old_priced, new_priced = (
-                (_h2h_projection(old_row), _h2h_projection(new_row))
-                if market == "h2h"
-                else (old_row, new_row)
+                _anchored_projection(row, posted) for row in (old_row, new_row)
             )
             assert _probabilities(new_priced, offer, distribution) == pytest.approx(
                 _probabilities(old_priced, offer, distribution)
