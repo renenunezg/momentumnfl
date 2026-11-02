@@ -95,16 +95,21 @@ def _identity(games: pd.DataFrame, season: int) -> pd.DataFrame:
     ]
 
 
+def rating_games(position: str, season: int):
+    """The latest frozen model before ``season`` and the game table it scores."""
+    spec, games_table = SPECS[position]
+    model = load_model(latest_model_path(spec, season))
+    validate_model(model, spec, season)
+    return model, games_table(list(range(min(model.dev_seasons), season + 1)))
+
+
 def score_ratings(
     season: int, weeks: list[int], as_of: datetime, headshots: pd.Series
 ) -> pd.DataFrame:
     """Rows for every rated position at each of ``weeks`` of ``season``."""
     parts = []
-    for position, (spec, games_table) in SPECS.items():
-        path = latest_model_path(spec, season)
-        model = load_model(path)
-        validate_model(model, spec, season)
-        games = games_table(list(range(min(model.dev_seasons), season + 1)))
+    for position, (spec, _) in SPECS.items():
+        model, games = rating_games(position, season)
         if games[games["season"].eq(season)].empty:
             log.info("%s rating %s: no games to score", position, season)
             continue

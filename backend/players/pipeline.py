@@ -13,9 +13,9 @@ import pandas as pd
 
 from backend.config import PROCESSED_DIR
 from backend.etl import store
-from backend.players import EPA_TRAIT, MODEL_VERSION, grade, war
+from backend.players import EPA_TRAIT, MODEL_VERSION, grade, season_stats, war
 from backend.players.backtest import build_season_traits
-from backend.players.context import load_games
+from backend.players.context import load_games, load_season_context
 from backend.players.expectations import (
     expectation_tables_path,
     load_expectation_tables,
@@ -48,6 +48,10 @@ GRADE_ROW, WAR_ROW = "grade", "war"
 
 def position_traits_artifact(season: int) -> tuple[str, ...]:
     return ("players", "position_traits", f"{season}.parquet")
+
+
+def season_stats_artifact(season: int) -> tuple[str, ...]:
+    return ("players", "season_stats", f"{season}.parquet")
 
 
 def frozen_expectation_tables(model_path):
@@ -170,7 +174,8 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
     model = grade.load_grade_model(model_path)
     grade.validate_grade_model(model, season)
     tables = frozen_expectation_tables(model_path)
-    built = build_season_traits(season, tables=tables)
+    ctx = load_season_context(season)
+    built = build_season_traits(season, tables=tables, ctx=ctx)
     snapshot = built["snapshots"]
     if snapshot.empty:
         log.info("position traits %s: no completed week to score", season)
@@ -186,6 +191,13 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
     out = score_snapshot(snapshot, model, built["credited"], projections, as_of)
     out = with_fitted_ratings(out, season, as_of)
     store.write_processed(out, *position_traits_artifact(season))
+    from backend.players.ratings import rating_games
+
+    lines = season_stats.season_stat_lines(
+        ctx, rating_games("QB", season)[1], latest_trait_week(season)
+    )
+    store.write_processed(lines, *season_stats_artifact(season))
+    log.info("season stat lines %s: %d athletes", season, len(lines))
     latest = int(snapshot["week"].max())
     losses = grade.coverage_losses(
         grade.grade_eligibility(snapshot[snapshot["week"].eq(latest)], model)
@@ -228,6 +240,14 @@ def with_fitted_ratings(
     )
 
 
+def season_stat_lines(season: int) -> pd.DataFrame:
+    """The stat lines the last ``position-traits`` run wrote; none before one has."""
+    path = PROCESSED_DIR.joinpath(*season_stats_artifact(season))
+    if not path.exists():
+        return pd.DataFrame(columns=season_stats.STAT_LINE_COLUMNS)
+    return store.read_processed(*season_stats_artifact(season))
+
+
 def latest_trait_week(season: int) -> pd.DataFrame:
     """The newest weekly snapshot, qualified players only; the artifact keeps all."""
     path = PROCESSED_DIR.joinpath(*position_traits_artifact(season))
@@ -245,4 +265,5 @@ __all__ = [
     "POSITION_TRAIT_COLUMNS",
     "latest_trait_week",
     "run_position_traits",
+    "season_stat_lines",
 ]

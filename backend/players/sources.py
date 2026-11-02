@@ -2,10 +2,11 @@
 
 FTN charting (reads, blitzers, play action, drops), PFR advanced stats
 (pressures, yards after contact, broken tackles), Next Gen weekly stats, ESPN's
-weekly Total QBR (a baseline the quarterback rating is judged against) and the
-player id crosswalk all publish during the season and are stored under the raw
-directory by season. The participation feed (players on the field per play) is
-research only: it is published after the fact, so nothing served reads it.
+weekly Total QBR (a baseline the quarterback rating is judged against), its
+season Total QBR (the stat line's figure) and the player id crosswalk all
+publish during the season and are stored under the raw directory by season.
+The participation feed (players on the field per play) is research only: it
+is published after the fact, so nothing served reads it.
 """
 
 import logging
@@ -61,17 +62,21 @@ def ingest_player_sources(seasons: list[int], refresh_latest: bool = True) -> No
                         f"{stat}_{season}.parquet",
                     )
     # QBR is one file for every season, so it is fetched once and split.
-    wanted = [
-        season
-        for season in seasons
-        if season >= QBR_FIRST_SEASON
-        and (
-            (refresh_latest and season == latest)
-            or not (RAW_DIR / "espn_qbr" / f"{season}.parquet").exists()
-        )
-    ]
-    if wanted:
-        qbr = data.load_espn_qbr()
-        for season in wanted:
-            _put(qbr[qbr["season"].eq(season)], "espn_qbr", f"{season}.parquet")
+    for directory, load in (
+        ("espn_qbr", data.load_espn_qbr),
+        ("espn_qbr_season", data.load_espn_qbr_season),
+    ):
+        wanted = [
+            season
+            for season in seasons
+            if season >= QBR_FIRST_SEASON
+            and (
+                (refresh_latest and season == latest)
+                or not (RAW_DIR / directory / f"{season}.parquet").exists()
+            )
+        ]
+        if wanted:
+            qbr = load()
+            for season in wanted:
+                _put(qbr[qbr["season"].eq(season)], directory, f"{season}.parquet")
     _put(data.load_players(), "players.parquet")

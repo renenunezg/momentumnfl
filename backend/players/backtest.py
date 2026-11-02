@@ -21,7 +21,12 @@ import pandas as pd
 from backend.config import HISTORY_START_SEASON, PROCESSED_DIR, RAW_DIR
 from backend.etl import store
 from backend.players import EPA_TRAIT, TRAITS, UNIT_PREFIX, grade, snapshots
-from backend.players.context import load_plays, load_season_context, load_stats
+from backend.players.context import (
+    SeasonContext,
+    load_plays,
+    load_season_context,
+    load_stats,
+)
 from backend.players.credit import credited_games, epa_credit_frames, with_credit
 from backend.players.expectations import (
     ExpectationTables,
@@ -175,13 +180,16 @@ def fit_tables_before(season: int) -> ExpectationTables:
 
 
 def build_season_traits(
-    season: int, tables: ExpectationTables | None = None
+    season: int,
+    tables: ExpectationTables | None = None,
+    ctx: SeasonContext | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Every trait frame, weekly snapshot and reliability table for ``season``.
 
     With ``tables`` (the frozen serving tables) no expectation is refit; a table
     whose source seasons include ``season`` or a later one is refused. Without
     it the tables are fit on every earlier season on disk, as the backtest does.
+    A caller that passes ``ctx`` gets it back with its credit built.
     """
     started = time.perf_counter()
     if tables is None:
@@ -190,7 +198,7 @@ def build_season_traits(
         raise ValueError(
             f"expectation tables from {tables.source_seasons} cannot rate {season}"
         )
-    ctx = with_credit(load_season_context(season))
+    ctx = with_credit(ctx or load_season_context(season))
     frames = pd.concat(
         [
             epa_credit_frames(ctx.credit, ctx.positions),

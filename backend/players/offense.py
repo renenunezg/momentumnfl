@@ -471,7 +471,7 @@ def rb_traits(ctx: SeasonContext, tables: ExpectationTables) -> pd.DataFrame:
 # Receivers
 
 
-def _rec_target_share(rows, targets, receivers):
+def rec_target_share(rows, targets, receivers):
     """The player's targets over the team's targets in each game he appeared in."""
     appeared = rows[GAME_KEYS].drop_duplicates()
     appeared = appeared[appeared["athlete_id"].isin(receivers)]
@@ -558,7 +558,7 @@ def receiver_traits(ctx: SeasonContext, tables: ExpectationTables) -> pd.DataFra
     targets = target_rows(rows)
     player_targets = targets[targets["athlete_id"].isin(receivers)]
     frames = [
-        _rec_target_share(rows, targets, receivers),
+        rec_target_share(rows, targets, receivers),
         _rec_value_per_target(player_targets),
         _rec_explosive(player_targets, ctx.games),
         _rec_late_down(player_targets, tables, ctx.games),

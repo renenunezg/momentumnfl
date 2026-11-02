@@ -438,16 +438,24 @@ TRAIT_DISPLAY_COLUMNS = ("athlete_name", "headshot_url")
 
 
 def publish_position_traits(engine, season: int) -> dict:
-    """Publish the latest scored week of position traits for ``season``.
+    """Publish the latest scored week of position traits for ``season``, with
+    its raw season stat lines.
 
-    The whole season's rows are replaced in one transaction: the table holds one
-    snapshot week per season, and nfl.position_traits_history keeps every
-    published week's grade and war rows. A season with no scored week leaves
-    the table untouched.
+    The whole season's rows of both tables are replaced in one transaction: each
+    holds one snapshot week per season, and nfl.position_traits_history keeps
+    every published week's grade and war rows. The stat lines are one delete
+    and one insert. A season with no scored week leaves the tables untouched.
     """
+    import json
+
     from backend.players import MODEL_VERSION
-    from backend.players.pipeline import POSITION_TRAIT_COLUMNS, latest_trait_week
+    from backend.players.pipeline import (
+        POSITION_TRAIT_COLUMNS,
+        latest_trait_week,
+        season_stat_lines,
+    )
     from backend.players.ratings import SPECS
+    from backend.players.season_stats import SKIPPED_GROUPS, STAT_LINE_COLUMNS
 
     versions = {MODEL_VERSION, *(spec.model_version for spec, _ in SPECS.values())}
 
@@ -464,6 +472,25 @@ def publish_position_traits(engine, season: int) -> dict:
         raise ValueError("Duplicate position trait rows")
     if not rows["trait"].eq("grade").any():
         raise ValueError("Position trait snapshot carries no grade rows")
+    lines = season_stat_lines(season)
+    expected = set(
+        rows.loc[~rows["position_group"].isin(SKIPPED_GROUPS), "athlete_id"].astype(str)
+    )
+    if set(lines["week"]) != set(rows["week"]) or set(lines["athlete_id"]) != expected:
+        raise ValueError(
+            "Season stat lines do not match the trait snapshot; run position-traits"
+        )
+    # The parquet round trip turns a stat list with a null into floats.
+    stat_lines = [
+        {
+            "season": int(line.season),
+            "athlete_id": str(line.athlete_id),
+            "position_group": str(line.position_group),
+            "week": int(line.week),
+            "stats": [None if pd.isna(v) else int(v) for v in line.stats],
+        }
+        for line in lines.itertuples()
+    ]
     prepared = _prepare(rows, POSITION_TRAIT_COLUMNS)
     with engine.begin() as conn:
         conn.execute(
@@ -480,8 +507,22 @@ def publish_position_traits(engine, season: int) -> dict:
             season,
             "AND trait IN ('grade', 'war')",
         )
+        conn.execute(
+            text("DELETE FROM nfl.player_season_stats WHERE season = :season"),
+            {"season": season},
+        )
+        names = ", ".join(STAT_LINE_COLUMNS)
+        conn.execute(
+            text(
+                f"INSERT INTO nfl.player_season_stats ({names}) SELECT {names} "
+                "FROM jsonb_populate_recordset(NULL::nfl.player_season_stats, "
+                "CAST(:rows AS jsonb))"
+            ),
+            {"rows": json.dumps(stat_lines, allow_nan=False)},
+        )
     return {
         "position_traits": len(prepared),
+        "player_season_stats": len(lines),
         "week": int(rows["week"].iloc[0]),
         "graded": int(rows["trait"].eq("grade").sum()),
     }
