@@ -43,7 +43,7 @@ POSITION_TRAIT_COLUMNS = [
     "reliability",
     "points_above_replacement",
 ]
-GRADE_ROW, WAR_ROW = "grade", "war"
+GRADE_ROW, WAR_ROW, SPREAD_ROW = "grade", "war", "spread_value"
 
 
 def position_traits_artifact(season: int) -> tuple[str, ...]:
@@ -134,10 +134,46 @@ def war_rows(
     )
 
 
+def spread_rows(snapshot: pd.DataFrame) -> pd.DataFrame:
+    """One ``spread_value`` row per priced player-week: the points the team
+    model's line gives up if he is ruled out of the next game, as the
+    absence layer prices it. Quarterbacks have their own layer and the line
+    is rated as a unit, so neither carries one."""
+    from backend.model import absence_layer
+    from backend.model.joint_scoring import DEFAULT_CONFIG
+    from backend.model.projections import LayerConfig
+
+    season = int(snapshot["season"].iloc[0])
+    seasons = [s for s in (season - 1, season) if s >= absence_layer.FIRST_TRAIT_SEASON]
+    identity = _identity(snapshot)
+    identity = identity[identity["position_group"].isin(absence_layer.GROUPS)]
+    values = absence_layer.spread_values(
+        absence_layer.load_inputs(seasons),
+        season,
+        identity[["week", "athlete_id", "team"]],
+        DEFAULT_CONFIG.rating_half_life_weeks,
+        LayerConfig().absence_weight,
+    )
+    if values.empty:
+        return pd.DataFrame()
+    out = values.merge(identity, on=["week", "athlete_id"])
+    out["percentile"] = _percentile(out["value"], [out["week"], out["position_group"]])
+    return out.assign(
+        trait=SPREAD_ROW,
+        kind="counted",
+        in_grade=False,
+        qualified=True,
+        uncertainty=np.nan,
+        reliability=np.nan,
+        points_above_replacement=np.nan,
+    )
+
+
 def score_snapshot(
     snapshot, model, credited, projections, as_of: datetime
 ) -> pd.DataFrame:
-    """Trait rows plus the grade and war rows, in ``POSITION_TRAIT_COLUMNS``."""
+    """Trait rows plus the grade, war and spread value rows, in
+    ``POSITION_TRAIT_COLUMNS``."""
     weighted = model.weights[model.weights["weight"].ne(0)]
     weighted_keys = set(zip(weighted["position_group"], weighted["trait"]))
     traits = snapshot.astype({"athlete_id": str}).copy()
@@ -156,6 +192,7 @@ def score_snapshot(
         traits,
         grade_rows(snapshot, model),
         war_rows(snapshot, model, credited, projections),
+        spread_rows(snapshot),
     ]
     out = pd.concat([part for part in parts if not part.empty], ignore_index=True)
     out["reliability"] = out.get("reliability", np.nan)
@@ -221,7 +258,7 @@ def with_fitted_ratings(
     out: pd.DataFrame, season: int, as_of: datetime
 ) -> pd.DataFrame:
     """Replace the rated positions' trait and grade rows with the fitted ratings,
-    keeping their wins above replacement rows."""
+    keeping their wins above replacement and spread value rows."""
     from backend.players.ratings import RATED_POSITIONS, score_ratings
 
     weeks = sorted(int(w) for w in out["week"].unique())
@@ -233,7 +270,9 @@ def with_fitted_ratings(
     rated = score_ratings(season, weeks, as_of, headshots)
     if rated.empty:
         return out
-    keep = ~out["position_group"].isin(RATED_POSITIONS) | out["trait"].eq(WAR_ROW)
+    keep = ~out["position_group"].isin(RATED_POSITIONS) | out["trait"].isin(
+        [WAR_ROW, SPREAD_ROW]
+    )
     rated = rated.reindex(columns=out.columns)
     return pd.concat([out[keep], rated], ignore_index=True).sort_values(
         ["week", "trait", "athlete_id"], ignore_index=True

@@ -26,6 +26,7 @@ from backend.features.qb import ruled_out
 from backend.players import EPA_TRAIT, war
 
 TRAIT_DIR = PROCESSED_DIR / "players" / "position_traits"
+FIRST_TRAIT_SEASON = 2016
 GROUPS = ("DB", "DL", "LB", "WR", "TE", "RB")
 # Position traits cover the regular season only; playoff forecasts read its
 # final week.
@@ -196,3 +197,42 @@ def points_lost(
             lost.append(float(np.sum(rows["points"])))
         out[str(game.game_id)] = (lost[0], lost[1])
     return out
+
+
+def spread_values(
+    inputs: AbsenceInputs,
+    season: int,
+    roster: pd.DataFrame,
+    half_life: float,
+    weight: float,
+) -> pd.DataFrame:
+    """``week, athlete_id, value``: after snapshot week ``w``, the points his
+    team's projected margin gives up if he is ruled out of its next game.
+
+    ``roster`` holds ``week, athlete_id, team`` from the snapshot; a player is
+    priced on the team the snapshot places him with, so a player new to it
+    carries no share yet.
+    """
+    parts = []
+    for week, players in roster.groupby("week"):
+        priced = (
+            players.astype({"athlete_id": str})
+            .merge(latest_values(inputs, season, week + 1), on="athlete_id")
+            .merge(
+                shares(inputs, season, week + 1, half_life), on=["team", "athlete_id"]
+            )
+        )
+        parts.append(
+            pd.DataFrame(
+                {
+                    "week": week,
+                    "athlete_id": priced["athlete_id"],
+                    "value": weight * priced["value"] * priced["share"],
+                }
+            )
+        )
+    return (
+        pd.concat(parts, ignore_index=True)
+        if parts
+        else pd.DataFrame(columns=["week", "athlete_id", "value"])
+    )
