@@ -384,6 +384,7 @@ def test_backtest_layers_reproduce_the_published_projection():
     )
     layer = LayerConfig()
     deltas = {f"g{i}": (1.5 - i * 0.4, 0.3 * (i % 3)) for i in range(8)}
+    absences = {f"g{i}": (0.2 * (i % 4), 0.35 * (i % 2)) for i in range(8)}
     spreads = {f"g{i}": -3.0 + i for i in range(8)}
     rows = []
     for game in slate.itertuples():
@@ -396,6 +397,8 @@ def test_backtest_layers_reproduce_the_published_projection():
                 rest_diff=float(np.clip(game.home_rest - game.away_rest, -3, 3)),
                 market_margin=-spreads[game.game_id],
                 qb_input_basis=QB_BASIS_DATED if game.Index % 2 else QB_BASIS_PROXY,
+                home_absence_points=absences[game.game_id][0],
+                away_absence_points=absences[game.game_id][1],
                 **{
                     f"qb_adj_{int(layer.qb_span_dropbacks)}": home_delta - away_delta,
                     f"qb_sum_{int(layer.qb_span_dropbacks)}": home_delta + away_delta,
@@ -420,6 +423,7 @@ def test_backtest_layers_reproduce_the_published_projection():
         },
         spreads,
         layer,
+        absence_points=absences,
     )
     for row, projection in zip(backtest.itertuples(), published, strict=True):
         assert row.pure_model_margin == pytest.approx(projection.pure_home_margin)

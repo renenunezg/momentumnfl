@@ -24,6 +24,7 @@ from backend.config import (
 from backend.etl import store
 from backend.features.qb import expected_starters, identification_basis, ruled_out
 from backend.features.scoring import closing_home_spread
+from backend.model import absence_layer
 from backend.model import qb_adjustment as qb_layer
 from backend.model.distributions import student_t_scale
 from backend.model.fit_week import load_depth_charts, load_injuries
@@ -82,6 +83,9 @@ class WalkForwardData:
         )
         self.depth_charts = {s: load_depth_charts(s) for s in seasons}
         self.injuries = {s: load_injuries(s) for s in seasons}
+        # Position traits start in 2016, so the first evaluation season's
+        # opening week has no previous-season values and prices no absence.
+        self.absence = absence_layer.load_inputs(seasons)
         self.strength_history = {
             span: qb_layer.strength_history(self.qb_games, self.game_index, span)
             for span in qb_spans
@@ -215,6 +219,17 @@ def generate_walk_forward(
                     for span in qb_spans
                 }
             contexts = data.contexts[context_key]
+            absence_points = absence_layer.points_lost(
+                data.absence,
+                slate.assign(
+                    forecast_cutoff=pd.to_datetime(slate.start_date, utc=True)
+                    - timedelta(seconds=1)
+                ),
+                season,
+                week,
+                data.injuries[season],
+                engine_config.rating_half_life_weeks,
+            )
             for game in slate.itertuples():
                 game_id = str(game.game_id)
                 engine = fit.engine_projection(game)
@@ -258,6 +273,8 @@ def generate_walk_forward(
                     "away_team": game.away_team,
                     "home_points": game.home_points,
                     "away_points": game.away_points,
+                    "home_absence_points": absence_points[game_id][0],
+                    "away_absence_points": absence_points[game_id][1],
                 }
                 for span in qb_spans:
                     adj = 0.0
@@ -300,6 +317,8 @@ def apply_layers(predictions: pd.DataFrame, config: LayerConfig) -> pd.DataFrame
     absence_sum = f"qb_absence_sum_{span}"
     if absence_column not in out or absence_sum not in out:
         raise ValueError("Regenerate forecasts with pregame QB absence inputs")
+    if not {"home_absence_points", "away_absence_points"}.issubset(out.columns):
+        raise ValueError("Regenerate forecasts with pregame absence inputs")
     if not out["qb_input_basis"].isin((QB_BASIS_DATED, QB_BASIS_PROXY)).all():
         raise ValueError("Regenerate forecasts with per-season QB identification bases")
     # Dated charts take one weight; undated proxies take the proxy weight plus
@@ -314,6 +333,7 @@ def apply_layers(predictions: pd.DataFrame, config: LayerConfig) -> pd.DataFrame
         + weight * out[qb_column]
         + absence_weight * out[absence_column]
         + config.rest_points_per_day * out["rest_diff"]
+        + config.absence_weight * absence_margin(out)
     ).to_numpy()
     out["pure_model_margin"] = pure
     out["model_margin"] = blend_margin(pure, out["market_margin"], config.market_weight)
@@ -325,6 +345,49 @@ def apply_layers(predictions: pd.DataFrame, config: LayerConfig) -> pd.DataFrame
         out["model_margin"],
     )
     return out
+
+
+def absence_margin(frame: pd.DataFrame) -> pd.Series:
+    """Unweighted home-margin points from ruled-out players other than the QB."""
+    return frame["away_absence_points"] - frame["home_absence_points"]
+
+
+def select_absence_weight(
+    predictions: pd.DataFrame, layer: LayerConfig
+) -> tuple[float, dict]:
+    """Development weight on the absence margin, by the QB layer's rule.
+
+    The weight is the least-squares slope of the closing line's move away from
+    the pure margin under ``layer``'s QB weights, bounded to QB_WEIGHT_BOUNDS.
+    The outcome slope is the independent check; the slope of the outcome's
+    miss from the closing line says whether the market leaves anything unpriced.
+    """
+    development = predictions[
+        predictions["season"].isin(DEVELOPMENT_SEASONS)
+        & predictions["market_margin"].notna()
+    ]
+    if development.empty:
+        raise ValueError("Absence weight selection requires development seasons")
+    pure = apply_layers(development, replace(layer, absence_weight=0.0))[
+        "pure_model_margin"
+    ]
+    delta = absence_margin(development)
+    slope, error = _implied_slope(delta, development["market_margin"] - pure)
+    outcome = _implied_slope(delta, development["actual_margin"] - pure)
+    beyond = _implied_slope(
+        delta, development["actual_margin"] - development["market_margin"]
+    )
+    low, high = QB_WEIGHT_BOUNDS
+    return float(np.clip(slope, low, high)), {
+        "weight": slope,
+        "se": error,
+        "games": int(len(development)),
+        "games_with_absence": int(delta.ne(0).sum()),
+        "outcome_weight": outcome[0],
+        "outcome_se": outcome[1],
+        "beyond_close_weight": beyond[0],
+        "beyond_close_se": beyond[1],
+    }
 
 
 def margin_log_loss(frame: pd.DataFrame, scale: float, df: float) -> float:
@@ -775,6 +838,10 @@ def run_calibration(
     )
     qb_layer_config, qb_report = select_qb_weights(dev_predictions)
     log(f"selected QB weights: {qb_report}")
+    absence_weight, absence_report = select_absence_weight(
+        dev_predictions, qb_layer_config
+    )
+    log(f"selected absence weight: {absence_report}")
     scored = []
     for layer in LAYER_GRID:
         layer = replace(
@@ -783,6 +850,7 @@ def run_calibration(
             qb_weight_dated=qb_layer_config.qb_weight_dated,
             qb_weight_proxy=qb_layer_config.qb_weight_proxy,
             qb_weight_proxy_absence=qb_layer_config.qb_weight_proxy_absence,
+            absence_weight=absence_weight,
         )
         layered = apply_layers(dev_predictions, layer)
         loss = margin_log_loss(layered, 1.0, SELECTION_DF)

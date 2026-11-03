@@ -113,6 +113,10 @@ def main() -> None:
     )
     validate_qb_parser.add_argument("--context", action="store_true")
     validate_qb_parser.add_argument("--memory", action="store_true")
+    subparsers.add_parser(
+        "validate-absence",
+        help="score the non-QB absence layer on the production walk-forward",
+    )
     qbs_parser = subparsers.add_parser(
         "qbs", help="inspect quarterback strengths and starter/backup swap adjustments"
     )
@@ -482,6 +486,49 @@ def run_calibrate(args) -> None:
     print(summary["dev_honesty"].to_string())
     print("\n=== honesty report (retrospective validation) ===")
     print(summary["holdout_honesty"].to_string())
+
+
+def run_validate_absence(args) -> None:
+    """Development-selected weight, then development and holdout errors with
+    and without the layer. Reads the production walk-forward; writes nothing."""
+    from dataclasses import replace
+
+    from backend.etl import store
+    from backend.model.calibration import (
+        apply_layers,
+        margin_log_loss,
+        select_absence_weight,
+    )
+    from backend.model.projections import LayerConfig
+
+    frozen = store.read_processed("calibration", "predictions.parquet")
+    frozen = frozen[frozen["market_margin"].notna()]
+    production = LayerConfig()
+    weight, report = select_absence_weight(frozen, replace(production, market_weight=0))
+    print(f"Development-selected absence weight: {weight:.4f}")
+    for key, value in report.items():
+        print(f"  {key}: {value}")
+    print(f"Production absence weight: {production.absence_weight}")
+    for split, mask in (
+        ("development", frozen["season"].between(2016, 2021)),
+        ("holdout", frozen["season"].between(2022, 2025)),
+    ):
+        subset = frozen[mask]
+        actual = subset["actual_margin"]
+        closing = (actual - subset["market_margin"]).abs().mean()
+        for label, layer in (
+            ("without", replace(production, absence_weight=0.0)),
+            ("with", production),
+        ):
+            scored = apply_layers(subset, layer)
+            pure = (actual - scored["pure_model_margin"]).abs()
+            blended = (actual - scored["model_margin"]).abs()
+            print(
+                f"{split} {label}: {len(subset)} games, "
+                f"pure MAE {pure.mean():.4f}, blended MAE {blended.mean():.4f}, "
+                f"closing MAE {closing:.4f}, "
+                f"blended NLL {margin_log_loss(scored, 1.0, 7.0):.5f}"
+            )
 
 
 def run_validate_qb(args) -> None:
@@ -1330,6 +1377,7 @@ COMMANDS = {
     "validate-model": run_validation,
     "validate-season-wins": run_validation,
     "validate-qb": run_validate_qb,
+    "validate-absence": run_validate_absence,
     "qbs": run_qbs,
     "odds": run_odds,
     "upcoming": run_upcoming,

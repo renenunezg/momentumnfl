@@ -82,6 +82,8 @@ GAME_PROJECTIONS_COLUMNS = [
     "market_informed_total",
     "market_informed_home_points",
     "market_informed_away_points",
+    "home_absence_adjustment",
+    "away_absence_adjustment",
 ]
 MARKET_COMPARISONS_COLUMNS = [
     "game_id",

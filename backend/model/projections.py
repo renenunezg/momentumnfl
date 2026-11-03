@@ -45,11 +45,22 @@ DEFAULT_QB_WEIGHT_PROXY_ABSENCE = 0.89
 # The QB layer version names the starter-identification rule and its weight;
 # the preseason producer appends the same suffix to its own version.
 QB_LAYER_VERSION = "qb_v8"
+# Ruled-out regulars other than the quarterback (absence_layer), in points per
+# game lost. Selected on development seasons 2016-2021 like the QB weights: the
+# least-squares slope of the closing line's move away from the QB-adjusted pure
+# margin on the unweighted absence margin (1.08, standard error 0.17), with the
+# outcome slope (2.2, standard error 0.7) as the independent check
+# (calibration.select_absence_weight). The margin moves; the total does not.
+DEFAULT_ABSENCE_WEIGHT = 1.08
+ABSENCE_LAYER_VERSION = "absence_v1"
 
 
 def layered_version(engine_version: str) -> str:
     """A projection's version: the rating source plus the output layers."""
-    return f"{engine_version}_{QB_LAYER_VERSION}_{TOTALS_LAYER_VERSION}"
+    return (
+        f"{engine_version}_{QB_LAYER_VERSION}_{ABSENCE_LAYER_VERSION}"
+        f"_{TOTALS_LAYER_VERSION}"
+    )
 
 
 MODEL_VERSION = layered_version("nfl_joint_scoring")
@@ -66,11 +77,17 @@ class LayerConfig:
     qb_weight_dated: float = DEFAULT_QB_WEIGHT_DATED
     qb_weight_proxy: float = DEFAULT_QB_WEIGHT_PROXY
     qb_weight_proxy_absence: float = DEFAULT_QB_WEIGHT_PROXY_ABSENCE
+    absence_weight: float = DEFAULT_ABSENCE_WEIGHT
 
     def __post_init__(self) -> None:
         if not isfinite(self.qb_span_dropbacks) or self.qb_span_dropbacks <= 0:
             raise ValueError("qb_span_dropbacks must be finite and positive")
-        for name in ("qb_weight_dated", "qb_weight_proxy", "qb_weight_proxy_absence"):
+        for name in (
+            "qb_weight_dated",
+            "qb_weight_proxy",
+            "qb_weight_proxy_absence",
+            "absence_weight",
+        ):
             if not 0 <= getattr(self, name) <= 1.5:
                 raise ValueError(f"{name} must be between 0 and 1.5")
 
@@ -114,13 +131,17 @@ def assemble_projections(
     market_home_spreads: dict[str, float] | None = None,
     config: LayerConfig = LayerConfig(),
     market_totals: dict[str, float] | None = None,
+    absence_points: dict[str, tuple[float, float]] | None = None,
 ) -> list[GameProjection]:
     """schedule rows need: game_id, season, week, home_team, away_team,
     neutral_site, and optionally start_date, div_game, home_rest, away_rest.
     qb_adjustments maps game_id -> (home_adj, away_adj) in points.
     market_home_spreads maps game_id -> sportsbook home line.
-    market_totals maps game_id -> sportsbook total."""
+    market_totals maps game_id -> sportsbook total.
+    absence_points maps game_id -> (home, away) unweighted points per game
+    lost to ruled-out players other than the quarterback."""
     qb_adjustments = qb_adjustments or {}
+    absence_points = absence_points or {}
     market_home_spreads = market_home_spreads or {}
     market_totals = market_totals or {}
     projections = []
@@ -136,8 +157,17 @@ def assemble_projections(
             getattr(game, "away_rest", None),
             config.rest_points_per_day,
         )
-        expected_home = max(engine.expected_home + home_qb + 0.5 * rest, 0.0)
-        expected_away = max(engine.expected_away + away_qb - 0.5 * rest, 0.0)
+        home_lost, away_lost = absence_points.get(game_id, (0.0, 0.0))
+        home_absence = -config.absence_weight * home_lost
+        away_absence = -config.absence_weight * away_lost
+        # Like rest, an absence moves the margin and leaves the total alone.
+        absence = home_absence - away_absence
+        expected_home = max(
+            engine.expected_home + home_qb + 0.5 * (rest + absence), 0.0
+        )
+        expected_away = max(
+            engine.expected_away + away_qb - 0.5 * (rest + absence), 0.0
+        )
         pure_margin = expected_home - expected_away
 
         market_spread = market_home_spreads.get(game_id)
@@ -187,6 +217,8 @@ def assemble_projections(
                 expected_away_points=float(expected_away),
                 home_qb_adjustment=float(home_qb),
                 away_qb_adjustment=float(away_qb),
+                home_absence_adjustment=float(home_absence),
+                away_absence_adjustment=float(away_absence),
                 rest_adjustment=float(rest),
                 pure_home_margin=float(pure_margin),
                 market_home_spread=(

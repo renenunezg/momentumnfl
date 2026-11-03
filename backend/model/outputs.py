@@ -131,6 +131,8 @@ class GameProjection:
     div_game: bool | None = None
     home_qb_adjustment: float = 0.0
     away_qb_adjustment: float = 0.0
+    home_absence_adjustment: float = 0.0
+    away_absence_adjustment: float = 0.0
     rest_adjustment: float = 0.0
     pure_home_margin: float | None = None
     market_home_spread: float | None = None
@@ -253,4 +255,6 @@ class GameProjection:
             "market_informed_total": self.market_informed_total,
             "market_informed_home_points": self.market_informed_home_points,
             "market_informed_away_points": self.market_informed_away_points,
+            "home_absence_adjustment": self.home_absence_adjustment,
+            "away_absence_adjustment": self.away_absence_adjustment,
         }

@@ -15,6 +15,7 @@ import pandas as pd
 
 from backend.config import HISTORY_START_SEASON, PROCESSED_DIR, REPO_ROOT
 from backend.features.qb import OVERRIDE_COLUMNS, OVERRIDES_PATH
+from backend.model.absence_layer import input_names
 from backend.source_inputs import receipt_for
 
 ARCHIVE = PROCESSED_DIR / "forecast_archive"
@@ -59,6 +60,9 @@ def prepare(args):
             PROCESSED_DIR / directory / f"{season}.parquet"
             for season in range(HISTORY_START_SEASON, args.season + 1)
         ]
+    paths += [
+        PROCESSED_DIR / name for name in input_names([args.season - 1, args.season])
+    ]
     files = {}
     for path in sorted(set(paths)):
         name = str(path.relative_to(REPO_ROOT))

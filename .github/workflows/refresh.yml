@@ -108,6 +108,23 @@ jobs:
             backend/data/raw/depth_charts
             backend/data/raw/injuries
           key: ${{ steps.core-cache.outputs.cache-primary-key }}
+      - name: Restore Tuesday position traits for the absence layer
+        if: steps.upcoming.outputs.run == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          # Same paths as the weekly save, which the cache version depends on.
+          path: |
+            backend/data/processed/players/*
+            !backend/data/processed/players/research
+            backend/data/raw/pbp/*
+            !backend/data/raw/pbp/${{ steps.context.outputs.season }}.parquet
+          key: nfl-players-v2-${{ hashFiles('backend/players/**/*.py') }}-${{ steps.context.outputs.season }}-refresh-${{ github.run_id }}
+          # A players code change keeps last Tuesday's traits until the next
+          # weekly run rebuilds the active season.
+          restore-keys: |
+            nfl-players-v2-${{ hashFiles('backend/players/**/*.py') }}-${{ steps.context.outputs.season }}-
+            nfl-players-v2-
+          fail-on-cache-miss: true
       - name: Restore approved model artifacts
         if: steps.upcoming.outputs.run == 'true'
         uses: actions/cache@v4

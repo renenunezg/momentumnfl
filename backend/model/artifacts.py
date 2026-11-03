@@ -24,10 +24,13 @@ MANIFEST_PATH = PROCESSED_DIR / "calibration" / "production_manifest.json"
 
 
 def fingerprint() -> str:
+    from backend.model.absence_layer import input_names
+
     paths = [
         REPO_ROOT / "pyproject.toml",
         REPO_ROOT / "poetry.lock",
         REPO_ROOT / "backend/config.py",
+        REPO_ROOT / "backend/players/war.py",
     ]
     for directory in ("backend/model", "backend/features", "backend/etl"):
         paths.extend(sorted((REPO_ROOT / directory).glob("*.py")))
@@ -43,6 +46,10 @@ def fingerprint() -> str:
             PROCESSED_DIR / kind / f"{season}.parquet"
             for season in range(HISTORY_START_SEASON, max(HOLDOUT_SEASONS) + 1)
         )
+    paths.extend(
+        PROCESSED_DIR / name
+        for name in input_names((*DEVELOPMENT_SEASONS, *HOLDOUT_SEASONS))
+    )
     digest = hashlib.sha256()
     digest.update(json.dumps(numerical_environment(), sort_keys=True).encode())
     for path in paths:
@@ -92,6 +99,7 @@ def preseason_input_basis() -> dict:
 
 
 def ensure(force: bool = False) -> dict:
+    from backend.model.absence_layer import input_names
     from backend.model.calibration import (
         EVAL_SEASONS,
         WalkForwardData,
@@ -107,13 +115,16 @@ def ensure(force: bool = False) -> dict:
         RAW_DIR / kind / f"{season}.parquet"
         for kind in ("depth_charts", "injuries")
         for season in (*DEVELOPMENT_SEASONS, *HOLDOUT_SEASONS)
+    ] + [
+        PROCESSED_DIR / name
+        for name in input_names((*DEVELOPMENT_SEASONS, *HOLDOUT_SEASONS))
     ]
     missing = [
         str(path.relative_to(REPO_ROOT)) for path in required if not path.exists()
     ]
     if missing:
         raise FileNotFoundError(
-            "Run bootstrap-history to restore calibration availability inputs: "
+            "Run bootstrap-history and position-traits to restore calibration inputs: "
             + ", ".join(missing)
         )
     source_hash = fingerprint()

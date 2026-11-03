@@ -185,6 +185,8 @@ def test_calibration_uses_one_sd_contract_and_keeps_pricing_holdout_free(
                     **{f"qb_sum_{int(span)}": 0.0 for span in c.QB_SPANS},
                     **{f"qb_absence_adj_{int(span)}": 0.0 for span in c.QB_SPANS},
                     **{f"qb_absence_sum_{int(span)}": 0.0 for span in c.QB_SPANS},
+                    "home_absence_points": 0.0,
+                    "away_absence_points": 0.0,
                 }
                 for season in seasons
                 for i, actual in enumerate([-10, -3, 0, 3, 10])
@@ -196,6 +198,11 @@ def test_calibration_uses_one_sd_contract_and_keeps_pricing_holdout_free(
     # by validate-qb on real walk-forward rows.
     monkeypatch.setattr(
         c, "select_qb_weights", lambda predictions: (LayerConfig(market_weight=0), {})
+    )
+    monkeypatch.setattr(
+        c,
+        "select_absence_weight",
+        lambda predictions, layer: (layer.absence_weight, {}),
     )
     monkeypatch.setattr(c, "ENGINE_GRID", [engine])
     monkeypatch.setattr(c, "LAYER_GRID", [LayerConfig()])

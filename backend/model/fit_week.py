@@ -10,6 +10,7 @@ from backend.etl import store
 from backend.features import qb as qb_features
 from backend.features.drives import kickoff_utc
 from backend.features.scoring import closing_home_spread
+from backend.model import absence_layer
 from backend.model import qb_adjustment as qb_layer
 from backend.model.joint_scoring import (
     DEFAULT_CONFIG,
@@ -197,6 +198,7 @@ def fit_and_project(
     )
     team_names = store.team_names()
     qb_games = store.qb_games(list(range(HISTORY_START_SEASON, season + 1)))
+    injuries = load_injuries(season, week, as_of)
     qb_adjustments = compute_qb_adjustments(
         season,
         week,
@@ -206,7 +208,17 @@ def fit_and_project(
         config,
         layer_config,
         as_of=as_of,
-        injuries=load_injuries(season, week, as_of),
+        injuries=injuries,
+    )
+    absence_inputs = absence_layer.load_inputs([season - 1, season])
+    absence_layer.require_coverage(absence_inputs, season, week)
+    absence_points = absence_layer.points_lost(
+        absence_inputs,
+        slate.assign(forecast_cutoff=as_of),
+        season,
+        week,
+        injuries,
+        config.rating_half_life_weeks,
     )
     projections = assemble_projections(
         fit,
@@ -217,6 +229,7 @@ def fit_and_project(
         market_home_spreads(slate),
         layer_config,
         market_totals(slate),
+        absence_points,
     )
     # Published ratings are the fitted ratings: nothing from the coming
     # week's lines enters them, which live on the projection rows instead.
