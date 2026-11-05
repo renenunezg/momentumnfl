@@ -484,16 +484,18 @@ def rating_reliability(
     return out
 
 
-def band_at(model: RatingModel, games: pd.Series) -> np.ndarray:
-    """GRADE_SD x sqrt(1 - r), r the rating's reliability at the player's games
-    on the position grade's curve (``grade.reliability_at``)."""
+def reliability_of(model: RatingModel, games: pd.Series) -> np.ndarray:
+    """The rating's reliability at each player's games on the position grade's
+    curve (``grade.reliability_at``), never falling as games are added: a dip
+    between measured points is sampling noise, not less information."""
     table = pd.DataFrame(
-        [(g, r) for g, r in model.reliability.items() if np.isfinite(r)],
+        sorted((g, r) for g, r in model.reliability.items() if np.isfinite(r)),
         columns=["games", "correlation"],
     )
     if table.empty:
-        return np.full(len(games), np.nan)
-    return GRADE_SD * np.sqrt(1.0 - reliability_at(table, games))
+        raise ValueError(f"{model.model_version} carries no rating reliability")
+    table["correlation"] = table["correlation"].cummax()
+    return reliability_at(table, games)
 
 
 def fit_rating(
@@ -640,7 +642,14 @@ def week_rows(
 def score_week(
     games: pd.DataFrame, model: RatingModel, spec: RatingSpec, season: int, week: int
 ) -> pd.DataFrame:
-    """Rating, grade, band and raw measures for every player at ``week``."""
+    """Rating, grade, band and raw measures for every player at ``week``.
+
+    The grade is the best estimate of the player's true standing in units of
+    the true spread: with ``r`` the rating's reliability at his games, the
+    rating's z among the week's players times ``sqrt(r)``. A rating that is
+    mostly sample noise therefore stays near 50 instead of being stretched to
+    the full 20 to 80 scale. ``outcome_sd`` is the out-of-sample range of the
+    rest-of-season outcome in the rating's own units."""
     rows = week_rows(games, spec, season, week, model.shrinkage)
     if rows.empty:
         return rows
@@ -648,14 +657,15 @@ def score_week(
     rows["rating"] = rating
     sd = float(np.std(rating, ddof=1)) if len(rating) > 1 else np.nan
     z = (rating - rating.mean()) / sd if sd and sd > 0 else np.zeros(len(rating))
-    rows["grade"] = np.clip(GRADE_MEAN + GRADE_SD * z, GRADE_MIN, GRADE_MAX)
-    rows["grade_sd"] = band_at(model, rows["games"])
-    nearest = min(model.residual_sd, key=lambda w: abs(w - week))
-    rows["outcome_sd"] = (
-        GRADE_SD * model.residual_sd[nearest] / sd if sd and sd > 0 else np.nan
+    reliability = reliability_of(model, rows["games"])
+    rows["grade"] = np.clip(
+        GRADE_MEAN + GRADE_SD * np.sqrt(reliability) * z, GRADE_MIN, GRADE_MAX
     )
+    rows["grade_sd"] = GRADE_SD * np.sqrt(1.0 - reliability)
+    nearest = min(model.residual_sd, key=lambda w: abs(w - week))
+    rows["outcome_sd"] = model.residual_sd[nearest]
     rows["grade_percentile"] = (
-        (rows["rating"].rank(method="average") - 1) / max(len(rows) - 1, 1) * 100
+        (rows["grade"].rank(method="average") - 1) / max(len(rows) - 1, 1) * 100
     )
     names = (
         games[["athlete_id", "athlete_name"]]
