@@ -34,6 +34,10 @@ RANGE_Z = 1.2816
 PRIME_AGE = 27.0
 SEASON_GAMES = 17
 ROS_WEEK = 9
+ROOKIE_SEASONS = 4
+DRAFT_PICKS = 256
+PICK_WINDOW = 16
+UNRATED_POSITIONS = ("LT", "LG", "C", "RG", "RT", "K", "P", "LS")
 VALUED_GROUPS = ("QB", "RB", "WR", "TE", "DL", "LB", "DB")
 PLAYER_VALUE_ROW, TRADE_VALUE_ROW = "player_value", "trade_value"
 TRAITS_DIR = PROCESSED_DIR / "players" / "position_traits"
@@ -60,6 +64,7 @@ class ValueModel:
     price: float
     groups: dict[str, GroupFit]
     evaluation: dict
+    pick_values: list[float]
 
 
 def season_war(season: int, shrink_games: dict[str, float]) -> pd.DataFrame:
@@ -366,6 +371,47 @@ def _price(ends: dict[int, pd.DataFrame], contracts: pd.DataFrame, seasons) -> f
     return float(np.mean(prices))
 
 
+def _pick_values(
+    ends: dict[int, pd.DataFrame], contracts: pd.DataFrame, price: float
+) -> list[float]:
+    """Cap share by overall pick: a drafted player's discounted worth less his
+    cash over his first ``ROOKIE_SEASONS`` seasons, averaged per pick over every
+    draft with that many completed seasons and smoothed over neighbouring picks.
+    Picks at positions WAR does not rate are left out."""
+    last = max(ends)
+    caps = season_caps(last)
+    played = pd.concat(
+        [end.groupby("athlete_id")["war"].sum().rename(s) for s, end in ends.items()],
+        axis=1,
+    )
+    drafted = contracts[
+        contracts["draft_year"].between(min(ends), last - ROOKIE_SEASONS + 1)
+        & contracts["draft_overall"].le(DRAFT_PICKS)
+        & ~contracts["position"].isin(UNRATED_POSITIONS)
+    ]
+    rookie = drafted[
+        drafted["season"].sub(drafted["draft_year"]).between(0, ROOKIE_SEASONS - 1)
+    ]
+    wins = played.stack().rename("war")
+    wins.index.names = ["gsis_id", "season"]
+    rookie = rookie.join(wins, on=["gsis_id", "season"])
+    cap = caps.loc[rookie["season"]].to_numpy()
+    surplus = (
+        league_minimum(rookie["season"]) / cap
+        + rookie["war"].fillna(0.0).to_numpy() * price
+        - rookie["cash_paid"].to_numpy() / cap
+    ) * (1 + DISCOUNT_RATE) ** -(rookie["season"] - rookie["draft_year"]).to_numpy()
+    per_player = (
+        rookie.assign(surplus=surplus)
+        .groupby(["gsis_id", "draft_overall"])["surplus"]
+        .sum()
+    )
+    per_pick = per_player.groupby(level="draft_overall").mean()
+    per_pick = per_pick.reindex(range(1, DRAFT_PICKS + 1)).interpolate()
+    smoothed = per_pick.rolling(2 * PICK_WINDOW + 1, center=True, min_periods=1)
+    return [float(v) for v in smoothed.mean()]
+
+
 def fit_value_model(
     dev: tuple[int, ...], holdout: tuple[int, ...], shrink_games: dict[str, float]
 ) -> ValueModel:
@@ -414,8 +460,10 @@ def fit_value_model(
         passes = all(c["model"] < min(c["carry"], c["mean"]) for c in checks.values())
         groups[group] = GroupFit(**{**asdict(fit), "passes": passes})
         evaluation[group] = checks
-    price = _price(ends, read_contract_seasons(), dev)
-    return ValueModel(max(dev), price, groups, evaluation)
+    contracts = read_contract_seasons()
+    price = _price(ends, contracts, dev)
+    picks = _pick_values(ends, contracts, price)
+    return ValueModel(max(dev), price, groups, evaluation, picks)
 
 
 def value_model_path(last_dev: int) -> Path:
@@ -450,6 +498,21 @@ def _report(model: ValueModel) -> str:
         lines.append(
             f"| {group} | {fit.k:.1f} | {fit.decay:.2f} | {fit.k_ros:.2f} | "
             f"{fit.decay_ros:.2f} | {' | '.join(ratios)} | {fit.passes} |"
+        )
+    cap = season_caps(model.last_dev_season + 5).iloc[-1]
+    picks = np.array(model.pick_values) * cap
+    lines += [
+        "",
+        f"Draft pick value, millions of {model.last_dev_season + 5} cap dollars "
+        "(first, middle and last pick of each round):",
+        "",
+        "| Round | first | middle | last |",
+        "|---|---|---|---|",
+    ]
+    for first in range(0, DRAFT_PICKS, 32):
+        lines.append(
+            f"| {first // 32 + 1} | {picks[first]:.1f} | {picks[first + 15]:.1f} "
+            f"| {picks[first + 31]:.1f} |"
         )
     return "\n".join(lines) + "\n"
 
