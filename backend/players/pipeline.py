@@ -112,16 +112,21 @@ def war_rows(
     model: grade.GradeModel,
     credited: pd.DataFrame,
     projections: pd.DataFrame,
+    frames: pd.DataFrame,
 ) -> pd.DataFrame:
     """One ``war`` row per qualified credited player-week."""
+    special, kicked = war.special_credit(frames, snapshot)
     values = war.shrunk_credit(
         snapshot,
         model.epa_shrink_games,
         war.hurries(int(snapshot["season"].iloc[0])),
+        special,
     )
     if values.empty:
         return pd.DataFrame()
-    scored = war.wins_above_replacement(values, credited, projections)
+    scored = war.wins_above_replacement(
+        values, pd.concat([credited, kicked], ignore_index=True), projections
+    )
     out = scored.merge(
         _identity(snapshot).drop(columns="games"),
         on=["week", "athlete_id", "position_group"],
@@ -207,7 +212,7 @@ def value_rows(
 
 
 def score_snapshot(
-    snapshot, model, credited, projections, as_of: datetime
+    snapshot, model, credited, frames, projections, as_of: datetime
 ) -> pd.DataFrame:
     """Trait rows plus the grade, war, spread value, player value and trade value
     rows, in ``POSITION_TRAIT_COLUMNS``."""
@@ -225,7 +230,7 @@ def score_snapshot(
         pd.MultiIndex.from_frame(traits[["position_group", "trait"]])
     ).to_numpy(float)
     traits["points_above_replacement"] = np.nan
-    war_scored = war_rows(snapshot, model, credited, projections)
+    war_scored = war_rows(snapshot, model, credited, projections, frames)
     parts = [
         traits,
         grade_rows(snapshot, model),
@@ -264,7 +269,9 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
     projections = war.season_projections(
         season, games, ingest.read("schedules", season)
     )
-    out = score_snapshot(snapshot, model, built["credited"], projections, as_of)
+    out = score_snapshot(
+        snapshot, model, built["credited"], built["frames"], projections, as_of
+    )
     out = with_fitted_ratings(out, season, as_of)
     store.write_processed(out, *position_traits_artifact(season))
     from backend.players.ratings import rating_games

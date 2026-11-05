@@ -16,6 +16,10 @@ a clean pocket, 2016 to 2021 regular-season dropbacks at win probability 0.1 to
 0.9 (nflverse participation pressure flag). The absence layer reads the credit
 without it, since the charting starts in 2018.
 
+Kickers and punters take their credit from their traits' per-game totals,
+``SPECIAL_CREDIT``: field goals made above expectation at three points each,
+and punt expected points above the league average.
+
 A point is worth more wins in a close game than in a rout, so each credited
 game is weighted by the win-probability slope per point at the team model's
 pregame projection, ``leverage_g = phi(home_margin_g / margin_sd_g) /
@@ -38,6 +42,8 @@ from backend.players.season_stats import pfr_ids
 log = logging.getLogger(__name__)
 
 REPLACEMENT_QUANTILE = 0.25
+# Group: (trait whose per-game numerator is the credit, points per unit).
+SPECIAL_CREDIT = {"K": ("k.field_goal", 3.0), "P": ("p.punt_epa", 1.0)}
 HURRY_EPA = 0.166
 WAR_COLUMNS = [
     "athlete_id",
@@ -154,17 +160,58 @@ def hurries(season: int) -> pd.DataFrame:
     return weekly.stack().rename("hurries").reset_index()
 
 
+def special_credit(
+    frames: pd.DataFrame, snapshot: pd.DataFrame
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Kicker and punter credit: ``athlete_id, position_group, week, games,
+    value`` per qualified player-week (points per game through the week), and
+    their ``athlete_id, game_id, model_week`` credited games."""
+    traits = {trait: group for group, (trait, _) in SPECIAL_CREDIT.items()}
+    points = {trait: scale for trait, scale in SPECIAL_CREDIT.values()}
+    rows = frames[frames["trait"].isin(traits)].astype({"athlete_id": str})
+    rows = rows.dropna(subset=["numerator"]).assign(
+        position_group=rows["trait"].map(traits),
+        points=rows["numerator"] * rows["trait"].map(points),
+    )
+    credited = rows[["athlete_id", "game_id", "model_week"]].drop_duplicates(
+        ignore_index=True
+    )
+    weekly = rows.groupby(["athlete_id", "position_group", "model_week"]).agg(
+        points=("points", "sum"), games=("game_id", "nunique")
+    )
+    qualified = snapshot[
+        snapshot["trait"].isin(traits) & snapshot["qualified"].eq(True)
+    ].astype({"athlete_id": str})[["athlete_id", "position_group", "week"]]
+    weeks = sorted(qualified["week"].unique())
+    totals = []
+    for column in ("points", "games"):
+        wide = weekly[column].unstack().reindex(columns=weeks).fillna(0.0)
+        wide.columns.name = "week"
+        totals.append(wide.cumsum(axis=1).stack().rename(column))
+    out = pd.concat(totals, axis=1).reset_index()
+    out = out.merge(qualified, on=["athlete_id", "position_group", "week"])
+    out = out[out["games"].gt(0)]
+    return (
+        out.assign(value=out["points"] / out["games"])[
+            ["athlete_id", "position_group", "week", "games", "value"]
+        ],
+        credited,
+    )
+
+
 def shrunk_credit(
     snapshot: pd.DataFrame,
     shrink_games: dict[str, float],
     hurried: pd.DataFrame | None = None,
+    special: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Per qualified player-week: shrunk EPA credit per game and the replacement level.
 
     ``snapshot`` holds trait snapshot rows; only ``epa.credit`` rows of qualified
     players are read. The shrinkage ``k`` per group comes from ``shrink_games``
     (0 where absent). ``hurried`` (``hurries`` output) adds the weighted
-    ``HURRY_EPA`` per hurry through the week to the credit.
+    ``HURRY_EPA`` per hurry through the week to the credit; ``special``
+    (``special_credit`` rows) adds kickers and punters.
     """
     rows = snapshot[snapshot["trait"].eq(EPA_TRAIT) & snapshot["qualified"].eq(True)]
     rows = rows.dropna(subset=["value"]).astype({"athlete_id": str})
@@ -177,6 +224,8 @@ def shrunk_credit(
             * count.fillna(0.0).to_numpy()
             / rows["games"].astype(float)
         )
+    if special is not None:
+        rows = pd.concat([rows, special], ignore_index=True)
     keys = ["week", "position_group"]
     mean = rows.groupby(keys)["value"].transform("mean")
     k = rows["position_group"].map(shrink_games).fillna(0.0).astype(float)

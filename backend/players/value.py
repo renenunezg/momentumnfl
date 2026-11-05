@@ -19,7 +19,7 @@ from scipy.optimize import minimize
 
 from backend.awards import ingest
 from backend.config import PROCESSED_DIR, RAW_DIR
-from backend.players import EPA_TRAIT, war
+from backend.players import war
 from backend.players.context import load_games
 from backend.players.contracts import (
     PAY_WEEKS,
@@ -43,8 +43,8 @@ DRAFT_PICKS = 256
 PICK_WINDOW = 16
 BOOTSTRAP_DRAWS = 2000
 CLEARLY_WORSE = 0.95
-UNRATED_POSITIONS = ("LT", "LG", "C", "RG", "RT", "K", "P", "LS")
-VALUED_GROUPS = ("QB", "RB", "WR", "TE", "DL", "LB", "DB")
+UNRATED_POSITIONS = ("LT", "LG", "C", "RG", "RT", "LS")
+VALUED_GROUPS = ("QB", "RB", "WR", "TE", "DL", "LB", "DB", "K", "P")
 PLAYER_VALUE_ROW, TRADE_VALUE_ROW = "player_value", "trade_value"
 TRAITS_DIR = PROCESSED_DIR / "players" / "position_traits"
 
@@ -78,17 +78,17 @@ def season_war(season: int, shrink_games: dict[str, float]) -> pd.DataFrame:
     week of a scored season."""
     snapshot = pd.read_parquet(TRAITS_DIR / f"snapshots_{season}.parquet")
     credited = pd.read_parquet(TRAITS_DIR / f"credited_{season}.parquet")
+    frames = pd.read_parquet(TRAITS_DIR / f"frames_{season}.parquet")
     projections = war.season_projections(
         season, load_games(season), ingest.read("schedules", season)
     )
+    special, kicked = war.special_credit(frames, snapshot)
     scored = war.wins_above_replacement(
-        war.shrunk_credit(snapshot, shrink_games, war.hurries(season)),
-        credited,
+        war.shrunk_credit(snapshot, shrink_games, war.hurries(season), special),
+        pd.concat([credited, kicked], ignore_index=True),
         projections,
     )
-    teams = snapshot.loc[
-        snapshot["trait"].eq(EPA_TRAIT), ["week", "athlete_id", "team"]
-    ].astype({"athlete_id": str})
+    teams = snapshot[["week", "athlete_id", "team"]].astype({"athlete_id": str})
     return scored.merge(
         teams.drop_duplicates(["week", "athlete_id"]), on=["week", "athlete_id"]
     ).rename(columns={"wins_above_replacement": "war"})[

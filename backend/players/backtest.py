@@ -20,7 +20,7 @@ import pandas as pd
 
 from backend.config import HISTORY_START_SEASON, PROCESSED_DIR, RAW_DIR
 from backend.etl import store
-from backend.players import EPA_TRAIT, TRAITS, UNIT_PREFIX, grade, snapshots
+from backend.players import EPA_TRAIT, TRAITS, UNIT_PREFIX, grade, snapshots, war
 from backend.players.context import (
     SeasonContext,
     load_plays,
@@ -415,8 +415,11 @@ def reliability_table(dev, pooled_traits, composite) -> pd.DataFrame:
 
 
 def epa_shrink_games(pooled: pd.DataFrame) -> dict[str, float]:
-    """Per group, the games at which ``epa.credit`` pooled reliability reaches 0.5."""
-    rows = pooled[pooled["trait"].eq(EPA_TRAIT)][
+    """Per group, the games at which pooled reliability of the group's credit
+    (``epa.credit``, or the kicker and punter credit traits) reaches 0.5."""
+    special = {group: trait for group, (trait, _) in war.SPECIAL_CREDIT.items()}
+    credit = pooled["position_group"].map(special).fillna(EPA_TRAIT)
+    rows = pooled[pooled["trait"].eq(credit)][
         ["position_group", "games", "correlation"]
     ]
     return grade.shrink_games_from(rows)
