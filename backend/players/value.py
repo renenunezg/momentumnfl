@@ -20,7 +20,13 @@ from backend.awards import ingest
 from backend.config import PROCESSED_DIR, RAW_DIR
 from backend.players import EPA_TRAIT, war
 from backend.players.context import load_games
-from backend.players.contracts import league_minimum, read_contract_seasons, season_caps
+from backend.players.contracts import (
+    PAY_WEEKS,
+    acquirer_schedule,
+    league_minimum,
+    read_contract_seasons,
+    season_caps,
+)
 from backend.players.grade import MODELS_DIR
 
 DISCOUNT_RATE = 0.08
@@ -147,6 +153,108 @@ def fair_values(
         owed = guaranteed[:, t] + factor * owed
         value = np.maximum(worth[:, t] - cash[:, t] + factor * value, -owed)
     return value
+
+
+def _team_games(season: int) -> tuple[pd.Series, pd.Series]:
+    """Regular-season games played and remaining per team."""
+    games = load_games(season)
+    sides = pd.concat(
+        [
+            games[["home_team", "completed"]].rename(columns={"home_team": "team"}),
+            games[["away_team", "completed"]].rename(columns={"away_team": "team"}),
+        ]
+    )
+    played = sides.groupby("team")["completed"].sum()
+    return played, sides.groupby("team").size() - played
+
+
+def _expected_games(
+    frame: pd.DataFrame, fit: pd.DataFrame, season: int, seasons: int
+) -> np.ndarray:
+    """Games per season: the team's remaining games at the player's share so far,
+    then the fitted next-season games from the season before."""
+    played, remaining = _team_games(season)
+    share = (frame["games_0"] / frame["team"].map(played)).clip(upper=1.0).fillna(0.0)
+    out = np.empty((len(frame), seasons))
+    out[:, 0] = (frame["team"].map(remaining).fillna(0.0) * share).to_numpy()
+    full = frame["games_0"].to_numpy(float) + out[:, 0]
+    for t in range(1, seasons):
+        full = np.clip(
+            fit["games_a"].to_numpy() + fit["games_b"].to_numpy() * full,
+            0,
+            SEASON_GAMES,
+        )
+        out[:, t] = full
+    return out
+
+
+def score_values(
+    current: pd.DataFrame,
+    prior: pd.DataFrame,
+    model: ValueModel,
+    season: int,
+    week: int,
+) -> pd.DataFrame:
+    """``athlete_id, position_group, trait, value, uncertainty`` rows, in
+    millions of ``season`` dollars, for players at groups that passed holdout with
+    an active contract. ``current`` and ``prior`` are this season's latest and last
+    season's final WAR rows."""
+    passed = {g: fit for g, fit in model.groups.items() if fit.passes}
+    inputs = _inputs(current, prior, season)
+    inputs = (
+        inputs[inputs["position_group"].isin(passed)]
+        .sort_values("games_0", ascending=False, kind="stable")
+        .drop_duplicates("athlete_id")
+        .reset_index(drop=True)
+    )
+    pay_weeks_left = max(0, PAY_WEEKS - week)
+    schedule = acquirer_schedule(read_contract_seasons(), season, pay_weeks_left)
+    schedule = schedule[schedule["gsis_id"].isin(inputs["athlete_id"])]
+    inputs = inputs[inputs["athlete_id"].isin(schedule["gsis_id"])].reset_index(
+        drop=True
+    )
+    seasons = int(schedule["season"].max()) - season + 1
+    years = np.arange(season, season + seasons)
+    owed = schedule.pivot(index="gsis_id", columns="season").reindex(
+        index=inputs["athlete_id"],
+        columns=pd.MultiIndex.from_product([["cash", "guaranteed"], years]),
+    )
+    in_contract = owed["cash"].notna().to_numpy()
+    caps = season_caps(int(years[-1])).loc[years].to_numpy()
+    cash = owed["cash"].fillna(0.0).to_numpy() / caps
+    guaranteed = owed["guaranteed"].fillna(0.0).to_numpy() / caps
+    fit = _group_params(passed).loc[inputs["position_group"]]
+    games = _expected_games(inputs, fit, season, seasons)
+    minimum = league_minimum(years) / caps
+    minimum[0] *= pay_weeks_left / PAY_WEEKS
+    discount = (1 + DISCOUNT_RATE) ** -np.arange(seasons)
+    rates = projected_rates(inputs, passed, seasons)
+    spread = RANGE_Z * fit["resid_sd"].to_numpy()[:, None]
+    values = {}
+    for name, rate in (
+        ("mid", rates),
+        ("low", rates - spread),
+        ("high", rates + spread),
+    ):
+        worth = np.where(in_contract, minimum + rate * games * model.price, 0.0)
+        values[name] = (
+            (worth * discount).sum(axis=1) * caps[0],
+            fair_values(worth, cash, guaranteed, DISCOUNT_RATE) * caps[0],
+        )
+    rows = []
+    for i, trait in enumerate((PLAYER_VALUE_ROW, TRADE_VALUE_ROW)):
+        rows.append(
+            pd.DataFrame(
+                {
+                    "athlete_id": inputs["athlete_id"],
+                    "position_group": inputs["position_group"],
+                    "trait": trait,
+                    "value": values["mid"][i],
+                    "uncertainty": (values["high"][i] - values["low"][i]) / 2,
+                }
+            )
+        )
+    return pd.concat(rows, ignore_index=True)
 
 
 def _end_of_season(weekly: pd.DataFrame) -> pd.DataFrame:

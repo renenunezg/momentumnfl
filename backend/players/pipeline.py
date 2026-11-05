@@ -13,7 +13,7 @@ import pandas as pd
 
 from backend.config import PROCESSED_DIR
 from backend.etl import store
-from backend.players import EPA_TRAIT, MODEL_VERSION, grade, season_stats, war
+from backend.players import EPA_TRAIT, MODEL_VERSION, grade, season_stats, value, war
 from backend.players.backtest import build_season_traits
 from backend.players.context import load_games, load_season_context
 from backend.players.expectations import (
@@ -169,11 +169,44 @@ def spread_rows(snapshot: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def value_rows(
+    snapshot: pd.DataFrame, model: grade.GradeModel, war_scored: pd.DataFrame
+) -> pd.DataFrame:
+    """The latest week's ``player_value`` and ``trade_value`` rows."""
+    if war_scored.empty:
+        return pd.DataFrame()
+    season = int(snapshot["season"].iloc[0])
+    week = int(war_scored["week"].max())
+    current = war_scored[war_scored["week"].eq(week)].rename(
+        columns={"wins_above_replacement": "war"}
+    )
+    prior = value.season_war(season - 1, model.epa_shrink_games)
+    scored = value.score_values(
+        current,
+        prior[prior["week"].eq(prior["week"].max())],
+        value.load_value_model(season),
+        season,
+        week,
+    )
+    identity = _identity(snapshot)
+    out = scored.merge(
+        identity[identity["week"].eq(week)], on=["athlete_id", "position_group"]
+    )
+    out["percentile"] = _percentile(out["value"], [out["trait"], out["position_group"]])
+    return out.assign(
+        kind="counted",
+        in_grade=False,
+        qualified=True,
+        reliability=np.nan,
+        points_above_replacement=np.nan,
+    )
+
+
 def score_snapshot(
     snapshot, model, credited, projections, as_of: datetime
 ) -> pd.DataFrame:
-    """Trait rows plus the grade, war and spread value rows, in
-    ``POSITION_TRAIT_COLUMNS``."""
+    """Trait rows plus the grade, war, spread value, player value and trade value
+    rows, in ``POSITION_TRAIT_COLUMNS``."""
     weighted = model.weights[model.weights["weight"].ne(0)]
     weighted_keys = set(zip(weighted["position_group"], weighted["trait"]))
     traits = snapshot.astype({"athlete_id": str}).copy()
@@ -188,11 +221,13 @@ def score_snapshot(
         pd.MultiIndex.from_frame(traits[["position_group", "trait"]])
     ).to_numpy(float)
     traits["points_above_replacement"] = np.nan
+    war_scored = war_rows(snapshot, model, credited, projections)
     parts = [
         traits,
         grade_rows(snapshot, model),
-        war_rows(snapshot, model, credited, projections),
+        war_scored,
         spread_rows(snapshot),
+        value_rows(snapshot, model, war_scored),
     ]
     out = pd.concat([part for part in parts if not part.empty], ignore_index=True)
     out["reliability"] = out.get("reliability", np.nan)
