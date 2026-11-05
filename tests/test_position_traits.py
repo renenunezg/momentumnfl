@@ -1,6 +1,6 @@
 """Position traits must never read the week being rated, the frozen grade
-model must refuse a season it was developed on, and a trade value charges the
-acquirer only the cash it would owe."""
+model must refuse a season it was developed on, and a contract surplus charges
+the acquirer only the cash it would owe."""
 
 import numpy as np
 import pandas as pd
@@ -84,7 +84,7 @@ def test_bootstrap_spearman_matches_the_published_definition():
     )
 
 
-def test_trade_value_charges_the_acquirer_only_its_cash_and_cuts_when_cheaper():
+def test_contract_surplus_charges_the_acquirer_only_its_cash_and_cuts_when_cheaper():
     rows = pd.DataFrame(
         {
             "gsis_id": "p",

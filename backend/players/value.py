@@ -1,11 +1,11 @@
-"""Player value and trade value: projected wins above replacement priced in cap share.
+"""Player value and contract surplus: projected wins priced in cap share.
 
-A player's per-game WAR is shrunk toward his group's development mean, his
-previous season counted at a fitted decay, and aged by a fitted linear term each
+A player's per-game WAR is shrunk toward his group's development mean, his two
+previous seasons counted at fitted decays, and aged by a fitted linear term each
 later season. A win costs the cap the league spends above the minimum per net
 win on the groups WAR covers. Worth is the minimum salary plus priced wins; the
-trade value is worth less the acquiring team's cash, each later season kept only
-while keeping beats cutting him and paying the rest of his guarantees.
+contract surplus is worth less the acquiring team's cash, each later season kept
+only while keeping beats cutting him and paying the rest of his guarantees.
 """
 
 import json
@@ -45,7 +45,7 @@ BOOTSTRAP_DRAWS = 2000
 CLEARLY_WORSE = 0.95
 UNRATED_POSITIONS = ("LT", "LG", "C", "RG", "RT", "LS")
 VALUED_GROUPS = ("QB", "RB", "WR", "TE", "DL", "LB", "DB", "K", "P")
-PLAYER_VALUE_ROW, TRADE_VALUE_ROW = "player_value", "trade_value"
+PLAYER_VALUE_ROW, SURPLUS_ROW = "player_value", "contract_surplus"
 INPUT_COLUMNS = ["rate_0", "games_0", "rate_1", "games_1", "rate_2", "games_2"]
 TRAITS_DIR = PROCESSED_DIR / "players" / "position_traits"
 
@@ -275,7 +275,7 @@ def score_values(
             fair_values(worth, cash, guaranteed, DISCOUNT_RATE) * caps[0],
         )
     rows = []
-    for i, trait in enumerate((PLAYER_VALUE_ROW, TRADE_VALUE_ROW)):
+    for i, trait in enumerate((PLAYER_VALUE_ROW, SURPLUS_ROW)):
         rows.append(
             pd.DataFrame(
                 {

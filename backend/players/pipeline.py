@@ -181,7 +181,7 @@ def spread_rows(snapshot: pd.DataFrame) -> pd.DataFrame:
 def value_rows(
     snapshot: pd.DataFrame, model: grade.GradeModel, war_scored: pd.DataFrame
 ) -> pd.DataFrame:
-    """The latest week's ``player_value`` and ``trade_value`` rows."""
+    """The latest week's ``player_value`` and ``contract_surplus`` rows."""
     if war_scored.empty:
         return pd.DataFrame()
     season = int(snapshot["season"].iloc[0])
@@ -215,7 +215,7 @@ def value_rows(
 def score_snapshot(
     snapshot, model, credited, frames, projections, as_of: datetime
 ) -> pd.DataFrame:
-    """Trait rows plus the grade, war, spread value, player value and trade value
+    """Trait rows plus the grade, war, spread value, player value and contract surplus
     rows, in ``POSITION_TRAIT_COLUMNS``."""
     weighted = model.weights[model.weights["weight"].ne(0)]
     weighted_keys = set(zip(weighted["position_group"], weighted["trait"]))
@@ -318,7 +318,7 @@ def with_fitted_ratings(
     if rated.empty:
         return out
     keep = ~out["position_group"].isin(RATED_POSITIONS) | out["trait"].isin(
-        [WAR_ROW, SPREAD_ROW, value.PLAYER_VALUE_ROW, value.TRADE_VALUE_ROW]
+        [WAR_ROW, SPREAD_ROW, value.PLAYER_VALUE_ROW, value.SURPLUS_ROW]
     )
     rated = rated.reindex(columns=out.columns)
     return pd.concat([out[keep], rated], ignore_index=True).sort_values(
