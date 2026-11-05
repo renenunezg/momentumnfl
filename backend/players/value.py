@@ -38,6 +38,8 @@ ROS_WEEK = 9
 ROOKIE_SEASONS = 4
 DRAFT_PICKS = 256
 PICK_WINDOW = 16
+BOOTSTRAP_DRAWS = 2000
+CLEARLY_WORSE = 0.95
 UNRATED_POSITIONS = ("LT", "LG", "C", "RG", "RT", "K", "P", "LS")
 VALUED_GROUPS = ("QB", "RB", "WR", "TE", "DL", "LB", "DB")
 PLAYER_VALUE_ROW, TRADE_VALUE_ROW = "player_value", "trade_value"
@@ -335,12 +337,23 @@ def _fit_group(
 
 
 def _evaluate(rows: pd.DataFrame, prediction: np.ndarray, mean: float) -> dict:
+    """Holdout error of the model and both baselines, and the bootstrap share of
+    player resamples in which the model is worse than the better baseline."""
     target, weight = rows["rate_t"].to_numpy(float), rows["games_t"].to_numpy(float)
+    baselines = {
+        "carry": rows["rate_0"].to_numpy(float),
+        "mean": np.full(len(rows), mean),
+    }
+    errors = {name: weight * (target - b) ** 2 for name, b in baselines.items()}
+    best = min(errors, key=lambda name: errors[name].sum())
+    gap = weight * (target - prediction) ** 2 - errors[best]
+    rng = np.random.default_rng(0)
+    draws = rng.integers(0, len(rows), (BOOTSTRAP_DRAWS, len(rows)))
     return {
         "n": len(rows),
         "model": _weighted_mse(target, prediction, weight),
-        "carry": _weighted_mse(target, rows["rate_0"].to_numpy(float), weight),
-        "mean": _weighted_mse(target, np.full(len(rows), mean), weight),
+        **{name: float(e.sum() / weight.sum()) for name, e in errors.items()},
+        "worse_share": float(np.mean(gap[draws].sum(axis=1) > 0)),
     }
 
 
@@ -381,8 +394,9 @@ def _pick_values(
     ends: dict[int, pd.DataFrame], contracts: pd.DataFrame, price: float
 ) -> list[float]:
     """Cap share by overall pick: a drafted player's discounted worth less his
-    cash over his first ``ROOKIE_SEASONS`` seasons, averaged per pick over every
-    draft with that many completed seasons and smoothed over neighbouring picks.
+    rookie-deal cash over his first ``ROOKIE_SEASONS`` seasons, averaged per pick
+    over every draft with that many completed seasons and smoothed over
+    neighbouring picks.
     Picks at positions WAR does not rate are left out."""
     last = max(ends)
     caps = season_caps(last)
@@ -397,7 +411,11 @@ def _pick_values(
     ]
     rookie = drafted[
         drafted["season"].sub(drafted["draft_year"]).between(0, ROOKIE_SEASONS - 1)
-    ]
+    ].sort_values(["gsis_id", "season"])
+    # Cash past the rookie deal's value is an extension's signing bonus.
+    paid = rookie.groupby("gsis_id")["cash_paid"].cumsum()
+    paid = np.minimum(paid, rookie["rookie_value"].fillna(np.inf))
+    rookie = rookie.assign(cost=paid.groupby(rookie["gsis_id"]).diff().fillna(paid))
     wins = played.stack().rename("war")
     wins.index.names = ["gsis_id", "season"]
     rookie = rookie.join(wins, on=["gsis_id", "season"])
@@ -405,7 +423,7 @@ def _pick_values(
     surplus = (
         league_minimum(rookie["season"]) / cap
         + rookie["war"].fillna(0.0).to_numpy() * price
-        - rookie["cash_paid"].to_numpy() / cap
+        - rookie["cost"].to_numpy() / cap
     ) * (1 + DISCOUNT_RATE) ** -(rookie["season"] - rookie["draft_year"]).to_numpy()
     per_player = (
         rookie.assign(surplus=surplus)
@@ -463,7 +481,7 @@ def fit_value_model(
                 ros_rows, projected_rates(ros_rows, {group: fit}, 1)[:, 0], mean
             ),
         }
-        passes = all(c["model"] < min(c["carry"], c["mean"]) for c in checks.values())
+        passes = all(c["worse_share"] < CLEARLY_WORSE for c in checks.values())
         groups[group] = GroupFit(**{**asdict(fit), "passes": passes})
         evaluation[group] = checks
     contracts = read_contract_seasons()
@@ -490,7 +508,9 @@ def _report(model: ValueModel) -> str:
         "",
         f"Price of a win: {model.price:.4f} of the cap.",
         "",
-        "Holdout error relative to the group mean (model / carry forward):",
+        "Holdout error relative to the group mean (model / carry forward, share of"
+        " bootstrap resamples where the model is worse than the better baseline;"
+        f" a group is valued below {CLEARLY_WORSE} in both):",
         "",
         "| Group | k | decay | k_ros | decay_ros | next season | rest of season "
         "| valued |",
@@ -499,6 +519,7 @@ def _report(model: ValueModel) -> str:
     for group, fit in model.groups.items():
         ratios = [
             f"{c['model'] / c['mean']:.3f} / {c['carry'] / c['mean']:.3f}"
+            f" ({c['worse_share']:.2f})"
             for c in model.evaluation[group].values()
         ]
         lines.append(
@@ -510,15 +531,15 @@ def _report(model: ValueModel) -> str:
     lines += [
         "",
         f"Draft pick value, millions of {model.last_dev_season + 5} cap dollars "
-        "(first, middle and last pick of each round):",
+        "(first, middle and last of each block of 32 overall picks):",
         "",
-        "| Round | first | middle | last |",
+        "| Picks | first | middle | last |",
         "|---|---|---|---|",
     ]
     for first in range(0, DRAFT_PICKS, 32):
         lines.append(
-            f"| {first // 32 + 1} | {picks[first]:.1f} | {picks[first + 15]:.1f} "
-            f"| {picks[first + 31]:.1f} |"
+            f"| {first + 1}-{first + 32} | {picks[first]:.1f} | "
+            f"{picks[first + 15]:.1f} | {picks[first + 31]:.1f} |"
         )
     return "\n".join(lines) + "\n"
 

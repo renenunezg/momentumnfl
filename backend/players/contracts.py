@@ -1,8 +1,9 @@
 """OverTheCap contracts as one row per player and season, in millions.
 
 Each player keeps his latest contract row, whose season history covers his
-career. The acquiring team of a trade pays cash only: signing bonus money
-already paid stays with the trading team.
+career, and the total value of the contract he signed in his draft year. The
+acquiring team of a trade pays cash only: signing bonus money already paid stays
+with the trading team.
 """
 
 import numpy as np
@@ -22,6 +23,7 @@ CONTRACT_SEASON_COLUMNS = [
     "guaranteed_salary",
     "cap_number",
     "cash_paid",
+    "rookie_value",
 ]
 MONEY_COLUMNS = ["base_salary", "guaranteed_salary", "cap_number", "cash_paid"]
 PAY_WEEKS = 18
@@ -65,10 +67,16 @@ def league_minimum(seasons) -> np.ndarray:
 
 
 def contract_seasons(raw: pd.DataFrame) -> pd.DataFrame:
-    latest = (
-        raw.dropna(subset=["gsis_id"])
-        .sort_values(["is_active", "year_signed"])
-        .drop_duplicates("gsis_id", keep="last")
+    raw = raw.dropna(subset=["gsis_id"])
+    rookie_value = (
+        raw[raw["year_signed"].eq(raw["draft_year"])]
+        .sort_values("year_signed")
+        .drop_duplicates("gsis_id")
+        .set_index("gsis_id")["value"]
+        .astype(float)
+    )
+    latest = raw.sort_values(["is_active", "year_signed"]).drop_duplicates(
+        "gsis_id", keep="last"
     )
     rows = (
         latest[
@@ -90,6 +98,7 @@ def contract_seasons(raw: pd.DataFrame) -> pd.DataFrame:
     out = out[out["year"].notna() & out["year"].ne("Total")]
     out["season"] = out["year"].astype(int)
     out[MONEY_COLUMNS] = out[MONEY_COLUMNS].astype(float).fillna(0.0)
+    out["rookie_value"] = out["gsis_id"].map(rookie_value)
     return out[CONTRACT_SEASON_COLUMNS].reset_index(drop=True)
 
 
