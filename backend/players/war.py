@@ -140,7 +140,9 @@ def hurries(season: int) -> pd.DataFrame:
     """``athlete_id, week, hurries``: regular-season hurries through each week."""
     path = RAW_DIR / "pfr_def" / f"{season}.parquet"
     if not path.exists():
-        return pd.DataFrame(columns=["athlete_id", "week", "hurries"])
+        return pd.DataFrame({"athlete_id": [], "week": [], "hurries": []}).astype(
+            {"athlete_id": str, "week": int, "hurries": float}
+        )
     rows = pd.read_parquet(
         path, columns=["game_type", "week", "pfr_player_id", "def_times_hurried"]
     )
@@ -250,7 +252,11 @@ def wins_above_replacement(
     games at or before the snapshot week.
     """
     leverage = game_leverage(projections)
-    mean = float(leverage.mean()) if leverage.notna().any() else np.nan
+    if leverage.isna().all():
+        raise ValueError(
+            "No game has a projection to weight wins by; run production-artifacts"
+        )
+    mean = float(leverage.mean())
     games = (
         credited_games[["athlete_id", "game_id", "model_week"]]
         .astype({"athlete_id": str})

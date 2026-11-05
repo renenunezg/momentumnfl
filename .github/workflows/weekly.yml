@@ -149,15 +149,6 @@ jobs:
             poetry run python -m backend position-traits-fit \
               --dev-seasons $(seq 2016 $((last - 1))) --validate "$last"
           fi
-      - name: Build position traits for the absence layer
-        if: steps.context.outputs.active == 'true' && inputs.playoffs_only != true
-        run: |
-          poetry run python -m backend player-sources --seasons $(seq 2016 ${{ steps.context.outputs.season }})
-          ls backend/data/processed/players/models/player_value_*.json >/dev/null 2>&1 \
-            || poetry run python -m backend player-value-fit
-          poetry run python -m backend position-traits --seasons ${{ steps.context.outputs.season }}
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
       - name: Restore approved model artifacts
         if: steps.context.outputs.active == 'true'
         uses: actions/cache@v4
@@ -177,6 +168,15 @@ jobs:
           path: backend/data/processed/calibration
           retention-days: 90
           if-no-files-found: error
+      - name: Build position traits for the absence layer
+        if: steps.context.outputs.active == 'true' && inputs.playoffs_only != true
+        run: |
+          poetry run python -m backend player-sources --seasons $(seq 2016 ${{ steps.context.outputs.season }})
+          ls backend/data/processed/players/models/player_value_*.json >/dev/null 2>&1 \
+            || poetry run python -m backend player-value-fit
+          poetry run python -m backend position-traits --seasons ${{ steps.context.outputs.season }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
       - name: Fit ratings and project next week
         if: steps.context.outputs.active == 'true' && inputs.playoffs_only != true
         run: >-
