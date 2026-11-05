@@ -4,7 +4,10 @@ A field goal is judged against what kicks of its distance usually make, from
 the frozen expectation tables. A punt is judged twice against the league
 through the previous week: by its gross distance, which the punter's leg owns,
 and by its expected points, which credit a short punt that pins the opponent
-from midfield and charge returns. Neither is opponent adjusted.
+from midfield. The expected points add back what the return took (``RETURN_EPA``
+per yard, return touchdown and lost fumble, least squares on 2016 to 2021
+regular-season punts), since coverage and the returner own it: punters' return
+cost does not follow them to a new team. Neither is opponent adjusted.
 """
 
 import pandas as pd
@@ -23,6 +26,9 @@ SPECIAL_TRAITS = {
     )
 }
 FIELD_GOAL_RESULTS = ("made", "missed", "blocked")
+# Expected points a punt's return outcome moved: per return yard, for a return
+# touchdown beyond its yards, and for the returning team's lost fumble.
+RETURN_EPA = {"return_yards": -0.0643, "return_touchdown": -0.851, "fumble_lost": 5.218}
 
 
 def _kick_rows(ctx: SeasonContext, play_type: str, player_column: str) -> pd.DataFrame:
@@ -68,16 +74,22 @@ def _above_league(punts: pd.DataFrame, value: pd.Series, spec) -> pd.DataFrame:
 
 
 def punter_traits(ctx: SeasonContext) -> pd.DataFrame:
-    """Gross yards and expected points per punt, each above the league average."""
+    """Gross yards and expected points before the return per punt, each above
+    the league average."""
     punts = _kick_rows(ctx, "punt", "punter_player_id")
     gross = punts[punts["kick_distance"].notna()]
     valued = punts[punts["epa"].notna()]
+    returned = sum(
+        valued[column].fillna(0.0) * epa for column, epa in RETURN_EPA.items()
+    )
     return pd.concat(
         [
             _above_league(
                 gross, gross["kick_distance"], SPECIAL_TRAITS["p.punt_average"]
             ),
-            _above_league(valued, valued["epa"], SPECIAL_TRAITS["p.punt_epa"]),
+            _above_league(
+                valued, valued["epa"] - returned, SPECIAL_TRAITS["p.punt_epa"]
+            ),
         ],
         ignore_index=True,
     )

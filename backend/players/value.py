@@ -46,6 +46,7 @@ CLEARLY_WORSE = 0.95
 UNRATED_POSITIONS = ("LT", "LG", "C", "RG", "RT", "LS")
 VALUED_GROUPS = ("QB", "RB", "WR", "TE", "DL", "LB", "DB", "K", "P")
 PLAYER_VALUE_ROW, TRADE_VALUE_ROW = "player_value", "trade_value"
+INPUT_COLUMNS = ["rate_0", "games_0", "rate_1", "games_1", "rate_2", "games_2"]
 TRAITS_DIR = PROCESSED_DIR / "players" / "position_traits"
 
 
@@ -53,8 +54,10 @@ TRAITS_DIR = PROCESSED_DIR / "players" / "position_traits"
 class GroupFit:
     k: float
     decay: float
+    decay2: float
     k_ros: float
     decay_ros: float
+    decay2_ros: float
     age_a: float
     age_b: float
     mean_rate: float
@@ -96,6 +99,13 @@ def season_war(season: int, shrink_games: dict[str, float]) -> pd.DataFrame:
     ]
 
 
+def final_war(season: int, shrink_games: dict[str, float]) -> pd.DataFrame | None:
+    """A scored season's final-week WAR rows, ``None`` before the first."""
+    if not (TRAITS_DIR / f"snapshots_{season}.parquet").exists():
+        return None
+    return _end_of_season(season_war(season, shrink_games))
+
+
 @cache
 def _birth_dates() -> pd.Series:
     players = pd.read_parquet(
@@ -112,10 +122,10 @@ def ages(season: int, athlete_ids: pd.Series) -> np.ndarray:
     return ((pd.Timestamp(season, 9, 1) - birth).dt.days / 365.25).to_numpy(float)
 
 
-def _shrunk(fit_k, decay, mean, r0, g0, r1, g1):
-    return mean + (g0 * (r0 - mean) + decay * g1 * (r1 - mean)) / (
-        fit_k + g0 + decay * g1
-    )
+def _shrunk(fit_k, decay, decay2, mean, r0, g0, r1, g1, r2, g2):
+    return mean + (
+        g0 * (r0 - mean) + decay * g1 * (r1 - mean) + decay2 * g2 * (r2 - mean)
+    ) / (fit_k + g0 + decay * g1 + decay2 * g2)
 
 
 def _aging(age_a, age_b, age, years: int) -> np.ndarray:
@@ -137,15 +147,19 @@ def projected_rates(
     frame: pd.DataFrame, groups: dict[str, GroupFit], seasons: int
 ) -> np.ndarray:
     """Per-game WAR, players x ``seasons`` from the rest of the current season on,
-    that column with the within-season fit. ``frame`` has ``position_group,
-    rate_0, games_0, rate_1, games_1, age``."""
+    that column with the within-season fit. ``frame`` has ``position_group``,
+    ``INPUT_COLUMNS`` and ``age``."""
     fit = _group_params(groups).loc[frame["position_group"]]
-    inputs = [
-        frame[c].to_numpy(float) for c in ["rate_0", "games_0", "rate_1", "games_1"]
-    ]
+    inputs = [frame[c].to_numpy(float) for c in INPUT_COLUMNS]
     mean = fit["mean_rate"].to_numpy()
-    rest = _shrunk(fit["k_ros"].to_numpy(), fit["decay_ros"].to_numpy(), mean, *inputs)
-    later = _shrunk(fit["k"].to_numpy(), fit["decay"].to_numpy(), mean, *inputs)
+    rest = _shrunk(
+        *(fit[c].to_numpy() for c in ("k_ros", "decay_ros", "decay2_ros")),
+        mean,
+        *inputs,
+    )
+    later = _shrunk(
+        *(fit[c].to_numpy() for c in ("k", "decay", "decay2")), mean, *inputs
+    )
     aging = _aging(
         fit["age_a"].to_numpy(),
         fit["age_b"].to_numpy(),
@@ -207,17 +221,17 @@ def _expected_games(
 
 def score_values(
     current: pd.DataFrame,
-    prior: pd.DataFrame,
+    priors: tuple[pd.DataFrame | None, ...],
     model: ValueModel,
     season: int,
     week: int,
 ) -> pd.DataFrame:
     """``athlete_id, position_group, trait, value, uncertainty`` rows, in
     millions of ``season`` dollars, for players at groups that passed holdout with
-    an active contract. ``current`` and ``prior`` are this season's latest and last
-    season's final WAR rows."""
+    an active contract. ``current`` is this season's latest WAR rows and
+    ``priors`` the final WAR rows of the two seasons before, most recent first."""
     passed = {g: fit for g, fit in model.groups.items() if fit.passes}
-    inputs = _inputs(current, prior, season)
+    inputs = _inputs(current, priors, season)
     inputs = (
         inputs[inputs["position_group"].isin(passed)]
         .sort_values("games_0", ascending=False, kind="stable")
@@ -281,22 +295,24 @@ def _end_of_season(weekly: pd.DataFrame) -> pd.DataFrame:
 
 
 def _inputs(
-    current: pd.DataFrame, previous: pd.DataFrame | None, season: int
+    current: pd.DataFrame, priors: tuple[pd.DataFrame | None, ...], season: int
 ) -> pd.DataFrame:
-    """Projection inputs per player: this season to date and last season."""
+    """Projection inputs per player: this season to date and the final WAR of the
+    seasons before it, most recent first (``None`` where unscored)."""
     out = current.assign(
         rate_0=current["war"] / current["games"], games_0=current["games"]
     )
-    if previous is None:
-        out = out.assign(rate_1=0.0, games_1=0.0)
-    else:
-        prior = previous.assign(
-            rate_1=previous["war"] / previous["games"], games_1=previous["games"]
+    for i, previous in enumerate(priors, start=1):
+        rate, games = f"rate_{i}", f"games_{i}"
+        if previous is None:
+            out = out.assign(**{rate: 0.0, games: 0.0})
+            continue
+        totals = previous.groupby("athlete_id").agg(
+            war=("war", "sum"), games=("games", "max")
         )
-        out = out.merge(
-            prior[["athlete_id", "rate_1", "games_1"]], on="athlete_id", how="left"
-        )
-        out[["rate_1", "games_1"]] = out[["rate_1", "games_1"]].fillna(0.0)
+        out[rate] = out["athlete_id"].map(totals["war"] / totals["games"])
+        out[games] = out["athlete_id"].map(totals["games"])
+        out[[rate, games]] = out[[rate, games]].fillna(0.0)
     out = out[out["position_group"].isin(VALUED_GROUPS) & out["games_0"].gt(0)]
     return out.assign(age=ages(season, out["athlete_id"])).reset_index(drop=True)
 
@@ -315,27 +331,29 @@ def _weighted_mse(target, prediction, weight) -> float:
 def _fit_group(
     rows: pd.DataFrame, mean: float, with_aging: bool
 ) -> tuple[np.ndarray, float]:
-    """``k, decay`` (and the aging terms when ``with_aging``) minimizing the
-    games-weighted squared error, and the residual sd at the fit."""
-    r0, g0, r1, g1, age, target, weight = (
-        rows[c].to_numpy(float)
-        for c in ["rate_0", "games_0", "rate_1", "games_1", "age", "rate_t", "games_t"]
+    """``k, decay, decay2`` (and the aging terms when ``with_aging``) minimizing
+    the games-weighted squared error, and the residual sd at the fit."""
+    inputs = [rows[c].to_numpy(float) for c in INPUT_COLUMNS]
+    age, target, weight = (
+        rows[c].to_numpy(float) for c in ["age", "rate_t", "games_t"]
     )
 
     # Unit-scaled search space: k in tens of games, aging in thousandths of a win.
-    units = np.array([10.0, 1.0, 1e-3, 1e-3])[: 4 if with_aging else 2]
+    units = np.array([10.0, 1.0, 1.0, 1e-3, 1e-3])[: 5 if with_aging else 3]
 
     def predict(x):
-        k, decay, *aging = x * units
-        shrunk = _shrunk(k, decay, mean, r0, g0, r1, g1)
+        k, decay, decay2, *aging = x * units
+        shrunk = _shrunk(k, decay, decay2, mean, *inputs)
         return shrunk + _aging(*aging, age, 1)[:, 1] if with_aging else shrunk
 
     scale = _weighted_mse(target, np.full(len(rows), mean), weight)
     result = minimize(
         lambda x: _weighted_mse(target, predict(x), weight) / scale,
-        x0=np.array([1.2, 0.5, 0.0, 0.0])[: len(units)],
+        x0=np.array([1.2, 0.5, 0.3, 0.0, 0.0])[: len(units)],
         method="Powell",
-        bounds=[(0.0, 6.0), (0.0, 1.0), (-20.0, 20.0), (-5.0, 5.0)][: len(units)],
+        bounds=[(0.0, 6.0), (0.0, 1.0), (0.0, 1.0), (-20.0, 20.0), (-5.0, 5.0)][
+            : len(units)
+        ],
     )
     return result.x * units, float(
         np.sqrt(_weighted_mse(target, predict(result.x), weight))
@@ -364,14 +382,14 @@ def _evaluate(rows: pd.DataFrame, prediction: np.ndarray, mean: float) -> dict:
 
 
 def _rest_of_season(
-    weekly: pd.DataFrame, previous: pd.DataFrame, season: int
+    weekly: pd.DataFrame, priors: tuple[pd.DataFrame | None, ...], season: int
 ) -> pd.DataFrame:
     """Inputs at the week ``ROS_WEEK`` snapshot, targeted at the rest of the season."""
     early = weekly[
         weekly["week"].eq(weekly.loc[weekly["week"].le(ROS_WEEK), "week"].max())
     ]
     end = _end_of_season(weekly)
-    rows = _inputs(early, previous, season).merge(
+    rows = _inputs(early, priors, season).merge(
         end[["athlete_id", "games", "war"]], on="athlete_id", suffixes=("", "_end")
     )
     rows["games_t"] = rows["games_end"] - rows["games"]
@@ -500,29 +518,38 @@ def fit_value_model(
     seasons = [*dev, *holdout]
     weekly = {s: season_war(s, shrink_games) for s in seasons}
     ends = {s: _end_of_season(frame) for s, frame in weekly.items()}
+
+    def priors(s):
+        return ends.get(s - 1), ends.get(s - 2)
+
     pairs = {
-        s: _with_target(_inputs(ends[s], ends.get(s - 1), s), ends[s + 1])
+        s: _with_target(_inputs(ends[s], priors(s), s), ends[s + 1])
         for s in seasons[:-1]
     }
     train = pd.concat([pairs[s] for s in dev if s + 1 in dev], ignore_index=True)
     train_ros = pd.concat(
-        [_rest_of_season(weekly[s], ends.get(s - 1), s) for s in dev], ignore_index=True
+        [_rest_of_season(weekly[s], priors(s), s) for s in dev], ignore_index=True
     )
     test = pd.concat([pairs[s - 1] for s in holdout], ignore_index=True)
     ros = pd.concat(
-        [_rest_of_season(weekly[s], ends[s - 1], s) for s in holdout], ignore_index=True
+        [_rest_of_season(weekly[s], priors(s), s) for s in holdout], ignore_index=True
     )
     groups, evaluation = {}, {}
     for group in VALUED_GROUPS:
         rows = train[train["position_group"].eq(group)]
         mean = float(np.average(rows["rate_t"], weights=rows["games_t"]))
-        (k, decay, age_a, age_b), resid_sd = _fit_group(rows, mean, with_aging=True)
-        (k_ros, decay_ros), _ = _fit_group(
+        (k, decay, decay2, age_a, age_b), resid_sd = _fit_group(
+            rows, mean, with_aging=True
+        )
+        (k_ros, decay_ros, decay2_ros), _ = _fit_group(
             train_ros[train_ros["position_group"].eq(group)], mean, with_aging=False
         )
         games_b, games_a = np.polyfit(rows["games_0"], rows["games_t"], 1)
         fit = GroupFit(
-            *(float(v) for v in (k, decay, k_ros, decay_ros, age_a, age_b)),
+            *(
+                float(v)
+                for v in (k, decay, decay2, k_ros, decay_ros, decay2_ros, age_a, age_b)
+            ),
             mean,
             resid_sd,
             float(games_a),
@@ -570,9 +597,10 @@ def _report(model: ValueModel) -> str:
         " bootstrap resamples where the model is worse than the better baseline;"
         f" a group is valued below {CLEARLY_WORSE} in both):",
         "",
-        "| Group | k | decay | k_ros | decay_ros | next season | rest of season "
+        "| Group | k | decay | decay2 | k_ros | decay_ros | decay2_ros | next season "
+        "| rest of season "
         "| valued |",
-        "|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for group, fit in model.groups.items():
         ratios = [
@@ -581,8 +609,9 @@ def _report(model: ValueModel) -> str:
             for c in model.evaluation[group].values()
         ]
         lines.append(
-            f"| {group} | {fit.k:.1f} | {fit.decay:.2f} | {fit.k_ros:.2f} | "
-            f"{fit.decay_ros:.2f} | {' | '.join(ratios)} | {fit.passes} |"
+            f"| {group} | {fit.k:.1f} | {fit.decay:.2f} | {fit.decay2:.2f} | "
+            f"{fit.k_ros:.2f} | {fit.decay_ros:.2f} | {fit.decay2_ros:.2f} | "
+            f"{' | '.join(ratios)} | {fit.passes} |"
         )
     cap = season_caps(model.last_dev_season + 5).iloc[-1]
     picks = np.array(model.pick_values) * cap

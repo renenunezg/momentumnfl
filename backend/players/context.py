@@ -40,6 +40,7 @@ PLAY_COLUMNS = [
     "qb_hit",
     "fumble",
     "fumble_lost",
+    "return_touchdown",
     "fumbled_1_player_id",
     "fumbled_1_team",
     "down",

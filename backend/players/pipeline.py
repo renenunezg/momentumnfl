@@ -189,10 +189,11 @@ def value_rows(
     current = war_scored[war_scored["week"].eq(week)].rename(
         columns={"wins_above_replacement": "war"}
     )
-    prior = value.season_war(season - 1, model.epa_shrink_games)
     scored = value.score_values(
         current,
-        prior[prior["week"].eq(prior["week"].max())],
+        tuple(
+            value.final_war(s, model.epa_shrink_games) for s in (season - 1, season - 2)
+        ),
         value.load_value_model(season),
         season,
         week,
