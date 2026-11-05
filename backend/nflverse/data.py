@@ -65,6 +65,7 @@ PARTICIPATION_URL = (
 )
 ESPN_QBR_URL = RELEASES_URL + "espn_data/qbr_week_level.parquet"
 ESPN_QBR_SEASON_URL = RELEASES_URL + "espn_data/qbr_season_level.parquet"
+CONTRACTS_URL = RELEASES_URL + "contracts/historical_contracts.parquet"
 
 
 def _release_parquet(url: str) -> pd.DataFrame:
@@ -94,6 +95,11 @@ def load_espn_qbr() -> pd.DataFrame:
 def load_espn_qbr_season() -> pd.DataFrame:
     """ESPN's season Total QBR for every season, one file."""
     return _release_parquet(ESPN_QBR_SEASON_URL)
+
+
+def load_contracts() -> pd.DataFrame:
+    """OverTheCap contracts, one row per contract with its season history."""
+    return _release_parquet(CONTRACTS_URL)
 
 
 def load_ftn_charting(seasons: list[int]) -> pd.DataFrame:

@@ -3,8 +3,9 @@
 FTN charting (reads, blitzers, play action, drops), PFR advanced stats
 (pressures, yards after contact, broken tackles), Next Gen weekly stats, ESPN's
 weekly Total QBR (a baseline the quarterback rating is judged against), its
-season Total QBR (the stat line's figure) and the player id crosswalk all
-publish during the season and are stored under the raw directory by season.
+season Total QBR (the stat line's figure), the player id crosswalk and
+OverTheCap contracts all publish during the season and are stored under the
+raw directory by season.
 The participation feed (players on the field per play) is research only: it
 is published after the fact, so nothing served reads it.
 """
@@ -16,6 +17,7 @@ import pandas as pd
 from backend.config import RAW_DIR
 from backend.etl.store import write_parquet
 from backend.nflverse import data
+from backend.players.contracts import CONTRACTS_FILE, contract_seasons
 
 log = logging.getLogger(__name__)
 
@@ -80,3 +82,4 @@ def ingest_player_sources(seasons: list[int], refresh_latest: bool = True) -> No
             for season in wanted:
                 _put(qbr[qbr["season"].eq(season)], directory, f"{season}.parquet")
     _put(data.load_players(), "players.parquet")
+    _put(contract_seasons(data.load_contracts()), CONTRACTS_FILE)
