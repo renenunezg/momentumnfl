@@ -48,11 +48,12 @@ QB_LAYER_VERSION = "qb_v8"
 # Ruled-out regulars other than the quarterback (absence_layer), in points per
 # game lost. Selected on development seasons 2016-2021 like the QB weights: the
 # least-squares slope of the closing line's move away from the QB-adjusted pure
-# margin on the unweighted absence margin (1.08, standard error 0.17), with the
-# outcome slope (2.2, standard error 0.7) as the independent check
+# margin on the unweighted absence margin (0.99, standard error 0.15), with the
+# outcome slope (2.0, standard error 0.7) as the independent check
 # (calibration.select_absence_weight). The margin moves; the total does not.
-DEFAULT_ABSENCE_WEIGHT = 1.08
-ABSENCE_LAYER_VERSION = "absence_v1"
+# Version 2 reads defensive credit with fitted role weights.
+DEFAULT_ABSENCE_WEIGHT = 0.99
+ABSENCE_LAYER_VERSION = "absence_v2"
 
 
 def layered_version(engine_version: str) -> str:

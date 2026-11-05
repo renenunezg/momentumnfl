@@ -33,12 +33,12 @@ GROUPS = ("DB", "DL", "LB", "WR", "TE", "RB")
 REGULAR_SEASON_WEEKS = 18
 # Games at which pooled split-half reliability of ``epa.credit`` reaches one
 # half on development seasons 2016-2021 (``backtest.epa_shrink_games`` over
-# ``backtest.pooled_trait_reliability`` of those seasons). Every group but DL
-# sits at the grade's 12-game cap. The published grade model's own shrinkage
-# also saw 2022-2024, which the team holdout covers.
+# ``backtest.pooled_trait_reliability`` of those seasons). Every group sits at
+# the grade's 12-game cap. The published grade model's own shrinkage also saw
+# 2022-2024, which the team holdout covers.
 SHRINK_GAMES = {
     "DB": 12.0,
-    "DL": 11.97,
+    "DL": 12.0,
     "LB": 12.0,
     "RB": 12.0,
     "TE": 12.0,

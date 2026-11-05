@@ -7,7 +7,12 @@ Defense: every defender the play tags for a sack, interception, pass defended,
 forced fumble, tackle for loss or quarterback hit shares the play's negative
 EPA equally, and so does a tackler on a play the offense lost EPA on (a stop).
 A tackle after a long gain is not blamed on the tackler: coverage, not the
-tackle, allowed it, and the feed does not say who was in coverage.
+tackle, allowed it, and the feed does not say who was in coverage. Each share
+is scaled by its role's weight in ``ROLE_WEIGHTS``: the non-negative fit of
+defenders' on-field plus-minus per snap (ridge on nflverse participation,
+2018 to 2021) on their per-snap credit by role, scaled so the development
+seasons' total credit is unchanged. Tags overstate tacklers, who finish plays
+others made, and understate pass breakups and pressure.
 
 ``adjusted_epa`` nets out the opponent through the previous week: a pass
 play's EPA against a defense that had allowed more than the league through
@@ -79,6 +84,16 @@ DEFENSIVE_TAGS = (
     ("tackler", "assist_tackle_3_player_id", "assist_tackle_3_team"),
     ("tackler", "assist_tackle_4_player_id", "assist_tackle_4_team"),
 )
+ROLE_WEIGHTS = {
+    "sacker": 0.96,
+    "interceptor": 1.48,
+    "fumble_forcer": 1.08,
+    "pass_defender": 1.90,
+    "tackler_for_loss": 0.58,
+    "qb_hitter": 1.34,
+    "tackler": 0.55,
+    "hurry": 1.96,
+}
 ROLE_PRIORITY = {
     role: rank
     for rank, role in enumerate(
@@ -200,7 +215,9 @@ def defense_credit(plays: pd.DataFrame) -> pd.DataFrame:
         .drop_duplicates(["play_id", "athlete_id"])
         .drop(columns="priority")
     )
-    out["share"] = 1.0 / out.groupby("play_id")["athlete_id"].transform("size")
+    out["share"] = out["role"].map(ROLE_WEIGHTS) / out.groupby("play_id")[
+        "athlete_id"
+    ].transform("size")
     out["team"] = out["play_id"].map(by_play["defteam"])
     out["opponent"] = out["play_id"].map(by_play["posteam"])
     out["side"] = "defense"

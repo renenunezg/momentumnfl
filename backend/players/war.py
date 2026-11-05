@@ -10,10 +10,11 @@ replacement are ``(shrunk - replacement) x games``.
 
 A pressure that ends in neither a sack nor a quarterback hit tags nobody on the
 play, so for wins above replacement each hurry a defender is charted with (PFR,
-from 2018) adds ``HURRY_EPA`` to his credit: the offense's EPA per dropback lost
-on such a pressure against a clean pocket, 2016 to 2021 regular-season dropbacks
-at win probability 0.1 to 0.9 (nflverse participation pressure flag). The
-absence layer reads the credit without it.
+from 2018) adds ``HURRY_EPA`` times the hurry role weight to his credit:
+``HURRY_EPA`` is the offense's EPA per dropback lost on such a pressure against
+a clean pocket, 2016 to 2021 regular-season dropbacks at win probability 0.1 to
+0.9 (nflverse participation pressure flag). The absence layer reads the credit
+without it, since the charting starts in 2018.
 
 A point is worth more wins in a close game than in a rout, so each credited
 game is weighted by the win-probability slope per point at the team model's
@@ -31,6 +32,7 @@ from scipy.stats import norm
 
 from backend.config import PROCESSED_DIR, RAW_DIR
 from backend.players import EPA_TRAIT
+from backend.players.credit import ROLE_WEIGHTS
 from backend.players.season_stats import pfr_ids
 
 log = logging.getLogger(__name__)
@@ -161,8 +163,8 @@ def shrunk_credit(
 
     ``snapshot`` holds trait snapshot rows; only ``epa.credit`` rows of qualified
     players are read. The shrinkage ``k`` per group comes from ``shrink_games``
-    (0 where absent). ``hurried`` (``hurries`` output) adds ``HURRY_EPA`` per
-    hurry through the week to the credit.
+    (0 where absent). ``hurried`` (``hurries`` output) adds the weighted
+    ``HURRY_EPA`` per hurry through the week to the credit.
     """
     rows = snapshot[snapshot["trait"].eq(EPA_TRAIT) & snapshot["qualified"].eq(True)]
     rows = rows.dropna(subset=["value"]).astype({"athlete_id": str})
@@ -170,7 +172,10 @@ def shrunk_credit(
         count = rows.merge(hurried, on=["athlete_id", "week"], how="left")["hurries"]
         rows = rows.assign(
             value=rows["value"]
-            + HURRY_EPA * count.fillna(0.0).to_numpy() / rows["games"].astype(float)
+            + HURRY_EPA
+            * ROLE_WEIGHTS["hurry"]
+            * count.fillna(0.0).to_numpy()
+            / rows["games"].astype(float)
         )
     keys = ["week", "position_group"]
     mean = rows.groupby(keys)["value"].transform("mean")
