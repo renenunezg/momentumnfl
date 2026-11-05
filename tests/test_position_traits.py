@@ -1,11 +1,15 @@
-"""Position traits must never read the week being rated, and the frozen grade
-model must refuse a season it was developed on."""
+"""Position traits must never read the week being rated, the frozen grade
+model must refuse a season it was developed on, and a trade value charges the
+acquirer only the cash it would owe."""
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from backend.players.adjust import adjust_rate
+from backend.players.contracts import acquirer_schedule
 from backend.players.grade import WEIGHT_COLUMNS, GradeModel, validate_grade_model
+from backend.players.value import fair_values
 
 
 def _games() -> pd.DataFrame:
@@ -63,8 +67,6 @@ def test_bootstrap_spearman_matches_the_published_definition():
     """The evaluation bootstrap ranks thousands of resamples at once; each must
     equal the backtest's pairwise-complete Spearman, including missing values,
     ties and the minimum sample."""
-    import numpy as np
-
     from backend.players import backtest
     from backend.players.evaluation import _row_spearman
 
@@ -80,3 +82,25 @@ def test_bootstrap_spearman_matches_the_published_definition():
     assert np.allclose(
         _row_spearman(x, y, backtest.MIN_PAIR_PLAYERS), expected, equal_nan=True
     )
+
+
+def test_trade_value_charges_the_acquirer_only_its_cash_and_cuts_when_cheaper():
+    rows = pd.DataFrame(
+        {
+            "gsis_id": "p",
+            "is_active": True,
+            "season": [2026, 2027, 2030],
+            "base_salary": [12.25, 27.25, 50.0],
+            "guaranteed_salary": [12.25, 18.3, 0.0],
+            "cash_paid": [35.25, 37.25, 0.0],
+        }
+    )
+    schedule = acquirer_schedule(rows, 2026, 9)
+    assert schedule["season"].tolist() == [2026, 2027]
+    assert np.allclose(schedule["cash"], [6.125, 37.25])
+    assert np.allclose(schedule["guaranteed"], [6.125, 18.3])
+
+    worth = np.array([[2.0, 1.0, 0.5], [3.0, 3.0, 0.0]])
+    cash = np.array([[1.0, 3.0, 3.0], [1.0, 1.0, 0.0]])
+    guaranteed = np.array([[1.0, 1.0, 0.0], [0.0, 0.0, 0.0]])
+    assert np.allclose(fair_values(worth, cash, guaranteed, 0.0), [0.0, 4.0])

@@ -151,6 +151,10 @@ def main() -> None:
     traits_fit.add_argument("--dev-seasons", nargs="+", type=int, required=True)
     traits_fit.add_argument("--validate", type=int, required=True)
     traits_fit.add_argument("--rebuild", action="store_true")
+    subparsers.add_parser(
+        "player-value-fit",
+        help="fit the player value model on development seasons and judge on holdout",
+    )
     traits_parser = subparsers.add_parser(
         "position-traits",
         help="score weekly position traits and grades with the frozen grade model",
@@ -873,6 +877,17 @@ def run_position_traits(args) -> None:
             from backend.publish import publish_position_grade_evaluation
 
             print(publish_position_grade_evaluation(engine, rows))
+    elif args.command == "player-value-fit":
+        from backend.config import DEVELOPMENT_SEASONS, HOLDOUT_SEASONS
+        from backend.players import grade, value
+
+        model_path = grade.latest_grade_model_path(max(HOLDOUT_SEASONS) + 1)
+        model = value.fit_value_model(
+            DEVELOPMENT_SEASONS,
+            HOLDOUT_SEASONS,
+            grade.load_grade_model(model_path).epa_shrink_games,
+        )
+        print(f"player value model written to {value.write_value_model(model)}")
     elif args.command == "player-sources":
         from backend.players.sources import ingest_player_sources
 
@@ -1384,6 +1399,7 @@ COMMANDS = {
     "publish": run_publish,
     "position-traits-fit": run_position_traits,
     "position-traits": run_position_traits,
+    "player-value-fit": run_position_traits,
     "player-sources": run_position_traits,
     "publish-position-traits": run_position_traits,
     "grade-evaluation": run_position_traits,
