@@ -136,14 +136,15 @@ jobs:
           restore-keys: |
             nfl-players-v2-${{ hashFiles('backend/players/**/*.py') }}-${{ steps.context.outputs.season }}-
             nfl-players-v2-${{ hashFiles('backend/players/**/*.py') }}-
-      - name: Fit the position grade when no frozen model exists
+      - name: Fit the position grade when no current frozen model exists
         if: steps.context.outputs.active == 'true' && inputs.playoffs_only != true
         shell: bash
         env:
           SEASON: ${{ steps.context.outputs.season }}
         run: |
-          if ls backend/data/processed/players/models/position_grade_*.json >/dev/null 2>&1; then
-            echo "frozen position grade model present"
+          if ls backend/data/processed/players/models/position_grade_*.json >/dev/null 2>&1 \
+            && poetry run python -c "import sys; from backend.players.ratings import current_models; sys.exit(0 if current_models($SEASON) else 1)"; then
+            echo "frozen position grade and rating models present"
           else
             last=$((SEASON - 1))
             poetry run python -m backend position-traits-fit \

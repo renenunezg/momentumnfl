@@ -4,8 +4,9 @@ position trait row shape the serving table and the page read.
 A rated position's rows per player and week are: ``grade`` (20 to 80 among
 the week's qualified players, ``uncertainty`` the rating's own standard
 error), ``rating`` (the forecast in its own units: EPA per dropback for a
-passer, EPA per game for a back), and one row per profile measure with its
-value, merit percentile, kind, reliability and whether it carries weight.
+passer, EPA over the average back per game for a back), and one row per
+profile measure with its value, merit percentile, kind, reliability and
+whether it carries weight.
 """
 
 import logging
@@ -86,6 +87,17 @@ def latest_model_path(spec: RatingSpec, season: int) -> Path:
             f"no {spec.position} rating model before {season}; run position-traits-fit"
         )
     return cutoffs[max(earlier)]
+
+
+def current_models(season: int) -> bool:
+    """Whether every rated position has a frozen model of its spec's version
+    that may score ``season``; a cached model of an older version may not."""
+    for spec, _ in SPECS.values():
+        try:
+            validate_model(load_model(latest_model_path(spec, season)), spec, season)
+        except (FileNotFoundError, KeyError, ValueError):
+            return False
+    return True
 
 
 def _identity(games: pd.DataFrame, season: int) -> pd.DataFrame:

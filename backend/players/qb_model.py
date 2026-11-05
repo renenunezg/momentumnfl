@@ -1,4 +1,4 @@
-"""The quarterback rating, version 3, on the shared rating engine.
+"""The quarterback rating, version 4, on the shared rating engine.
 
 The headline is the expected EPA per dropback over the rest of the season.
 The measures that carry weight are the production core (EPA and success per
@@ -12,6 +12,10 @@ to sack, the rate of throws past the first read and the checkdown rate: on the
 zero, and leaving them out lowered the leave-one-season-out error and raised
 the rating's rank correlation with the rest of the season. They stay on the
 card as descriptive measures.
+
+Version 4 keeps version 3's measures and shrinks each toward the season's
+pooled rate by its own volume before it enters (the engine's docstring), so a
+hot start on 100 dropbacks no longer outranks a full sample.
 
 The rating is judged against the public composites to date (EPA per dropback,
 Ben Baldwin's EPA + CPOE, nflfastR's DAKOTA, ESPN's Total QBR) and against
@@ -129,7 +133,7 @@ def qbr_raw(sums: pd.DataFrame) -> pd.Series:
 
 QB_SPEC = RatingSpec(
     position="QB",
-    model_version="nfl_qb_rating_v3",
+    model_version="nfl_qb_rating_v4",
     rates=PRODUCTION_RATES,
     kinds={
         "quality": [

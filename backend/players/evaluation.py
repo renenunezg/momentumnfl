@@ -29,9 +29,9 @@ from backend.players.rating import (
     TARGET,
     RatingModel,
     RatingSpec,
-    _out_of_sample,
     checkpoint_rows,
     evaluate,
+    held_out_rating,
     with_fitted_baselines,
 )
 
@@ -53,11 +53,15 @@ HOLDOUT_STATUS = {
     TRAITS_VERSION: "viewed",
     "nfl_qb_rating_v3": "screened",
     "nfl_rb_rating_v3": "screened",
+    # v4 shrinks the same screened measures by volume and gives the back a
+    # workload; 2025 was scored once after the choices on development seasons.
+    "nfl_qb_rating_v4": "screened",
+    "nfl_rb_rating_v4": "screened",
 }
 TRAIT_TARGET = "epa_credit_per_game_next_season"
 RATING_TARGETS = {
     "QB": "epa_per_dropback_rest_of_season",
-    "RB": "epa_per_game_rest_of_season",
+    "RB": "epa_over_average_per_game_rest_of_season",
 }
 CROSS_FITTED = {"fitted_kept": "fitted", "shrink_kept": "shrinkage"}
 
@@ -276,9 +280,11 @@ def rating_rows(
     validation_season: int,
 ) -> list[dict]:
     rng = np.random.default_rng(BOOTSTRAP_SEED)
-    rows = with_fitted_baselines(checkpoint_rows(games, spec), spec, dev_seasons)
+    rows = with_fitted_baselines(
+        checkpoint_rows(games, spec, model.shrinkage), spec, dev_seasons
+    )
     dev = rows[rows["season"].isin(dev_seasons)].copy()
-    dev["rating"] = _out_of_sample(dev, model.features, model.penalty)
+    dev["rating"] = held_out_rating(dev, model.features, model.penalty)
     valid = rows[rows["season"].eq(validation_season)].copy()
     valid["rating"] = model.predict(valid)
     names = [c[len(BASELINE_PREFIX) :] for c in rows if c.startswith(BASELINE_PREFIX)]

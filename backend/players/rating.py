@@ -5,7 +5,15 @@ A rating is a forecast of a player's rest-of-season production, fitted on
 player-weeks: every qualified player at every checkpoint week of the
 development seasons, a ridge of the rest-of-season outcome on his measures to
 date and his prior season, standardised among the week's qualified players so
-a week-4 number and a week-12 number mean the same thing. The penalty is
+a week-4 number and a week-12 number mean the same thing. Every rate feature
+is first shrunk toward the season's pooled rate by its own volume, so 100
+dropbacks of a hot start count for what 100 dropbacks are worth: with ``r``
+the rate's odd-against-even-game reliability at half-season volume ``n``, the
+constant ``k = n (1 - r) / r`` is the volume at which a rate is half signal,
+and a player's rate on ``v`` plays is ``(v x + k m) / (v + k)``. A position
+with a workload (running backs) forecasts its target per unit of workload and
+multiplies by the player's shrunk workload to date, because workload scales a
+back's efficiency in both directions rather than adding to it. The penalty is
 chosen leave-one-season-out, the validation season is scored once after the
 fit, and the band is the rating's own standard error of measurement from odd
 against even games, not a formula inherited from elsewhere.
@@ -47,8 +55,15 @@ PENALTY_GRID = np.logspace(-1, 4, 26)
 GRADE_MEAN, GRADE_SD, GRADE_MIN, GRADE_MAX = 50.0, 10.0, 20.0, 80.0
 RELIABILITY_GAMES = (4, 6, 8, 12)
 TARGET = "target"
+# What the ridge fits: the target per unit of workload, or the target itself.
+FIT_TARGET = "fit_target"
+WORKLOAD = "workload"
 BASELINE_PREFIX = "baseline_"
 MIN_RELIABILITY_PLAYERS = 30
+# Split-half games behind the shrinkage constants, and the floor on their
+# reliability so a measure with none is shrunk all the way, not divided by zero.
+SHRINKAGE_GAMES = 8
+MIN_SHRINKAGE_RELIABILITY = 0.01
 
 
 @dataclass(frozen=True)
@@ -80,6 +95,19 @@ class RatingSpec:
     # baseline to date with its own prior-season value and prior games, on the
     # rating's ridge. They give a public composite the rating's information.
     prior_baselines: tuple[str, ...] = ()
+    # A rate sharing the target's denominator (touches per game against EPA per
+    # game): the ridge fits the target per unit of it, and the rating is that
+    # forecast times the player's shrunk workload to date.
+    workload: str | None = None
+
+    def __post_init__(self):
+        if self.workload and self.rates[self.workload][1] != self.rates[self.target][1]:
+            raise ValueError(f"{self.workload} and {self.target} differ in denominator")
+
+    def shrunk_rates(self) -> list[str]:
+        """The rates the rating reads, current and prior season."""
+        workload = [self.workload] if self.workload else []
+        return sorted({*self.rating_features, *self.prior_features, *workload})
 
     def feature_columns(self) -> list[str]:
         """The rating features, then the prior season's (with its games) when
@@ -106,6 +134,8 @@ class RatingModel:
     # Out-of-sample residual sd per checkpoint week: the range of outcomes,
     # which includes the rest of the season's own noise.
     residual_sd: dict[int, float]
+    # Per shrunk rate: the volume at which it is half signal (module docstring).
+    shrinkage: dict[str, float]
     # Per measure: game-to-game reliability, kind and rating membership.
     measures: pd.DataFrame
     # Reliability of the rating itself at each game count (``rating_reliability``).
@@ -113,23 +143,89 @@ class RatingModel:
     validation: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     def predict(self, rows: pd.DataFrame) -> np.ndarray:
-        return self.intercept + rows[self.features].to_numpy(float) @ np.asarray(
-            self.coefficients
+        """The rating: the ridge's forecast, times the workload when rows carry one."""
+        return _with_workload(
+            rows,
+            self.intercept
+            + rows[self.features].to_numpy(float) @ np.asarray(self.coefficients),
         )
+
+
+def _with_workload(rows: pd.DataFrame, forecast: np.ndarray) -> np.ndarray:
+    return forecast * rows[WORKLOAD].to_numpy(float) if WORKLOAD in rows else forecast
+
+
+def _with_workload_column(
+    rows: pd.DataFrame,
+    sums: pd.DataFrame,
+    spec: RatingSpec,
+    shrinkage: dict[str, float],
+) -> pd.DataFrame:
+    if spec.workload:
+        rows[WORKLOAD] = shrunk_rate(sums, spec.workload, spec, shrinkage).to_numpy()
+    return rows
 
 
 # Rows
 
 
+def shrinkage_constants(games: pd.DataFrame, spec: RatingSpec) -> dict[str, float]:
+    """Per shrunk rate, ``k = n (1 - r) / r``: ``r`` the correlation of a
+    player's rate on his odd games with his even games over his first
+    ``SHRINKAGE_GAMES`` (each half at least half the rating's volume floor),
+    ``n`` the mean volume of the rate's denominator in a half."""
+    halves = _half_sums(games, SHRINKAGE_GAMES)
+    halves = halves[halves[spec.volume].ge(spec.min_volume / 2)]
+    out = {}
+    for name in spec.shrunk_rates():
+        denominator = spec.rates[name][1]
+        frame = halves[["season", "athlete_id", "half", denominator]].assign(
+            value=rate(halves, name, spec.rates).to_numpy()
+        )
+        wide = frame.pivot_table(
+            index=["season", "athlete_id"],
+            columns="half",
+            values=["value", denominator],
+        ).dropna()
+        if len(wide) < MIN_RELIABILITY_PLAYERS:
+            raise ValueError(f"too few split halves to shrink {name}")
+        r = max(
+            float(wide["value"][0].corr(wide["value"][1])), MIN_SHRINKAGE_RELIABILITY
+        )
+        volume = float(wide[denominator].to_numpy().mean())
+        out[name] = volume * (1.0 - r) / r
+    return out
+
+
+def shrunk_rate(
+    sums: pd.DataFrame, name: str, spec: RatingSpec, shrinkage: dict[str, float]
+) -> pd.Series:
+    """``name`` pulled toward its pooled rate among ``sums``' players of the same
+    season by ``shrinkage[name]`` plays; a player without the rate sits at it."""
+    numerator, denominator = spec.rates[name]
+    value = rate(sums, name, spec.rates)
+    known = value.notna()
+    volume = sums[denominator].astype(float).where(known, 0.0)
+    season = sums["season"]
+    pooled = sums[numerator].astype(float).where(known).groupby(season).transform(
+        "sum"
+    ) / volume.groupby(season).transform("sum").where(lambda v: v.gt(0))
+    k = shrinkage[name]
+    return (value.fillna(0.0) * volume + k * pooled) / (volume + k)
+
+
 def _prior_table(
-    games: pd.DataFrame, spec: RatingSpec, baselines: bool = False
+    games: pd.DataFrame,
+    spec: RatingSpec,
+    shrinkage: dict[str, float],
+    baselines: bool = False,
 ) -> pd.DataFrame:
-    """Prior-season features and games; with ``baselines``, also the prior
-    season's value of each prior baseline (evaluation only, never scoring)."""
+    """Prior-season features (shrunk) and games; with ``baselines``, also the
+    prior season's value of each prior baseline (evaluation only, never scoring)."""
     totals = _sums_through(games, None)
     prior = totals[totals[spec.volume].ge(spec.prior_min_volume)].copy()
     for name in spec.prior_features:
-        prior[f"prior_{name}"] = rate(prior, name, spec.rates)
+        prior[f"prior_{name}"] = shrunk_rate(prior, name, spec, shrinkage)
     prior_baselines = spec.prior_baselines if baselines else ()
     for name in prior_baselines:
         prior[f"prior_{BASELINE_PREFIX}{name}"] = _baseline_values(
@@ -168,11 +264,13 @@ def _baseline_values(
     )
 
 
-def checkpoint_rows(games: pd.DataFrame, spec: RatingSpec) -> pd.DataFrame:
-    """One row per player, season and checkpoint week with standardised features
-    and the rest-of-season target; a measure a season does not have sits at the
-    week's average."""
-    prior = _prior_table(games, spec, baselines=True)
+def checkpoint_rows(
+    games: pd.DataFrame, spec: RatingSpec, shrinkage: dict[str, float]
+) -> pd.DataFrame:
+    """One row per player, season and checkpoint week with shrunk, standardised
+    features and the rest-of-season target; a measure a season does not have
+    sits at the week's average."""
+    prior = _prior_table(games, spec, shrinkage, baselines=True)
     prior["season"] = prior["season"] + 1
     numerator, denominator = spec.rates[spec.target]
     parts = []
@@ -186,28 +284,43 @@ def checkpoint_rows(games: pd.DataFrame, spec: RatingSpec) -> pd.DataFrame:
         )
         row = merged[["season", "athlete_id"]].assign(week=week)
         for name in spec.rating_features:
-            row[name] = rate(merged, name, spec.rates).to_numpy()
+            row[name] = shrunk_rate(merged, name, spec, shrinkage).to_numpy()
         for name, baseline in spec.baselines.items():
             row[f"{BASELINE_PREFIX}{name}"] = _baseline_values(merged, baseline, spec)
         row[TARGET] = (
             merged[f"{numerator}_rest"]
             / merged[f"{denominator}_rest"].where(merged[f"{denominator}_rest"].gt(0))
         ).to_numpy()
-        parts.append(row)
+        row[FIT_TARGET] = row[TARGET]
+        if spec.workload:
+            units = merged[f"{spec.rates[spec.workload][0]}_rest"]
+            row[FIT_TARGET] = (
+                merged[f"{numerator}_rest"] / units.where(units.gt(0))
+            ).to_numpy()
+        parts.append(_with_workload_column(row, merged, spec, shrinkage))
     rows = pd.concat(parts, ignore_index=True).merge(
         prior, on=["season", "athlete_id"], how="left"
     )
     rows["prior_games"] = rows["prior_games"].fillna(0.0)
-    rows = rows.dropna(subset=[TARGET])
+    rows = rows.dropna(subset=[TARGET, FIT_TARGET])
     return _standardise(rows, spec)
 
 
 # Fitting
 
 
-def _choose_penalty(rows: pd.DataFrame, columns: list[str]) -> float:
+def held_out_rating(
+    rows: pd.DataFrame, columns: list[str], penalty: float
+) -> np.ndarray:
+    """The rating on development rows, each season from a fit without it."""
+    return _with_workload(rows, _out_of_sample(rows, columns, penalty, FIT_TARGET))
+
+
+def _choose_penalty(
+    rows: pd.DataFrame, columns: list[str], target: str = TARGET
+) -> float:
     seasons = sorted(rows["season"].unique())
-    x, y = rows[columns].to_numpy(float), rows[TARGET].to_numpy(float)
+    x, y = rows[columns].to_numpy(float), rows[target].to_numpy(float)
     errors = []
     for penalty in PENALTY_GRID:
         sse = 0.0
@@ -221,9 +334,9 @@ def _choose_penalty(rows: pd.DataFrame, columns: list[str]) -> float:
 
 
 def _out_of_sample(
-    rows: pd.DataFrame, columns: list[str], penalty: float
+    rows: pd.DataFrame, columns: list[str], penalty: float, target: str = TARGET
 ) -> np.ndarray:
-    x, y = rows[columns].to_numpy(float), rows[TARGET].to_numpy(float)
+    x, y = rows[columns].to_numpy(float), rows[target].to_numpy(float)
     prediction = np.full(len(rows), np.nan)
     for held in sorted(rows["season"].unique()):
         fit = rows["season"].ne(held).to_numpy()
@@ -345,7 +458,7 @@ def rating_reliability(
     each), stepped up to ``n`` games by Spearman-Brown. Both halves carry the
     player's own prior season, as the published rating does, so the band is the
     grade's error from which games were sampled this season, not the prior's."""
-    prior = _prior_table(games, spec)
+    prior = _prior_table(games, spec, model.shrinkage)
     prior["season"] = prior["season"] + 1
     out = {}
     for n in RELIABILITY_GAMES:
@@ -353,7 +466,8 @@ def rating_reliability(
         halves = halves[halves[spec.volume].ge(spec.min_volume / 2)]
         rows = halves[["season", "athlete_id", "half"]].copy()
         for name in spec.rating_features:
-            rows[name] = rate(halves, name, spec.rates).to_numpy()
+            rows[name] = shrunk_rate(halves, name, spec, model.shrinkage).to_numpy()
+        rows = _with_workload_column(rows, halves, spec, model.shrinkage)
         rows = rows.merge(prior, on=["season", "athlete_id"], how="left")
         rows["prior_games"] = rows["prior_games"].fillna(0.0)
         rows["week"] = rows["half"]
@@ -389,16 +503,19 @@ def fit_rating(
     validation_season: int,
 ) -> RatingModel:
     """Fit on ``dev_seasons``; the validation season is scored once, after."""
-    rows = with_fitted_baselines(checkpoint_rows(games, spec), spec, dev_seasons)
+    dev_games = games[games["season"].isin(dev_seasons)]
+    shrinkage = shrinkage_constants(dev_games, spec)
+    rows = with_fitted_baselines(
+        checkpoint_rows(games, spec, shrinkage), spec, dev_seasons
+    )
     dev = rows[rows["season"].isin(dev_seasons)]
     columns = spec.feature_columns()
-    penalty = _choose_penalty(dev, columns)
+    penalty = _choose_penalty(dev, columns, FIT_TARGET)
     beta = _ridge_fit(
-        dev[columns].to_numpy(float), dev[TARGET].to_numpy(float), penalty
+        dev[columns].to_numpy(float), dev[FIT_TARGET].to_numpy(float), penalty
     )
-    held = _out_of_sample(dev, columns, penalty)
+    held = held_out_rating(dev, columns, penalty)
     residual = (dev[TARGET] - held).groupby(dev["week"]).std()
-    dev_games = games[games["season"].isin(dev_seasons)]
     model = RatingModel(
         spec_position=spec.position,
         model_version=spec.model_version,
@@ -408,6 +525,7 @@ def fit_rating(
         penalty=penalty,
         dev_seasons=sorted(int(s) for s in dev_seasons),
         residual_sd={int(w): float(v) for w, v in residual.items()},
+        shrinkage=shrinkage,
         measures=measure_table(dev_games, spec),
     )
     model.reliability = rating_reliability(dev_games, model, spec)
@@ -445,6 +563,7 @@ def save_model(model: RatingModel, path: Path) -> Path:
         "penalty": model.penalty,
         "dev_seasons": model.dev_seasons,
         "residual_sd": {str(k): v for k, v in model.residual_sd.items()},
+        "shrinkage": model.shrinkage,
         "reliability": {str(k): v for k, v in model.reliability.items()},
         "measures": json.loads(model.measures.to_json(orient="records")),
         "validation": json.loads(model.validation.to_json(orient="records")),
@@ -465,6 +584,7 @@ def load_model(path: Path) -> RatingModel:
         penalty=payload["penalty"],
         dev_seasons=payload["dev_seasons"],
         residual_sd={int(k): float(v) for k, v in payload["residual_sd"].items()},
+        shrinkage={k: float(v) for k, v in payload["shrinkage"].items()},
         measures=pd.DataFrame(payload["measures"]),
         reliability={
             int(k): float(v) for k, v in payload.get("reliability", {}).items()
@@ -487,23 +607,30 @@ def validate_model(model: RatingModel, spec: RatingSpec, season: int) -> None:
 
 
 def week_rows(
-    games: pd.DataFrame, spec: RatingSpec, season: int, week: int
+    games: pd.DataFrame,
+    spec: RatingSpec,
+    season: int,
+    week: int,
+    shrinkage: dict[str, float],
 ) -> pd.DataFrame:
     """Every player with the floor of volume through ``week`` of ``season``, with
-    the standardised rating features and every production measure (raw)."""
+    the shrunk, standardised rating features and every production measure (raw)."""
     before = _sums_through(games[games["season"].eq(season)], week)
     before = before[before[spec.volume].ge(spec.min_volume)]
     if before.empty:
         return pd.DataFrame()
-    prior = _prior_table(games[games["season"].eq(season - 1)], spec).drop(
+    prior = _prior_table(games[games["season"].eq(season - 1)], spec, shrinkage).drop(
         columns="season"
     )
     rows = before[["season", "athlete_id", spec.volume, "games"]].assign(week=week)
     for name in spec.rates:
         rows[name] = rate(before, name, spec.rates).to_numpy()
+    raw = rows[list(spec.rates)].copy()
+    for name in spec.rating_features:
+        rows[name] = shrunk_rate(before, name, spec, shrinkage).to_numpy()
+    rows = _with_workload_column(rows, before, spec, shrinkage)
     rows = rows.merge(prior, on="athlete_id", how="left")
     rows["prior_games"] = rows["prior_games"].fillna(0.0)
-    raw = rows[list(spec.rates)].copy()
     rows = _standardise(rows, spec)
     for name in spec.rates:
         rows[f"raw_{name}"] = raw[name].to_numpy()
@@ -514,7 +641,7 @@ def score_week(
     games: pd.DataFrame, model: RatingModel, spec: RatingSpec, season: int, week: int
 ) -> pd.DataFrame:
     """Rating, grade, band and raw measures for every player at ``week``."""
-    rows = week_rows(games, spec, season, week)
+    rows = week_rows(games, spec, season, week, model.shrinkage)
     if rows.empty:
         return rows
     rating = model.predict(rows)
