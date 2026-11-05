@@ -36,6 +36,9 @@ PRIME_AGE = 27.0
 SEASON_GAMES = 17
 ROS_WEEK = 9
 ROOKIE_SEASONS = 4
+FIFTH_YEAR = 4
+FIRST_ROUND_PICKS = 32
+OPTION_TOP_PICKS = 10
 DRAFT_PICKS = 256
 PICK_WINDOW = 16
 BOOTSTRAP_DRAWS = 2000
@@ -390,20 +393,41 @@ def _price(ends: dict[int, pd.DataFrame], contracts: pd.DataFrame, seasons) -> f
     return float(np.mean(prices))
 
 
+def _option_salaries(contracts: pd.DataFrame) -> pd.DataFrame:
+    """``top, rest`` fifth-year option salary by season and position, set from the
+    season before: the mean of the top ``OPTION_TOP_PICKS`` cap numbers for top
+    picks and of the 3rd to 25th for the rest of the first round."""
+    rows = contracts.assign(position=contracts["position"].replace("FB", "RB"))
+    rank = rows.groupby(["season", "position"])["cap_number"].rank(
+        method="first", ascending=False
+    )
+    by = [rows["season"] + 1, rows["position"]]
+    return pd.concat(
+        {
+            "top": rows["cap_number"][rank.le(OPTION_TOP_PICKS)].groupby(by).mean(),
+            "rest": rows["cap_number"][rank.between(3, 25)].groupby(by).mean(),
+        },
+        axis=1,
+    )
+
+
 def _pick_values(
     ends: dict[int, pd.DataFrame], contracts: pd.DataFrame, price: float
 ) -> list[float]:
     """Cap share by overall pick: a drafted player's discounted worth less his
-    rookie-deal cash over his first ``ROOKIE_SEASONS`` seasons, averaged per pick
-    over every draft with that many completed seasons and smoothed over
-    neighbouring picks.
-    Picks at positions WAR does not rate are left out."""
+    rookie-deal cash over his first ``ROOKIE_SEASONS`` seasons, plus for first-round
+    picks the fifth-year option's worth less its salary when his first three
+    seasons' worth exceeded it. Each part is averaged per pick over every draft
+    with its seasons complete and smoothed over neighbouring picks, the option
+    within the first round. Picks at positions WAR does not rate are left out."""
     last = max(ends)
     caps = season_caps(last)
     played = pd.concat(
         [end.groupby("athlete_id")["war"].sum().rename(s) for s, end in ends.items()],
         axis=1,
     )
+    wins = played.stack().rename("war")
+    wins.index.names = ["gsis_id", "season"]
     drafted = contracts[
         contracts["draft_year"].between(min(ends), last - ROOKIE_SEASONS + 1)
         & contracts["draft_overall"].le(DRAFT_PICKS)
@@ -415,25 +439,56 @@ def _pick_values(
     # Cash past the rookie deal's value is an extension's signing bonus.
     paid = rookie.groupby("gsis_id")["cash_paid"].cumsum()
     paid = np.minimum(paid, rookie["rookie_value"].fillna(np.inf))
-    rookie = rookie.assign(cost=paid.groupby(rookie["gsis_id"]).diff().fillna(paid))
-    wins = played.stack().rename("war")
-    wins.index.names = ["gsis_id", "season"]
-    rookie = rookie.join(wins, on=["gsis_id", "season"])
-    cap = caps.loc[rookie["season"]].to_numpy()
-    surplus = (
-        league_minimum(rookie["season"]) / cap
-        + rookie["war"].fillna(0.0).to_numpy() * price
-        - rookie["cost"].to_numpy() / cap
-    ) * (1 + DISCOUNT_RATE) ** -(rookie["season"] - rookie["draft_year"]).to_numpy()
-    per_player = (
-        rookie.assign(surplus=surplus)
-        .groupby(["gsis_id", "draft_overall"])["surplus"]
-        .sum()
+    rookie = rookie.join(wins, on=["gsis_id", "season"]).assign(
+        cost=paid.groupby(rookie["gsis_id"]).diff().fillna(paid),
+        year=rookie["season"] - rookie["draft_year"],
     )
-    per_pick = per_player.groupby(level="draft_overall").mean()
+    cap = caps.loc[rookie["season"]].to_numpy()
+    rookie["worth"] = (
+        league_minimum(rookie["season"]) / cap + rookie["war"].fillna(0.0) * price
+    )
+    rookie["surplus"] = (rookie["worth"] - rookie["cost"] / cap) * (
+        1 + DISCOUNT_RATE
+    ) ** -rookie["year"]
+    per_pick = rookie.groupby(["gsis_id", "draft_overall"])["surplus"].sum()
+    per_pick = per_pick.groupby(level="draft_overall").mean()
     per_pick = per_pick.reindex(range(1, DRAFT_PICKS + 1)).interpolate()
-    smoothed = per_pick.rolling(2 * PICK_WINDOW + 1, center=True, min_periods=1)
-    return [float(v) for v in smoothed.mean()]
+    window = 2 * PICK_WINDOW + 1
+    values = per_pick.rolling(window, center=True, min_periods=1).mean()
+
+    first = rookie[
+        rookie["draft_overall"].le(FIRST_ROUND_PICKS)
+        & rookie["draft_year"].le(last - FIFTH_YEAR)
+    ]
+    option = first.groupby(["gsis_id", "draft_overall", "draft_year", "position"])[
+        "worth"
+    ].apply(lambda w: w.iloc[:3].mean())
+    option = option.rename("early").reset_index()
+    option["season"] = option["draft_year"] + FIFTH_YEAR
+    salaries = _option_salaries(contracts)
+    keys = pd.MultiIndex.from_arrays(
+        [option["season"], option["position"].replace("FB", "RB")]
+    )
+    salary = np.where(
+        option["draft_overall"].le(OPTION_TOP_PICKS),
+        salaries["top"].reindex(keys).to_numpy(),
+        salaries["rest"].reindex(keys).to_numpy(),
+    )
+    option_cap = caps.loc[option["season"]].to_numpy()
+    fifth_war = wins.reindex(
+        pd.MultiIndex.from_frame(option[["gsis_id", "season"]])
+    ).fillna(0.0)
+    fifth = league_minimum(option["season"]) / option_cap + fifth_war.to_numpy() * price
+    cost = salary / option_cap
+    option["value"] = (
+        np.where(option["early"] > cost, fifth - cost, 0.0)
+        * (1 + DISCOUNT_RATE) ** -FIFTH_YEAR
+    )
+    by_pick = option.groupby("draft_overall")["value"].mean()
+    by_pick = by_pick.reindex(range(1, FIRST_ROUND_PICKS + 1)).interpolate()
+    by_pick = by_pick.rolling(window, center=True, min_periods=1).mean()
+    values = values.add(by_pick, fill_value=0.0)
+    return [float(v) for v in values]
 
 
 def fit_value_model(
