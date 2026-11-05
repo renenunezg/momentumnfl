@@ -10,6 +10,7 @@ while keeping beats cutting him and paying the rest of his guarantees.
 
 import json
 from dataclasses import asdict, dataclass
+from functools import cache
 from pathlib import Path
 
 import numpy as np
@@ -88,16 +89,19 @@ def season_war(season: int, shrink_games: dict[str, float]) -> pd.DataFrame:
     ]
 
 
-def ages(season: int, athlete_ids: pd.Series) -> np.ndarray:
-    """Age on September 1 of ``season``; NaN without a birth date."""
+@cache
+def _birth_dates() -> pd.Series:
     players = pd.read_parquet(
         RAW_DIR / "players.parquet", columns=["gsis_id", "birth_date"]
     )
-    birth = pd.to_datetime(
-        athlete_ids.map(
-            players.drop_duplicates("gsis_id").set_index("gsis_id")["birth_date"]
-        )
+    return pd.to_datetime(
+        players.drop_duplicates("gsis_id").set_index("gsis_id")["birth_date"]
     )
+
+
+def ages(season: int, athlete_ids: pd.Series) -> np.ndarray:
+    """Age on September 1 of ``season``; NaN without a birth date."""
+    birth = athlete_ids.map(_birth_dates())
     return ((pd.Timestamp(season, 9, 1) - birth).dt.days / 365.25).to_numpy(float)
 
 
@@ -215,6 +219,8 @@ def score_values(
     pay_weeks_left = max(0, PAY_WEEKS - week)
     schedule = acquirer_schedule(read_contract_seasons(), season, pay_weeks_left)
     schedule = schedule[schedule["gsis_id"].isin(inputs["athlete_id"])]
+    if schedule.empty:
+        raise ValueError(f"no active contract matches a valued {season} player")
     inputs = inputs[inputs["athlete_id"].isin(schedule["gsis_id"])].reset_index(
         drop=True
     )

@@ -293,7 +293,7 @@ def with_fitted_ratings(
     out: pd.DataFrame, season: int, as_of: datetime
 ) -> pd.DataFrame:
     """Replace the rated positions' trait and grade rows with the fitted ratings,
-    keeping their wins above replacement and spread value rows."""
+    keeping their wins above replacement, spread value and contract value rows."""
     from backend.players.ratings import RATED_POSITIONS, score_ratings
 
     weeks = sorted(int(w) for w in out["week"].unique())
@@ -306,7 +306,7 @@ def with_fitted_ratings(
     if rated.empty:
         return out
     keep = ~out["position_group"].isin(RATED_POSITIONS) | out["trait"].isin(
-        [WAR_ROW, SPREAD_ROW]
+        [WAR_ROW, SPREAD_ROW, value.PLAYER_VALUE_ROW, value.TRADE_VALUE_ROW]
     )
     rated = rated.reindex(columns=out.columns)
     return pd.concat([out[keep], rated], ignore_index=True).sort_values(
