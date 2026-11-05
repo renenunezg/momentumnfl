@@ -169,7 +169,7 @@ def _scrimmage(plays: pd.DataFrame) -> pd.DataFrame:
     ]
 
 
-def _pfr_ids() -> dict[str, str]:
+def pfr_ids() -> dict[str, str]:
     players = pd.read_parquet(
         RAW_DIR / "players.parquet", columns=["gsis_id", "pfr_id"]
     )
@@ -338,7 +338,7 @@ def _defenders(
         _per_athlete(credit["athlete_id"], epa_credit=credit["raw_epa"]), how="outer"
     )
     pfr = _pfr("def", season, week)
-    ids = _pfr_ids()
+    ids = pfr_ids()
     pfr = pfr.assign(athlete_id=pfr["pfr_player_id"].map(ids)).dropna(
         subset=["athlete_id"]
     )

@@ -114,7 +114,11 @@ def war_rows(
     projections: pd.DataFrame,
 ) -> pd.DataFrame:
     """One ``war`` row per qualified credited player-week."""
-    values = war.shrunk_credit(snapshot, model.epa_shrink_games)
+    values = war.shrunk_credit(
+        snapshot,
+        model.epa_shrink_games,
+        war.hurries(int(snapshot["season"].iloc[0])),
+    )
     if values.empty:
         return pd.DataFrame()
     scored = war.wins_above_replacement(values, credited, projections)

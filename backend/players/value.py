@@ -82,7 +82,9 @@ def season_war(season: int, shrink_games: dict[str, float]) -> pd.DataFrame:
         season, load_games(season), ingest.read("schedules", season)
     )
     scored = war.wins_above_replacement(
-        war.shrunk_credit(snapshot, shrink_games), credited, projections
+        war.shrunk_credit(snapshot, shrink_games, war.hurries(season)),
+        credited,
+        projections,
     )
     teams = snapshot.loc[
         snapshot["trait"].eq(EPA_TRAIT), ["week", "athlete_id", "team"]
@@ -169,25 +171,26 @@ def fair_values(
     return value
 
 
-def _team_games(season: int) -> tuple[pd.Series, pd.Series]:
-    """Regular-season games played and remaining per team."""
+def _team_games(season: int, week: int) -> tuple[pd.Series, pd.Series]:
+    """Regular-season games played through ``week`` and remaining, per team."""
     games = load_games(season)
+    games = games.assign(played=games["model_week"].le(week))
     sides = pd.concat(
         [
-            games[["home_team", "completed"]].rename(columns={"home_team": "team"}),
-            games[["away_team", "completed"]].rename(columns={"away_team": "team"}),
+            games[["home_team", "played"]].rename(columns={"home_team": "team"}),
+            games[["away_team", "played"]].rename(columns={"away_team": "team"}),
         ]
     )
-    played = sides.groupby("team")["completed"].sum()
+    played = sides.groupby("team")["played"].sum()
     return played, sides.groupby("team").size() - played
 
 
 def _expected_games(
-    frame: pd.DataFrame, fit: pd.DataFrame, season: int, seasons: int
+    frame: pd.DataFrame, fit: pd.DataFrame, season: int, week: int, seasons: int
 ) -> np.ndarray:
     """Games per season: the team's remaining games at the player's share so far,
     then the fitted next-season games from the season before."""
-    played, remaining = _team_games(season)
+    played, remaining = _team_games(season, week)
     share = (frame["games_0"] / frame["team"].map(played)).clip(upper=1.0).fillna(0.0)
     out = np.empty((len(frame), seasons))
     out[:, 0] = (frame["team"].map(remaining).fillna(0.0) * share).to_numpy()
@@ -240,7 +243,7 @@ def score_values(
     cash = owed["cash"].fillna(0.0).to_numpy() / caps
     guaranteed = owed["guaranteed"].fillna(0.0).to_numpy() / caps
     fit = _group_params(passed).loc[inputs["position_group"]]
-    games = _expected_games(inputs, fit, season, seasons)
+    games = _expected_games(inputs, fit, season, week, seasons)
     minimum = league_minimum(years) / caps
     minimum[0] *= pay_weeks_left / PAY_WEEKS
     discount = (1 + DISCOUNT_RATE) ** -np.arange(seasons)

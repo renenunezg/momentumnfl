@@ -8,6 +8,13 @@ model), and the replacement level is the ``REPLACEMENT_QUANTILE`` of the shrunk
 values among the week's qualified players at the group. Points above
 replacement are ``(shrunk - replacement) x games``.
 
+A pressure that ends in neither a sack nor a quarterback hit tags nobody on the
+play, so for wins above replacement each hurry a defender is charted with (PFR,
+from 2018) adds ``HURRY_EPA`` to his credit: the offense's EPA per dropback lost
+on such a pressure against a clean pocket, 2016 to 2021 regular-season dropbacks
+at win probability 0.1 to 0.9 (nflverse participation pressure flag). The
+absence layer reads the credit without it.
+
 A point is worth more wins in a close game than in a rout, so each credited
 game is weighted by the win-probability slope per point at the team model's
 pregame projection, ``leverage_g = phi(home_margin_g / margin_sd_g) /
@@ -22,12 +29,14 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
-from backend.config import PROCESSED_DIR
+from backend.config import PROCESSED_DIR, RAW_DIR
 from backend.players import EPA_TRAIT
+from backend.players.season_stats import pfr_ids
 
 log = logging.getLogger(__name__)
 
 REPLACEMENT_QUANTILE = 0.25
+HURRY_EPA = 0.166
 WAR_COLUMNS = [
     "athlete_id",
     "position_group",
@@ -119,17 +128,50 @@ def season_projections(
     return out[PROJECTION_COLUMNS]
 
 
+def hurries(season: int) -> pd.DataFrame:
+    """``athlete_id, week, hurries``: regular-season hurries through each week."""
+    path = RAW_DIR / "pfr_def" / f"{season}.parquet"
+    if not path.exists():
+        return pd.DataFrame(columns=["athlete_id", "week", "hurries"])
+    rows = pd.read_parquet(
+        path, columns=["game_type", "week", "pfr_player_id", "def_times_hurried"]
+    )
+    rows = rows[rows["game_type"].eq("REG")].assign(
+        athlete_id=rows["pfr_player_id"].map(pfr_ids())
+    )
+    weekly = (
+        rows.dropna(subset=["athlete_id"])
+        .groupby(["athlete_id", "week"])["def_times_hurried"]
+        .sum()
+        .unstack()
+        .reindex(columns=range(1, int(rows["week"].max()) + 1))
+        .fillna(0.0)
+        .cumsum(axis=1)
+    )
+    weekly.columns.name = "week"
+    return weekly.stack().rename("hurries").reset_index()
+
+
 def shrunk_credit(
-    snapshot: pd.DataFrame, shrink_games: dict[str, float]
+    snapshot: pd.DataFrame,
+    shrink_games: dict[str, float],
+    hurried: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Per qualified player-week: shrunk EPA credit per game and the replacement level.
 
     ``snapshot`` holds trait snapshot rows; only ``epa.credit`` rows of qualified
     players are read. The shrinkage ``k`` per group comes from ``shrink_games``
-    (0 where absent).
+    (0 where absent). ``hurried`` (``hurries`` output) adds ``HURRY_EPA`` per
+    hurry through the week to the credit.
     """
     rows = snapshot[snapshot["trait"].eq(EPA_TRAIT) & snapshot["qualified"].eq(True)]
     rows = rows.dropna(subset=["value"]).astype({"athlete_id": str})
+    if hurried is not None:
+        count = rows.merge(hurried, on=["athlete_id", "week"], how="left")["hurries"]
+        rows = rows.assign(
+            value=rows["value"]
+            + HURRY_EPA * count.fillna(0.0).to_numpy() / rows["games"].astype(float)
+        )
     keys = ["week", "position_group"]
     mean = rows.groupby(keys)["value"].transform("mean")
     k = rows["position_group"].map(shrink_games).fillna(0.0).astype(float)
