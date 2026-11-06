@@ -516,12 +516,10 @@ def test_recommendation_publication_settlement_and_filtered_history(database):
     assert totals.model_total.drop("pick-050").nunique() == 1
     assert totals.model_total.iloc[0] == pytest.approx(52.0, abs=0.5)
     assert totals.side.eq("over").sum() == 52 and totals.side["pick-050"] == "under"
-    # Sides price from the devigged market margin, not the published margin.
+    # Sides price at the devigged market margin; the pure margin has no weight.
     spreads = decisions[decisions.market.eq("spreads")].set_index("game_id")
     assert spreads.side.eq("home").sum() == 52 and spreads.side["pick-048"] == "away"
-    assert spreads.model_home_margin.drop("pick-048").to_numpy() == pytest.approx(
-        10.0 + 0.045 * (-8.0 - 10.0)
-    )
+    assert spreads.model_home_margin.drop("pick-048").to_numpy() == pytest.approx(10.0)
     for pick in decisions.itertuples():
         profit = pick.price / 100 if pick.price > 0 else 100 / abs(pick.price)
         loss = 1 - pick.win_probability - pick.push_probability
@@ -953,9 +951,10 @@ def test_recommendation_publication_settlement_and_filtered_history(database):
         publish(decisions.iloc[:1].assign(game_id="late", decision_at=now))
 
 
-def test_slate_fills_with_model_side_leans_after_frozen_picks():
+def test_slate_fills_with_best_priced_leans_after_frozen_picks():
     """Without positive value, the five-game slate counts frozen picks and fills
-    with the highest-value sides the model leans to, never totals."""
+    with the highest-value sides at the market, whichever side the model
+    favours, never totals."""
     import json
 
     import numpy as np
@@ -982,7 +981,8 @@ def test_slate_fills_with_model_side_leans_after_frozen_picks():
         for side in ("home", "away")
         for key, value in (("expected_qb", "qb"), ("qb_source_at", at))
     }
-    # The pure margin sits i points above the 3-point market line.
+    # The pure margin sits i points above the 3-point market line and carries
+    # no weight; a second book's away price improves with i.
     forecasts = pd.DataFrame(
         dict(
             game_id=f"g{i}",
@@ -1013,8 +1013,8 @@ def test_slate_fills_with_model_side_leans_after_frozen_picks():
             selection=side,
             price=price,
             point=point,
-            provider="Book",
-            provider_key="book",
+            provider=book.title(),
+            provider_key=book,
             provider_last_update=now,
             market_fetched_at=now,
             odds_source="odds_api",
@@ -1023,13 +1023,14 @@ def test_slate_fills_with_model_side_leans_after_frozen_picks():
             match_score=1.0,
             execution_eligibility_verified=True,
         )
-        for game in forecasts.game_id
-        # The away side's cheaper price never outranks the model's home side.
-        for market, side, point, price in (
-            ("spreads", "home", -3.0, -110),
-            ("spreads", "away", 3.0, -102),
-            ("totals", "over", 44.0, -110),
-            ("totals", "under", 44.0, -110),
+        for i, game in enumerate(forecasts.game_id, start=1)
+        for book, market, side, point, price in (
+            ("a", "spreads", "home", -3.0, -110),
+            ("a", "spreads", "away", 3.0, -110),
+            ("b", "spreads", "home", -3.0, -110),
+            ("b", "spreads", "away", 3.0, -110 + i),
+            ("a", "totals", "over", 44.0, -110),
+            ("a", "totals", "under", 44.0, -110),
         )
     )
     decisions = build_recommendations(
@@ -1041,7 +1042,8 @@ def test_slate_fills_with_model_side_leans_after_frozen_picks():
     )
     picks = decisions[decisions.status.eq("recommended")]
     assert picks.reason.eq("ranked_lean").all() and picks.market.eq("spreads").all()
-    assert picks.side.eq("home").all() and picks.expected_value_per_unit.lt(0).all()
+    assert picks.side.eq("away").all() and picks.provider_key.eq("b").all()
+    assert picks.expected_value_per_unit.lt(0).all()
     assert sorted(picks.game_id) == ["g6", "g7", "g8"] and SLATE_SIZE == 5
 
 

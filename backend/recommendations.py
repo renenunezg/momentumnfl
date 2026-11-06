@@ -13,7 +13,7 @@ from backend.model.distributions import student_t_scale
 from backend.model.market_blend import cover_push_probabilities
 from backend.odds.markets import ODDS_SOURCES, _american_profit
 
-POLICY_VERSION = "nfl-picks-v6"
+POLICY_VERSION = "nfl-picks-v7"
 # Dispersion of actual results around the priced (blended) line, from the
 # chronological calibration replay of 2019 through 2025 (1,960 games with a
 # closing spread and total). The engine's predictive spread carries rating
@@ -24,25 +24,29 @@ PRICING_MARGIN_SD = 12.82
 PRICING_TOTAL_SD = 13.28
 # Weights of the model in the numbers that price picks: the devigged market
 # number at decision time moved this far toward the pure margin (spreads and
-# moneylines) or the model total (totals). Least-squares slope of the result
-# minus the closing line on the model minus the closing line, without an
-# intercept as priced, on the 2016 through 2021 development seasons (1,622
-# games): margin 0.045 (se 0.11), total -0.15 (se 0.10), held at zero. The
-# 2022 through 2025 seasons agree (margin -0.09, total -0.01), and on 2026
-# decision-time lines the close moved 0.05 (se 0.04) toward the pure margin
-# and -0.05 (se 0.03) toward the model total. No segment (division, rest, QB
-# absence, weather, season phase, spread size) survives a held-out check.
-# Pricing from the published 0.5 blend instead made every 2-point edge a
-# 5-point model disagreement with the market, which the model does not predict.
-SIDE_MODEL_WEIGHT = 0.045
+# moneylines) or the model total (totals). Picks are priced at the market and
+# moved only by what beats the closing line, and the model does not. Bounded
+# log-loss fits at the nflverse close on the 2016 through 2021 development
+# seasons (1,621 games) give 0.109 for spreads and 0.125 for moneylines, each
+# gaining under half a week-clustered standard error over zero (0.00028 +/-
+# 0.00061 and 0.00027 +/- 0.00056 per game); on 2022 through 2025 the
+# moneyline weight loses 0.00101 +/- 0.00059 and the spread weight gains
+# 0.00010 +/- 0.00062. The pure model's side of the close is the underdog in
+# 61 to 72 percent of games, because a calibrated but less informed model
+# sits inside the line, and it covered 49.4 percent of 2022 through 2025
+# spreads. Totals: development slope -0.15 (se 0.10), held at zero. No
+# situational factor survives a held-out check against the close (division,
+# rest, QB absence, weather, season phase, spread size, travel, body clock,
+# home underdogs, and a favourite-longshot devig correction).
+SIDE_MODEL_WEIGHT = 0.0
 TOTAL_MODEL_WEIGHT = 0.0
 # Picks per model week. Offers with positive expected value against the
 # devigged market are always picks (POSITIVE_EV); when fewer than SLATE_SIZE
-# games have a pick, the highest-EV sides fill the slate as RANKED_LEAN, one
-# per game. Leans carry their honest win probability, near a coin flip, and
-# negative expected value at most prices: a product volume choice, recorded
-# under its own reason so the ledger grades the two tiers apart. Totals are
-# never leans because the model total carries no weight.
+# games have a pick, the highest-EV spread or moneyline sides fill the slate
+# as RANKED_LEAN, one per game, on whichever side the best price favours.
+# Leans carry their honest win probability, near a coin flip, and negative
+# expected value at most prices: a product volume choice, recorded under its
+# own reason so the ledger grades the two tiers apart. Totals are never leans.
 SLATE_SIZE = 5
 POSITIVE_EV = "positive_ev"
 RANKED_LEAN = "ranked_lean"
@@ -361,7 +365,7 @@ def build_recommendations(
         if not offers.empty
         else {}
     )
-    rows, model_sides = [], []
+    rows = []
     for projection in projections.itertuples():
         start, forecast = (
             _timestamp(projection.start_date),
@@ -424,18 +428,8 @@ def build_recommendations(
                 [c for c in candidates if c["market"] == market],
                 distribution,
             )
-            lean = getattr(market_projection, field) - center
-            if not np.isfinite(lean):
+            if not np.isfinite(getattr(market_projection, field) - center):
                 market_projection = None
-            # The side the model leans to; a ranked lean must take it, never
-            # the other side for its price alone.
-            model_sides.append(
-                ("over" if market == "totals" else "home")
-                if lean > 0
-                else ("under" if market == "totals" else "away")
-                if lean < 0
-                else None
-            )
             row = {
                 key: getattr(projection, key, None)
                 for key in (
@@ -556,7 +550,6 @@ def build_recommendations(
             eligible
             & ~value
             & decisions["market"].isin(LEAN_MARKETS)
-            & decisions["side"].eq(pd.Series(model_sides, index=decisions.index))
             & ~decisions["game_id"].isin(picked)
         ]
         .sort_values("expected_value_per_unit", ascending=False)
