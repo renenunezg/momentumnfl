@@ -11,6 +11,11 @@ dropbacks of a hot start count for what 100 dropbacks are worth: with ``r``
 the rate's odd-against-even-game reliability at half-season volume ``n``, the
 constant ``k = n (1 - r) / r`` is the volume at which a rate is half signal,
 and a player's rate on ``v`` plays is ``(v x + k m) / (v + k)``. A position
+whose production repeats too weakly for one season to place a player (running
+backs) also pools his earlier seasons into each rate: a season ``j`` years
+back counts ``decay ** j`` of its plays, each recentred from that season's
+pooled rate to this one's, so history says how far above the league he ran,
+not what the league was. A position
 with a workload (running backs) forecasts its target per unit of workload and
 multiplies by the player's shrunk workload to date, because workload scales a
 back's efficiency in both directions rather than adding to it. The penalty is
@@ -53,12 +58,20 @@ log = logging.getLogger(__name__)
 MODELS_DIR = PROCESSED_DIR / "players" / "models"
 PENALTY_GRID = np.logspace(-1, 4, 26)
 GRADE_MEAN, GRADE_SD, GRADE_MIN, GRADE_MAX = 50.0, 10.0, 20.0, 80.0
+# One starter a team: the grade's 50 is the player ranked this many that week.
+STARTING_JOBS = 32
 RELIABILITY_GAMES = (4, 6, 8, 12)
 TARGET = "target"
 # What the ridge fits: the target per unit of workload, or the target itself.
 FIT_TARGET = "fit_target"
 WORKLOAD = "workload"
 BASELINE_PREFIX = "baseline_"
+# 1 where the player had a prior season past the volume floor, else 0: whether
+# there is a track record, not how many games it ran. Games played last season
+# marked a passer down for an injury (2016 to 2024, leaving one season out:
+# rank correlation 0.422 with games, 0.440 with this, paired standard error
+# 0.007).
+PRIOR_SEASON = "prior_season"
 MIN_RELIABILITY_PLAYERS = 30
 # Split-half games behind the shrinkage constants, and the floor on their
 # reliability so a measure with none is shrunk all the way, not divided by zero.
@@ -92,13 +105,17 @@ class RatingSpec:
     # ``feature_columns()``: the equal-information controls.
     fitted_baselines: dict[str, list[str]] = field(default_factory=dict)
     # Baselines that also get a "+ last season" control, ``<name>_prior``: the
-    # baseline to date with its own prior-season value and prior games, on the
+    # baseline to date with its own prior-season value and ``PRIOR_SEASON``, on the
     # rating's ridge. They give a public composite the rating's information.
     prior_baselines: tuple[str, ...] = ()
     # A rate sharing the target's denominator (touches per game against EPA per
     # game): the ridge fits the target per unit of it, and the rating is that
     # forecast times the player's shrunk workload to date.
     workload: str | None = None
+    # Earlier seasons pooled into each rating feature's rate (module
+    # docstring): how many, and the share of its plays a season keeps per year.
+    history_seasons: int = 0
+    history_decay: float = 0.0
 
     def __post_init__(self):
         if self.workload and self.rates[self.workload][1] != self.rates[self.target][1]:
@@ -110,10 +127,10 @@ class RatingSpec:
         return sorted({*self.rating_features, *self.prior_features, *workload})
 
     def feature_columns(self) -> list[str]:
-        """The rating features, then the prior season's (with its games) when
-        the position uses one."""
+        """The rating features, then the prior season's (with ``PRIOR_SEASON``)
+        when the position uses one."""
         prior = [f"prior_{f}" for f in self.prior_features]
-        return [*self.rating_features, *prior, *(["prior_games"] if prior else [])]
+        return [*self.rating_features, *prior, *([PRIOR_SEASON] if prior else [])]
 
     def kind_of(self, measure: str) -> str:
         for kind, names in self.kinds.items():
@@ -197,11 +214,50 @@ def shrinkage_constants(games: pd.DataFrame, spec: RatingSpec) -> dict[str, floa
     return out
 
 
+def history_sums(games: pd.DataFrame, spec: RatingSpec) -> pd.DataFrame | None:
+    """Per player and season, each rating feature's decayed sums over the
+    ``history_seasons`` before it: ``<rate>_history`` the plays and
+    ``<rate>_history_over`` the numerator less those plays at their own
+    season's pooled rate among players with the volume floor. None for a
+    position that reads no history."""
+    if not spec.history_seasons:
+        return None
+    totals = _sums_through(games, None)
+    floor = totals[spec.volume].ge(spec.min_volume)
+    columns = {}
+    for name in spec.rating_features:
+        numerator, denominator = spec.rates[name]
+        known = totals[numerator].notna() & totals[denominator].notna()
+        plays = totals[denominator].astype(float).where(known, 0.0)
+        made = totals[numerator].astype(float).where(known, 0.0)
+        season = totals["season"]
+        pooled = made.where(floor, 0.0).groupby(season).transform("sum") / plays.where(
+            floor, 0.0
+        ).groupby(season).transform("sum").where(lambda v: v.gt(0))
+        plays = plays.where(pooled.notna(), 0.0)
+        columns[f"{name}_history"] = plays
+        columns[f"{name}_history_over"] = (made - plays * pooled).fillna(0.0)
+    frame = pd.DataFrame(columns)
+    parts = [
+        (frame * spec.history_decay**back).assign(
+            season=totals["season"] + back, athlete_id=totals["athlete_id"]
+        )
+        for back in range(1, spec.history_seasons + 1)
+    ]
+    return pd.concat(parts).groupby(["season", "athlete_id"], as_index=False).sum()
+
+
 def shrunk_rate(
-    sums: pd.DataFrame, name: str, spec: RatingSpec, shrinkage: dict[str, float]
+    sums: pd.DataFrame,
+    name: str,
+    spec: RatingSpec,
+    shrinkage: dict[str, float],
+    history: pd.DataFrame | None = None,
 ) -> pd.Series:
     """``name`` pulled toward its pooled rate among ``sums``' players of the same
-    season by ``shrinkage[name]`` plays; a player without the rate sits at it."""
+    season by ``shrinkage[name]`` plays; a player without the rate sits at it.
+    With ``history`` (``history_sums``) his earlier seasons count as further
+    plays at their margin over the pooled rate."""
     numerator, denominator = spec.rates[name]
     value = rate(sums, name, spec.rates)
     known = value.notna()
@@ -211,7 +267,16 @@ def shrunk_rate(
         "sum"
     ) / volume.groupby(season).transform("sum").where(lambda v: v.gt(0))
     k = shrinkage[name]
-    return (value.fillna(0.0) * volume + k * pooled) / (volume + k)
+    earlier = over = 0.0
+    if history is not None:
+        past = sums[["season", "athlete_id"]].merge(
+            history, on=["season", "athlete_id"], how="left"
+        )
+        earlier = past[f"{name}_history"].fillna(0.0).to_numpy()
+        over = past[f"{name}_history_over"].fillna(0.0).to_numpy()
+    return (value.fillna(0.0) * volume + over + (earlier + k) * pooled) / (
+        volume + earlier + k
+    )
 
 
 def _prior_table(
@@ -220,7 +285,7 @@ def _prior_table(
     shrinkage: dict[str, float],
     baselines: bool = False,
 ) -> pd.DataFrame:
-    """Prior-season features (shrunk) and games; with ``baselines``, also the
+    """Prior-season features (shrunk) and ``PRIOR_SEASON``; with ``baselines``, also the
     prior season's value of each prior baseline (evaluation only, never scoring)."""
     totals = _sums_through(games, None)
     prior = totals[totals[spec.volume].ge(spec.prior_min_volume)].copy()
@@ -231,14 +296,14 @@ def _prior_table(
         prior[f"prior_{BASELINE_PREFIX}{name}"] = _baseline_values(
             prior, spec.baselines[name], spec
         )
-    prior["prior_games"] = prior["games"].astype(float)
+    prior[PRIOR_SEASON] = 1.0
     columns = [
         "season",
         "athlete_id",
         *[f"prior_{f}" for f in spec.prior_features],
         *[f"prior_{BASELINE_PREFIX}{name}" for name in prior_baselines],
     ]
-    return prior[[*columns, "prior_games"]]
+    return prior[[*columns, PRIOR_SEASON]]
 
 
 def _standardise(rows: pd.DataFrame, spec: RatingSpec) -> pd.DataFrame:
@@ -272,6 +337,7 @@ def checkpoint_rows(
     sits at the week's average."""
     prior = _prior_table(games, spec, shrinkage, baselines=True)
     prior["season"] = prior["season"] + 1
+    history = history_sums(games, spec)
     numerator, denominator = spec.rates[spec.target]
     parts = []
     for week in spec.checkpoints:
@@ -284,7 +350,7 @@ def checkpoint_rows(
         )
         row = merged[["season", "athlete_id"]].assign(week=week)
         for name in spec.rating_features:
-            row[name] = shrunk_rate(merged, name, spec, shrinkage).to_numpy()
+            row[name] = shrunk_rate(merged, name, spec, shrinkage, history).to_numpy()
         for name, baseline in spec.baselines.items():
             row[f"{BASELINE_PREFIX}{name}"] = _baseline_values(merged, baseline, spec)
         row[TARGET] = (
@@ -301,7 +367,7 @@ def checkpoint_rows(
     rows = pd.concat(parts, ignore_index=True).merge(
         prior, on=["season", "athlete_id"], how="left"
     )
-    rows["prior_games"] = rows["prior_games"].fillna(0.0)
+    rows[PRIOR_SEASON] = rows[PRIOR_SEASON].fillna(0.0)
     rows = rows.dropna(subset=[TARGET, FIT_TARGET])
     return _standardise(rows, spec)
 
@@ -366,7 +432,7 @@ def with_fitted_baselines(
     """``rows`` with a ``baseline_<name>`` column per fitted baseline and a
     ``baseline_<name>_prior`` column per prior baseline. Prior baselines fit
     on standardised copies of the baseline to date, its prior-season value and
-    prior games, filled and scaled the way the rating's features are."""
+    ``PRIOR_SEASON``, filled and scaled the way the rating's features are."""
     features = set(spec.feature_columns())
     dev = rows["season"].isin(dev_seasons).to_numpy()
     rows = rows.copy()
@@ -378,7 +444,7 @@ def with_fitted_baselines(
         sources = [
             f"{BASELINE_PREFIX}{name}",
             f"prior_{BASELINE_PREFIX}{name}",
-            "prior_games",
+            PRIOR_SEASON,
         ]
         scaled = [f"z_{column}" for column in sources]
         design = rows[["season", "week", TARGET]].copy()
@@ -456,20 +522,24 @@ def rating_reliability(
     """The rating's reliability at each game count ``n``: the correlation of the
     rating on a player's odd games with the rating on his even games (``n / 2``
     each), stepped up to ``n`` games by Spearman-Brown. Both halves carry the
-    player's own prior season, as the published rating does, so the band is the
-    grade's error from which games were sampled this season, not the prior's."""
+    player's own prior season and history, as the published rating does, so the
+    band is the grade's error from which games were sampled this season, not the
+    prior's."""
     prior = _prior_table(games, spec, model.shrinkage)
     prior["season"] = prior["season"] + 1
+    history = history_sums(games, spec)
     out = {}
     for n in RELIABILITY_GAMES:
         halves = _half_sums(games, n)
         halves = halves[halves[spec.volume].ge(spec.min_volume / 2)]
         rows = halves[["season", "athlete_id", "half"]].copy()
         for name in spec.rating_features:
-            rows[name] = shrunk_rate(halves, name, spec, model.shrinkage).to_numpy()
+            rows[name] = shrunk_rate(
+                halves, name, spec, model.shrinkage, history
+            ).to_numpy()
         rows = _with_workload_column(rows, halves, spec, model.shrinkage)
         rows = rows.merge(prior, on=["season", "athlete_id"], how="left")
-        rows["prior_games"] = rows["prior_games"].fillna(0.0)
+        rows[PRIOR_SEASON] = rows[PRIOR_SEASON].fillna(0.0)
         rows["week"] = rows["half"]
         rows = _standardise(rows, spec)
         rows["rating"] = model.predict(rows)
@@ -628,11 +698,12 @@ def week_rows(
     for name in spec.rates:
         rows[name] = rate(before, name, spec.rates).to_numpy()
     raw = rows[list(spec.rates)].copy()
+    history = history_sums(games[games["season"].lt(season)], spec)
     for name in spec.rating_features:
-        rows[name] = shrunk_rate(before, name, spec, shrinkage).to_numpy()
+        rows[name] = shrunk_rate(before, name, spec, shrinkage, history).to_numpy()
     rows = _with_workload_column(rows, before, spec, shrinkage)
     rows = rows.merge(prior, on="athlete_id", how="left")
-    rows["prior_games"] = rows["prior_games"].fillna(0.0)
+    rows[PRIOR_SEASON] = rows[PRIOR_SEASON].fillna(0.0)
     rows = _standardise(rows, spec)
     for name in spec.rates:
         rows[f"raw_{name}"] = raw[name].to_numpy()
@@ -646,9 +717,12 @@ def score_week(
 
     The grade is the best estimate of the player's true standing in units of
     the true spread: with ``r`` the rating's reliability at his games, the
-    rating's z among the week's players times ``sqrt(r)``. A rating that is
-    mostly sample noise therefore stays near 50 instead of being stretched to
-    the full 20 to 80 scale. ``outcome_sd`` is the out-of-sample range of the
+    rating's z among the week's players times ``sqrt(r)``, ten grade points
+    to the unit. A rating that is mostly sample noise therefore stays bunched
+    instead of being stretched to the full 20 to 80 scale. 50 is the standing
+    of the week's ``STARTING_JOBS``-th best player (the last, in a week with
+    fewer): the fringe of a starting job, so a starter reads above 50 and the
+    backups who qualified read below. ``outcome_sd`` is the out-of-sample range of the
     rest-of-season outcome in the rating's own units."""
     rows = week_rows(games, spec, season, week, model.shrinkage)
     if rows.empty:
@@ -658,8 +732,10 @@ def score_week(
     sd = float(np.std(rating, ddof=1)) if len(rating) > 1 else np.nan
     z = (rating - rating.mean()) / sd if sd and sd > 0 else np.zeros(len(rating))
     reliability = reliability_of(model, rows["games"])
+    standing = np.sqrt(reliability) * z
+    fringe = np.sort(standing)[::-1][min(STARTING_JOBS, len(standing)) - 1]
     rows["grade"] = np.clip(
-        GRADE_MEAN + GRADE_SD * np.sqrt(reliability) * z, GRADE_MIN, GRADE_MAX
+        GRADE_MEAN + GRADE_SD * (standing - fringe), GRADE_MIN, GRADE_MAX
     )
     rows["grade_sd"] = GRADE_SD * np.sqrt(1.0 - reliability)
     nearest = min(model.residual_sd, key=lambda w: abs(w - week))

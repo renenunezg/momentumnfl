@@ -1,10 +1,10 @@
 """Fit and score the fitted ratings (quarterbacks, running backs) into the
 position trait row shape the serving table and the page read.
 
-A rated position's rows per player and week are: ``grade`` (20 to 80 among
-the week's qualified players, ``uncertainty`` the rating's own standard
+A rated position's rows per player and week are: ``grade`` (20 to 80, 50 the
+week's fringe starter, ``uncertainty`` the rating's own standard
 error), ``rating`` (the forecast in its own units: EPA per dropback for a
-passer, EPA over the average back per game for a back, ``uncertainty`` the
+passer, EPA over a replacement back per game for a back, ``uncertainty`` the
 out-of-sample range of the outcome in those units), and one row per
 profile measure with its value, merit percentile, kind, reliability and
 whether it carries weight.

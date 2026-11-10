@@ -57,11 +57,17 @@ HOLDOUT_STATUS = {
     # workload; 2025 was scored once after the choices on development seasons.
     "nfl_qb_rating_v4": "screened",
     "nfl_rb_rating_v4": "screened",
+    # v5 pools the back's earlier seasons into the screened measures and adds
+    # two; 2025 was scored once for the shortlist chosen on development seasons.
+    "nfl_rb_rating_v5": "screened",
+    # v5 swaps games played last season for a prior-season flag, chosen on
+    # development seasons; 2025 was scored once after.
+    "nfl_qb_rating_v5": "screened",
 }
 TRAIT_TARGET = "epa_credit_per_game_next_season"
 RATING_TARGETS = {
     "QB": "epa_per_dropback_rest_of_season",
-    "RB": "epa_over_average_per_game_rest_of_season",
+    "RB": "epa_over_replacement_per_game_rest_of_season",
 }
 CROSS_FITTED = {"fitted_kept": "fitted", "shrink_kept": "shrinkage"}
 

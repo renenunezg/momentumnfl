@@ -1,4 +1,4 @@
-"""The quarterback rating, version 4, on the shared rating engine.
+"""The quarterback rating, version 5, on the shared rating engine.
 
 The headline is the expected EPA per dropback over the rest of the season.
 The measures that carry weight are the production core (EPA and success per
@@ -16,6 +16,12 @@ card as descriptive measures.
 Version 4 keeps version 3's measures and shrinks each toward the season's
 pooled rate by its own volume before it enters (the engine's docstring), so a
 hot start on 100 dropbacks no longer outranks a full sample.
+
+Version 5 reads whether the passer had a qualifying prior season instead of
+how many games he played in it. Games played stood in for an established
+starter but marked a passer down for missing time hurt; the flag ranks the
+rest of the season better leaving one season out of 2016 to 2024 (0.440
+against 0.422, paired standard error 0.007).
 
 The rating is judged against the public composites to date (EPA per dropback,
 Ben Baldwin's EPA + CPOE, nflfastR's DAKOTA, ESPN's Total QBR) and against
@@ -37,7 +43,7 @@ from backend.players.qb_study import (
     rate,
     with_espn_qbr,
 )
-from backend.players.rating import RatingSpec
+from backend.players.rating import PRIOR_SEASON, RatingSpec
 
 DAKOTA_GAM = STATIC_DIR / "players" / "dakota_gam.json"
 
@@ -133,7 +139,7 @@ def qbr_raw(sums: pd.DataFrame) -> pd.Series:
 
 QB_SPEC = RatingSpec(
     position="QB",
-    model_version="nfl_qb_rating_v4",
+    model_version="nfl_qb_rating_v5",
     rates=PRODUCTION_RATES,
     kinds={
         "quality": [
@@ -206,7 +212,7 @@ QB_SPEC = RatingSpec(
     prior_min_volume=100,
     # EPA per dropback with the prior season on the rating's own engine: the
     # equal-information control the other measures must improve on.
-    fitted_baselines={"epa_prior": ["epa_db", "prior_epa_db", "prior_games"]},
+    fitted_baselines={"epa_prior": ["epa_db", "prior_epa_db", PRIOR_SEASON]},
     prior_baselines=("dakota", "qbr"),
     lower_is_better=frozenset(
         {
