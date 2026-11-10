@@ -382,7 +382,9 @@ def test_recommendation_publication_settlement_and_filtered_history(database):
     from backend.recommendations import _probabilities, build_recommendations
 
     now = pd.Timestamp.now(tz="UTC")
-    start = now + timedelta(seconds=10)
+    # Every pregame publish below must commit before this kickoff; the builds
+    # ahead of them take about five seconds locally and twice that on CI.
+    start = now + timedelta(seconds=25)
     source = {
         name: {
             "observed_at": (now - timedelta(minutes=5)).isoformat(),
