@@ -210,6 +210,8 @@ jobs:
           --season ${{ steps.context.outputs.season }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       - name: Build playoff forecast from refreshed injury reports
         if: steps.context.outputs.active == 'true'
         run: >-

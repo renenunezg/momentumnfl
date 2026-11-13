@@ -22,10 +22,67 @@ ARCHIVE = PROCESSED_DIR / "forecast_archive"
 REPLAY_CUTOFF = "MOMENTUMNFL_REPLAY_CUTOFF"
 PACKAGES = ("numpy", "pandas", "scipy", "pyarrow")
 OVERRIDES_FILE = OVERRIDES_PATH.relative_to(REPO_ROOT)
+# Input bytes live in Supabase Storage, not Postgres: they were most of the
+# database's size. Objects are zlib-compressed and named by the SHA-256 of
+# their uncompressed bytes; uploads never overwrite, and reads verify the hash.
+BUCKET = "nfl-forecast-inputs"
 
 
 def _digest(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def _storage(route):
+    url, key = os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    if not url or not key:
+        raise ValueError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required")
+    headers = {"Authorization": f"Bearer {key}", "apikey": key}
+    return f"{url.rstrip('/')}/storage/v1/object/{route}", headers
+
+
+def _stored(connection, digests):
+    from sqlalchemy import text
+
+    return set(
+        connection.execute(
+            text(
+                "select name from storage.objects "
+                "where bucket_id = :bucket and name = any(:ids)"
+            ),
+            {"bucket": BUCKET, "ids": digests},
+        ).scalars()
+    )
+
+
+def _upload(digest, compressed):
+    import requests
+
+    url, headers = _storage(f"{BUCKET}/{digest}")
+    response = requests.post(
+        url,
+        data=compressed,
+        headers={
+            **headers,
+            "Content-Type": "application/octet-stream",
+            "x-upsert": "false",
+        },
+        timeout=60,
+    )
+    # A concurrent run may have stored the same content-addressed object.
+    if response.status_code != 200 and "Duplicate" not in response.text:
+        raise ValueError(f"Input archive upload failed ({response.status_code})")
+
+
+def _fetch(digest):
+    import requests
+
+    url, headers = _storage(f"authenticated/{BUCKET}/{digest}")
+    response = requests.get(url, headers=headers, timeout=60)
+    response.raise_for_status()
+    raw = zlib.decompress(response.content)
+    if _digest(raw) != digest:
+        raise ValueError("Corrupt stored input object")
+    return raw
 
 
 def prepare(args):
@@ -287,33 +344,24 @@ def publication_bundle(season, week, forecasts):
 
 
 def persist(connection, manifest):
-    """Archive in the same transaction as publication; no artifact expiry."""
+    """Archive alongside publication; no artifact expiry.
+
+    Inputs upload before the run row is written inside the publication
+    transaction, so a failed upload refuses publication and a rolled-back
+    publication leaves only unreferenced, reusable objects."""
     from sqlalchemy import text
 
     digests = sorted(
         {entry["sha256"] for entry in manifest["files"].values() if entry["present"]}
     )
-    existing = set(
-        connection.execute(
-            text(
-                "select sha256 from nfl.forecast_input_objects where sha256 = any(:ids)"
-            ),
-            {"ids": digests},
-        ).scalars()
-    )
+    existing = _stored(connection, digests)
     for digest in digests:
         if digest in existing:
             continue
         content = (ARCHIVE / "objects" / digest).read_bytes()
         if _digest(content) != digest:
             raise ValueError("Corrupt input archive; publication refused")
-        connection.execute(
-            text(
-                "insert into nfl.forecast_input_objects(sha256,compressed_content) "
-                "values (:digest,:content) on conflict do nothing"
-            ),
-            {"digest": digest, "content": zlib.compress(content)},
-        )
+        _upload(digest, zlib.compress(content))
     serialized = json.dumps(manifest, sort_keys=True)
     connection.execute(
         text(
@@ -333,7 +381,8 @@ def persist(connection, manifest):
 
 
 def download(run_id, destination):
-    """Export a durable DB bundle; database access is explicitly read-only."""
+    """Export a durable bundle: the run manifest from a read-only database
+    session, its inputs from Storage."""
     from sqlalchemy import text
 
     from backend.db import engine
@@ -352,16 +401,7 @@ def download(run_id, destination):
             path = destination / "objects" / digest
             if path.exists() and _digest(path.read_bytes()) == digest:
                 continue
-            content = connection.execute(
-                text(
-                    "select compressed_content from nfl.forecast_input_objects "
-                    "where sha256=:digest"
-                ),
-                {"digest": digest},
-            ).scalar_one()
-            raw = zlib.decompress(content)
-            if _digest(raw) != digest:
-                raise ValueError("Corrupt database input object")
+            raw = _fetch(digest)
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("xb") as output:
                 output.write(raw)

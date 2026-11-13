@@ -74,6 +74,10 @@ def test_forecast_input_bundles_are_immutable_and_deduplicated(
     (tmp_path / "objects").mkdir()
     (tmp_path / "objects" / digest).write_bytes(content)
     monkeypatch.setattr(forecast_archive, "ARCHIVE", tmp_path)
+    # Storage stands in as a dict; uploads must be deduplicated by digest.
+    bucket = {}
+    monkeypatch.setattr(forecast_archive, "_stored", lambda conn, ids: set(bucket))
+    monkeypatch.setattr(forecast_archive, "_upload", bucket.__setitem__)
     manifest = dict(
         season=2026,
         week=1,
@@ -87,16 +91,10 @@ def test_forecast_input_bundles_are_immutable_and_deduplicated(
             conn.execute(text("select count(*) from nfl.forecast_input_runs")).scalar()
             == 1
         )
-        assert (
-            conn.execute(
-                text("select count(*) from nfl.forecast_input_objects")
-            ).scalar()
-            == 1
-        )
-    for table in ("forecast_input_runs", "forecast_input_objects"):
-        for verb in ("delete from", "truncate"):
-            with pytest.raises(DBAPIError), database.begin() as conn:
-                conn.execute(text(f"{verb} nfl.{table}"))
+    assert list(bucket) == [digest]
+    for verb in ("delete from", "truncate"):
+        with pytest.raises(DBAPIError), database.begin() as conn:
+            conn.execute(text(f"{verb} nfl.forecast_input_runs"))
 
 
 @pytest.mark.parametrize("database", [True], indirect=True)
