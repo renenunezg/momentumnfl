@@ -1,149 +1,81 @@
 # momentumnfl
 
-Bayesian NFL power ratings and point-spread projections. Team strengths are
-fit weekly from [nflverse](https://github.com/nflverse) play-by-play (EPA
-fused with points per drive) with a conjugate-Gaussian ridge, adjusted for
-starting-quarterback changes and rest, blended with the market at a capped
-weight, and published to a Postgres schema that a separate web frontend reads.
+NFL power ratings, game projections, prospective picks, and season forecasts.
+Team strengths are fit weekly from [nflverse](https://github.com/nflverse) play-by-play and published to the `nfl` schema of the shared Momentum Supabase database.
+The website at [renenunez.dev](https://renenunez.dev), in the separate `momentumweb` repository, reads that schema.
 
-Published spreads retain the pure-model number alongside the market-blended forecast, with the closing line as a separate accuracy benchmark.
-Legacy `market_comparisons` remain review diagnostics: their four-point materiality threshold and `not_recommended` status do not define wagers.
-The prospective recommendation ledger uses the separately versioned policy below.
+## Model
 
-## Prospective recommendations
+- Each week the engine refits from scratch on every completed game of the season: offense and defense points per drive fused with competitive-play EPA, a pace term, and a fitted home field, with a Student-t score distribution.
+  Before week one, a preseason prior blends last season's final ratings, regressed toward average, with the season win-total market.
+- The expected starting quarterback comes from a sourced announcement, the current depth chart, or a manual override, skipping anyone ruled out.
+  The margin moves by the gap between that starter's rolling EPA strength and the quarterback mix already in the team's rating.
+- Regulars ruled out at other positions cost their team the value the player ratings assign them, weighted by how much of the team's recent play they were part of.
+- For totals, league scoring rate and pace carry preseason priors that fade through the season, and a fixed calibration sets the total's location.
+- The published margin is shifted toward the market line at a capped weight.
+  The pure-model margin is published beside it, and the closing line is kept as a separate accuracy benchmark, never an input.
+- Opponent-adjusted unit ratings (rushing and passing on both sides, blocking, special teams) and a market-implied team rating are published for context; neither feeds the forecast.
+- During games, nflfastR's spread-aware win probability model is anchored on the published pregame margin instead of the closing spread.
 
-`nfl-picks-v2` selects one eligible side per game and market across moneylines, spreads, and totals.
-It requires at least 4.5 percentage points above the recorded price's break-even probability, conditional on no push or moneyline tie, and positive estimated EV.
-Moneyline and spread probabilities use the published margin, the pure model shrunk toward the pre-decision market line at the configured market weight, with discrete key-number mass.
-Totals use the model total shrunk at the same weight toward the median posted total across the decision-time offers, priced as integer-score Student-t totals; each pick records that market total in `market_total`.
-Stakes are a flat one unit with no additional exposure cap.
-`nfl-picks-v1` priced sides and totals from the pure model; its frozen picks keep that policy version.
-Apply `sql/008_recommendation_market_total.sql` before publishing under `nfl-picks-v2`.
-Calibration and backtests are diagnostics, not publication gates; estimated EV does not establish a real betting advantage.
+Parameters are selected on development seasons 2016 through 2021.
+Later seasons are retrospective validation, not a fresh holdout.
 
-Bookmaker availability must be explicitly configured through `ODDS_API_BOOKMAKERS`; the existing NFL `execution_eligibility_verified` flag is required, and an unverified regional-feed quote remains No Play.
-An offer needs an opposing quote from the same event, bookmaker, and observation, an exact kickoff match, match confidence of at least 0.95, and a price update within one hour.
-Forecasts must be at most seven days old, schedule receipts at most 24 hours old, and depth-chart receipts at most 48 hours old.
-All required receipts must precede the forecast, and both expected QBs must be identified from a sourced announcement, current depth chart or explicit override.
-A quarterback listed Out or Doubtful on the week's injury report yields to the next depth-chart rank.
-The prospective `qb_v7` pipeline also fetches ESPN's current injury feed on every active-season input refresh, independently of the weekly game-status report.
-It checks the feed's player news for definite coach-attributed starter announcements before falling back to the actual depth-chart order; it never ranks substitutes by model strength.
-Announcements must name an identified QB, refer to the upcoming matchup, follow the previous game, and be observed before the forecast cutoff.
-Speculation, negation, ambiguous wording and previous-game announcements cannot override the depth chart.
-The selection basis, reported statement, source link, publication time and observation time are retained with the forecast inputs.
-An accepted announcement survives later routine player notes for that same game; a newer definite benching report or the end of its stated injury condition invalidates it.
-Verified starter overrides remain supported, but a conflict with an announcement or confirmed absence stops selection for review.
-Out, Doubtful, injured-reserve, physically-unable-to-perform and suspension statuses remove a QB from the expected lineup and activate the existing confirmed-absence adjustment.
-A status the parser does not recognize withholds a team's QB coverage only when it sits on a quarterback; on any other position it is ignored, because it says nothing about who starts at quarterback.
-The full provider response, provider timestamp and local observation timestamp are archived before the forecast cutoff.
-The current snapshot must be no more than 24 hours old, match the season, cover the team and resolve its reported QB identities against the depth-chart ESPN/GSIS IDs.
-Missing, stale, malformed or unresolved coverage produces No Play rather than being interpreted as healthy; a fetch failure fails the input-refresh job.
-An estimated return date never automatically clears an absence, and a future snapshot cannot enter an earlier forecast or historical backtest.
-The QB chart date, announcement observation or override receipt must precede the forecast and fall within 48 hours of publication; fetching an old chart again does not make its contents current.
-Other injuries are not modeled and remain explicitly flagged; no CFB missing-injury-count exception is imported.
-Named non-QB absences, including IR, are retained in each recommendation's input flags for audit without assigning an unvalidated point value.
-Missing coverage produces No Play, never a fabricated source timestamp or historical recommendation.
-Source bytes and receipts are retained under `backend/data/processed/source_archive`; each pick retains their hashes, timestamps, input flags, and the pricing weights used.
+## Picks
 
-`publish` freezes the first qualifying recommendation, while an unstarted No Play can be reconsidered.
-The database rejects late insertion, changes to frozen picks, incorrect settlement arithmetic, and changes to settled results.
-`grade` uses confirmed nflverse final scores with the frozen line and price; spread/total pushes return the stake and moneyline ties are void.
-Explicit cancellations, postponements, and changed kickoffs void the original contract; an absent fixture without confirmed status stays pending.
-Wins plus losses define win rate; ROI divides profit by settled stakes including pushes and excluding pending picks and voids.
-History windows use decision dates in UTC and include pending games.
+Picks are prospective and priced from the decision-time market: the devigged market number, moved toward the model only as far as the model has earned against the closing line.
+Offers with positive expected value are picks, and a small weekly slate is filled with the best-priced sides as ranked leans, recorded under their own reason so the two tiers grade apart.
+Stakes are a flat one unit.
+Estimated expected value does not establish a real betting advantage.
 
-## Deployment order for recommendation parity
+An offer is eligible only from a configured bookmaker (`ODDS_API_BOOKMAKERS`), with a fresh two-sided quote matched to the exact game and kickoff.
+A game without fresh schedule, depth-chart, injury, and expected-quarterback coverage is a No Play, never treated as healthy.
+The rules live in `backend/recommendations.py`, `backend/source_inputs.py`, and `backend/availability.py`.
 
-1. Obtain current-conversation approval before pushing, deploying, or publishing production recommendations.
-2. Apply `sql/006_recommendations.sql` after migrations 001 through 005, before the backend or dependent frontend release.
-   The migration creates an empty ledger and does not backfill old recommendations or alter existing forecast results.
-3. Deploy the backend, refresh schedule/depth-chart receipts, verify fixed-model pricing artifacts, and generate fresh forecasts.
-   Configure the approved available bookmakers in `ODDS_API_BOOKMAKERS` for the scheduled jobs.
-   The odds request now includes moneylines in addition to spreads and totals; budget that expanded market request before activation.
-4. Run the approved prospective publish and grading commands, then verify the ledger, frozen source fields, and public aggregate functions.
-5. Deploy the shared frontend, verify CI and deployment completion, and check live Performance/History filters, records, pagination, and mobile layout.
-   A branch push alone does not complete these steps.
+Grading uses official nflverse final scores at the frozen line and price.
+The closing line is the one the live worker captures at kickoff, with the nflverse schedule line as the fallback.
+Six-point teaser legs on small underdogs are paper-tracked in a separate record and never enter the pick ledger.
 
-## How it works
+## Other pipelines
 
-### Totals baseline
+### Season wins
 
-`nfl_joint_scoring_qb_v5_totals_v2` retains preseason evidence for league scoring rate and pace instead of replacing both baselines after one completed week.
-The dedicated settings in `backend/model/totals.py` give each baseline 64 prior-equivalent games, with prior influence halving every six model weeks.
-These fixed values were selected on 2016-2021 totals error; 2022-2025 remains retrospective validation.
-The scoring rate pools recency-weighted points over recency-weighted possessions instead of averaging game-level scoring ratios.
-After the QB adjustment and environment stabilization, a fixed affine correction sets the total to `45 - 0.19747920925833432 + 0.7163893796380143 * (total - 45)`.
-This correction was selected on 2016-2021 regular-season MAE and reduced 2022-2025 regular-season MAE from 10.618907 to 10.540881 over 1,087 games, improving each season.
-Those seasons have already been inspected and use reconstructed inputs, so this is retrospective evidence rather than prospective validation.
-The calibrated total is the location of the symmetric predictive score distribution, whose mean and median coincide; it is not the uncalibrated engine posterior mean.
-The correction shifts both expected scores equally after the QB and market-margin layers, with a nonnegative score boundary that preserves the pure and published margins.
-Team strengths, ratings, spread and moneyline probabilities, and uncertainty widths retain their existing calculations.
-The pooled-rate fit can slightly change recalculated uncertainty widths; the affine correction itself changes only score location.
-Totals pricing has its own market-weight constant, currently unchanged at 0.5.
-Published model totals do not blend a single-game market total; the separate recommendation-pricing blend must not be mistaken for model forecast accuracy.
-Calibration summaries and the production artifact manifest report both engine totals before QB adjustment and calibrated model totals after it.
-The new model version requires regenerated production artifacts before publication.
-Existing archived forecasts and first-published qualifying recommendations remain frozen; a forecast refresh does not replace those recommendation records.
+The engine and current expected quarterbacks are applied to the full regular-season schedule.
+Reproducible simulated seasons give each team's expected wins and a 10th to 90th percentile range.
+Because the preseason prior already uses sportsbook win totals, differences from those totals are not betting edges.
 
-### Pipeline
+### Playoffs
 
-1. **Ingest.** Schedules, play-by-play, depth charts, PFR pass-protection
-   charting, and Next Gen passing stats are pulled with
-   [nflreadpy](https://github.com/nflverse/nflreadpy) into local parquet.
-2. **Features.** Play-by-play is reduced to one row per team-game: points,
-   drives, competitive-play EPA, QB dropbacks, and the unit channels used by
-   the descriptive unit ratings.
-3. **Fit.** Each week the engine refits from scratch on every prior game of
-   the season: per-team offense and defense points per drive, a pace ridge,
-   and a fitted home-field parameter, with a Student-t score distribution.
-   Before week 1 a preseason prior blends mean reversion of last season's
-   final ratings with the season win-total market.
-4. **Layers.** The QB adjustment is `selected QB strength - team QB baseline`.
-   Both sides use rolling EPA strengths on the same replacement-relative scale, with half-lives of 1,000 dropbacks and 52 calendar weeks.
-   The estimate shrinks toward replacement using 200 prior dropbacks and the remaining effective sample, rather than treating lifetime dropbacks as current evidence.
-   The team baseline weights every passer by recent dropbacks and the engine's time decay, carrying the previous season's mix into preseason.
-   For a team that has not played yet, the win-total-funded share of that baseline uses the fixed preseason QB reference instead, so the market's offseason QB change is not added again.
-   That reference stays fixed when a depth chart or manual starter override changes; an injury moves the pure spread by `backup strength - starter strength`.
-   The expected starter is a manual override if present, otherwise the highest depth-chart quarterback not listed Out or Doubtful on that week's injury report, otherwise the most recent actual starter who is not ruled out.
-   This separates a QB's strength from the change applied to a team that already contains his contribution, and permits starter-to-backup substitutions without changing stored team ratings.
-   Expected points then receive the rest adjustment, and the published margin is shifted toward the market line by a weight capped at 0.5.
-   QB memory and shrinkage were selected using development-season pure-model log loss with the engine held fixed, at the 1,000-dropback span.
-   The coefficient on the QB delta depends on how the expected starter was identified (`qb_v8`): a dated 2025+ depth-chart snapshot, which is the only basis production uses, takes 0.90; the undated prior-week chart proxy that the 2016-2024 backtest relies on takes 0.45, or 0.89 when the incumbent is confirmed Out or Doubtful.
-   Each coefficient is the development-season least-squares slope of the closing line's move away from the engine margin on the raw QB delta (standard errors 0.06, 0.05 and 0.14), with the outcome regression as the independent check; the dated value comes from development games whose pregame starters proved correct, which is what a dated chart delivers (95% in 2025).
-   The earlier grid-selected 0.25 (`qb_v5` through `qb_v7`) measured the proxy era's starter misidentification, where a wrong starter yields a large delta with no information, not the value of a quarterback; `validate-qb` reproduces the selection and the retrospective check.
-   The 2022-2025 evaluation is a repeatedly inspected retrospective validation window, not a fresh prospective test of this revision.
-   `qbs --context` additionally fits separate QB, team-season, and opposing-defense effects, including hit/sack exposure and the QB's own tendency to invite pressure.
-   Its conditional parameter uncertainty reflects limited recent samples and ambiguity between player and supporting cast; it is not a calibrated interval for game scores or an identified causal player value.
-   These context estimates remain diagnostics because development testing did not support adding their means or uncertainty to published spreads.
-5. **Calibrate.**
-   A chronological search selects engine and output parameters on development seasons 2016-2021.
-   Seasons 2022-2025 are repeatedly inspected retrospective validation, not a fresh holdout.
-   Historical closing lines form a conditional closing-line benchmark, not a replay of early-week market availability.
-6. **Publish.** Weekly outputs in the `nfl` schema, written in one transaction.
-   The column lists in `backend/publish.py` are the contract with the
-   frontend and are checked against `sql/` by a test.
+`backend/playoffs/` simulates the rest of the season, applies the NFL tiebreakers through strength of schedule, and plays out the bracket, including reported quarterback return windows from `overrides/qb_return_windows.json`.
+It writes a JSON snapshot offline, and a separate publish step stores it in `nfl.playoff_forecasts`.
 
-Opponent-adjusted unit ratings (rush and pass offense and defense, pass
-block, run block, special teams) are published as descriptive companions.
-They do not feed the engine. Each channel is a two-sided ridge (team unit
-against the opposing unit) whose penalty is the single-game noise variance
-over the between-team variance, selected by next-week walk-forward error on
-the development seasons, so early-season ratings shrink toward average.
-Special teams sums the possession and coverage sides.
+### Awards
+
+`backend/awards/` forecasts MVP, OPOY, OROY, DPOY, DROY, and COY with winner-choice models trained only on earlier seasons at the same week.
+CPOY ranks a sourced list of comeback candidates until enough seasons exist under its current criteria to fit a model.
+Win percentages stay hidden until a model passes its validation checks.
+
+### Players
+
+`backend/players/` scores weekly position traits, a 20 to 80 position grade, wins above replacement, each player's point-spread value, and contract surplus.
+The absence layer reads these values, so the weekly job builds them before the team fit.
 
 ## Layout
 
 ```
 backend/
   cli.py          python -m backend <command>
-  pipeline.py     incremental rebuilds and schedule gates for CI
-  etl/            nflreadpy pulls and the parquet store
+  etl/            nflverse pulls and the local parquet store
   features/       team-game, QB, and unit-channel aggregates
-  model/          engine, preseason prior, layers, calibration, unit ratings
-  odds/           The Odds API client and offer pricing
-  publish.py      the only database writer
-  data_static/    win totals by season and the frozen margin distribution
-sql/              DDL for the nfl schema, applied in order with psql
+  model/          engine, preseason prior, layers, calibration, season wins, in-game model
+  odds/           The Odds API client, ESPN fallback, and offer pricing
+  players/        position traits, grades, player value
+  playoffs/       playoff simulation and publication
+  awards/         award forecasts
+  publish.py      the database writer
+  data_static/    hand-collected win totals, preseason QBs, award labels
+overrides/        manual QB starters and return windows
+sql/              nfl schema migrations, applied in filename order
+ops/              pg_cron installation and the in-game model export
 tests/            production-critical tests only
 ```
 
@@ -154,286 +86,70 @@ Python 3.12 and [Poetry](https://python-poetry.org/).
 ```bash
 poetry sync
 cp .env.example .env
-```
-
-Only `DATABASE_URL` (for `publish`) and `ODDS_API_KEY` (for `odds`) need
-values. Everything else runs offline once data has been ingested. Data lands
-in `backend/data/`, which is gitignored.
-
-```bash
 poetry run pytest -q
 ```
 
-## Commands
+| Variable | Needed for |
+| --- | --- |
+| `DATABASE_URL` | Anything that reads or writes Supabase |
+| `MOMENTUMNFL_DB_WRITES` | Set to `1` to allow writes from a local shell |
+| `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | `publish`, which uploads forecast input files to Supabase Storage |
+| `ODDS_API_KEY` | `odds` and the live worker's closing-line request |
+| `ODDS_API_BOOKMAKERS` | Books whose quotes can become picks; without it no offer is eligible |
+| `ODDS_API_REGIONS` | Optional, defaults to `us` |
+| `ODDS_SOURCE` | Optional; `espn` switches to the ESPN DraftKings fallback when The Odds API quota runs out |
+| `ODDS_API_CLOSING_RESERVE` | Optional credit floor for the live worker's closing-line request, defaults to 60 |
 
-Local development, oldest to newest:
+Model work runs offline once data is ingested into `backend/data/`, which is gitignored.
+
+Core commands:
 
 ```bash
 poetry run python -m backend ingest --seasons 2024 2025
 poetry run python -m backend features --seasons 2024 2025
-poetry run python -m backend calibrate
-poetry run python -m backend preseason --season 2025
-poetry run python -m backend fit --season 2025 --week 3
-```
-
-For the current preseason forecast, after the historical feature cache exists:
-
-```bash
-poetry run python -m backend refresh-inputs --season 2026
 poetry run python -m backend fit --season 2026
-poetry run python -m backend season-wins --season 2026
 poetry run python -m backend odds --season 2026
 poetry run python -m backend publish --season 2026
+poetry run python -m backend grade --season 2026
 ```
 
-`fit`, `odds`, and `publish` infer the season and week from the next unplayed
-kickoff when the flags are omitted. `fit` falls back to `preseason` when no
-game of the season has been played yet.
-
-| Command | What it does |
-| --- | --- |
-| `ingest --seasons` | Pull raw nflverse sources for the given seasons. |
-| `bootstrap-history --through` | Rebuild cached team-game and QB features for any missing historical season without keeping raw play-by-play. |
-| `refresh-inputs --season` | Pull only the inputs that can change an unplayed projection: schedules, teams, depth charts, and injury reports once the season's game data is published. |
-| `features --seasons [--incremental --lookback-weeks N]` | Build feature parquet; incremental mode rebuilds only recent and missing games. |
-| `fit [--season --week] [--projections-only]` | Fit ratings and unit ratings and project the week. |
-| `preseason --season` | Build the week-1 prior, ratings, and projections. |
-| `season-wins --season` | Project full regular-season wins for all 32 teams and write a per-game probability audit. |
-| `calibrate [--read-only --rebuild --uncertainty-only]` | Search development seasons; optionally rebuild in memory and suppress all artifact writes. |
-| `validate-model [--seasons ... --rebuild --details]` | Read-only per-season spread errors, log loss, and interval coverage. |
-| `validate-season-wins [--seasons ... --weeks 1 9 --simulations 10000 --rebuild --details]` | Read-only chronological preseason and midseason forecasts, metrics, and optional team audit. |
-| `validate-qb [--memory] [--context]` | Reproduce the development memory search, select the QB layer, report retrospective validation, and optionally test the context promotion gate, without changing artifacts. |
-| `qbs --season --week --team BUF [--context]` | Inspect starter/backup strengths, recorded and effective samples, and substitutions; optionally show context effects and model uncertainty. |
-| `odds [--season --week]` | Snapshot Odds API offers and price them against the projections. |
-| `upcoming --season [--hours]` | Exit 0 when an unplayed game kicks off within the window, 3 otherwise. |
-| `publish [--season --week] [--projections-only]` | Write the week to the `nfl` schema; the backtest is replaced only when its generation changes. |
-| `grade --season` | Update completed results and grade preserved pregame forecasts. |
-
-Publishing refuses to touch the database unless `MOMENTUMNFL_DB_WRITES=1` is
-set; GitHub Actions opts in automatically. Without it the session is opened
-read-only server-side as well.
-
-Manual starter overrides can be placed in `overrides/qb_starters.csv` with
-columns `season, week, team_abbr, gsis_id`; they take priority over the depth
-chart.
-
-## Season win projections
-
-`season-wins` applies the existing engine and current expected QB adjustments to the complete regular-season schedule, with no game-line blend.
-Preseason ratings already use the frozen sportsbook win totals, so these outputs are not market-independent and their differences from that input are not betting edges.
-The sportsbook source and date live in `backend/data_static/win_total_sources.json`; missing provenance stays missing.
-
-Expected wins are completed wins plus the sum of remaining Student-t win probabilities.
-Completed ties contribute zero wins; future ties are not simulated.
-The command requires 256 games and 16 appearances per team through 2020, or 272 games and 17 appearances from 2021.
-The explicitly recorded 2022 Buffalo-Cincinnati cancellation is applied only after its announcement, using a conservative availability cutoff of January 6, 2023 at 05:00 UTC.
-The [NFL cancellation announcement](https://www.nfl.com/news/week-17-buffalo-cincinnati-game-will-not-be-resumed-neutral-afc-championship-gam) is the source for that exception.
-Other missing games fail schedule validation; completed ties count as zero wins.
-
-The 10th, 50th, and 90th percentiles come from 100,000 reproducible season draws using seed 20260907.
-A Gaussian copula combines shared draws from the engine's team-strength/HFA covariance with independent game residuals, preserving each game's Student-t win probability without counting parameter uncertainty twice.
-Current strength means and expected QBs stay fixed through the remaining schedule; future injuries, roster changes, and strength evolution are not modeled.
-The season ranges have not been coverage-calibrated and are not calibrated confidence intervals for the mean.
-Every draw awards exactly one win per remaining game, and analytic league expected wins equal the eligible schedule length minus completed tied games.
-Use the chronological validator below to regenerate results for the current code instead of relying on older replay statistics.
-
-`nfl.season_win_totals` contains the latest 32-team snapshot for each season, replaced in the same transaction as game projections.
-Apply `sql/003_season_win_totals.sql` before publishing this contract.
-The weekly and projection-refresh workflows regenerate season wins before publication.
-The `/nfl/season-wins` frontend reads only that schema and displays completed records, full-season expected wins, remaining wins, model ranges, and the dated sportsbook comparison.
-
-## Chronological validation and distribution contract
-
-```bash
-poetry run python -m backend validate-model --rebuild
-poetry run python -m backend validate-season-wins --rebuild --weeks 1 9
-poetry run python -m backend calibrate --read-only --rebuild --uncertainty-only
-```
-
-These commands rebuild version-2 features in memory from cached raw PBP without overwriting stored forecasts, rating artifacts, or the database.
-Without `--rebuild`, matching version-2 core caches are required.
-`bootstrap-history` also detects obsolete cache schemas; incremental feature updates rebuild the full active season when its schema is obsolete.
-The rebuilt competitive scoring and EPA targets use complete possessions classified by their first scrimmage play, with matching denominators.
-Full-game scoring and full-game drive counts separately determine the score environment, pace, and outcome residuals.
-This retains garbage-time protection without attributing final scores to a reduced number of possessions.
-Weekly fits carry preseason strength means and covariance together, in consistent point units.
-
-Published `margin_sd` and `total_sd` are standard deviations everywhere.
-All Student-t consumers use the shared conversion `scale = sd * sqrt((df - 2) / df)`.
-The selected calibration multiplier is applied exactly once, and development and validation artifacts use the same units.
-The September 8, 2026 uncertainty-only development search selected SD scale 1.0 and seven degrees of freedom, keeping the existing mean-model settings.
-The broader engine/QB retune remains unpromoted because it gave back spread accuracy relative to the corrected existing model.
-Actual-margin key-number multipliers are learned from development seasons only, then applied to each matchup's continuous location and uncertainty before integer-outcome pricing.
-`calibrate` writes `margin_distribution_v2.csv`; the obsolete residual histogram is never used as a fallback.
-Missing version-2 pricing calibration prevents offer pricing until that artifact has been regenerated and reviewed.
-
-Historical starter identities use timestamped depth-chart snapshots at the forecast cutoff, or conservatively use an earlier weekly chart and prior-game starter fallback.
-An injury report rules a quarterback out only when its `date_modified` precedes the cutoff; the 2025 feed carries no timestamp, so its target-week report is treated as pregame because final game statuses are published before kickoff.
-Target-week outcomes and undated manual overrides never supply historical forecast starters.
-A recorded starter is the first QB to take a dropback, not the passer with the most eventual dropbacks.
-Historical weekly depth charts remain availability proxies because they have no publication timestamp.
-The season validator suppresses future scores and conservatively assumes results become available 24 hours after actual kickoff unless a result-availability timestamp is supplied.
-Postponed games remain unplayed until that cutoff admits their actual result.
-The historical schedule is reconstructed from final game records, so revised kickoff dates and corrected PBP remain explicit reconstruction limitations.
-
-The season validator reports every requested season and cutoff, win MAE, nominal 80% interval coverage and width, and the frozen preseason sportsbook comparison.
-It excludes undated sportsbook totals from forecast inputs; dated preseason totals used in the prior make their comparison market-dependent.
-`--details` includes all team forecasts, expected QB identities, completed and remaining wins, source provenance, and assumptions.
-Intervals still omit future QB changes, strength evolution, and future ties; this evaluation does not automatically tune or publish the model.
+`fit`, `odds`, and `publish` infer the week from the next unplayed kickoff when it is omitted.
+Run `poetry run python -m backend --help` for the full list, including the read-only `validate-*` commands and forecast replay.
+Manual starter overrides go in `overrides/qb_starters.csv`.
 
 ## Production
 
-Two GitHub Actions workflows drive the season, serialized under one
-concurrency group:
+Supabase pg_cron dispatches the GitHub Actions workflows through `repository_dispatch`, with retry ticks.
+`ops/install_nfl_crons.sql` installs the schedules.
 
-- `weekly` runs Tuesday after Monday Night Football: restore cached history,
-  ingest the active season, rebuild the last two weeks of features, fit, take
-  an odds snapshot, publish.
-- `refresh` runs daily and, only when a kickoff falls in the next 30 hours,
-  refreshes schedules and depth charts, reprojects from the Tuesday ratings,
-  takes an odds snapshot, and republishes the projections. Ratings stay the
-  Tuesday snapshot.
+- `weekly` runs Tuesday morning Pacific: ingest, grade, rebuild features and player traits, fit, project season wins, snapshot odds, publish, then build the playoff forecast and, when enabled, awards and player grades.
+- `refresh` runs daily in season, grades completed games, and when a kickoff falls in the next 30 hours reprojects from the Tuesday ratings with fresh inputs and odds.
+- `live-win-probability` is dispatched around unfinished games, publishes in-game win probability, and captures closing lines.
+- `awards` is a manual retry for the awards run.
 
-Both workflows grade completed games immediately after refreshing schedules, even when no upcoming kickoff requires new projections.
-Grading uses `DATABASE_URL` and the same production write guard as publication.
+Repository variables `NFL_PLAYOFFS_ENABLED`, `NFL_AWARDS_ENABLED`, and `NFL_PLAYER_GRADES_ENABLED` gate those publications.
 
-Supabase `pg_cron` owns the NFL schedules; GitHub Actions executes the dispatched jobs.
-After deploying the `repository_dispatch` workflows, apply `ops/install_nfl_crons.sql` to install or update the two named jobs and remove the retired awards job using the existing Vault `github_dispatch_pat`.
-Refresh runs at 10:00 UTC daily in January, February, and August through December; weekly runs at 8:00 AM Pacific Tuesday in those months; awards runs after the weekly publication when `NFL_AWARDS_ENABLED=true`.
-The GitHub schedule triggers are removed to avoid duplicate runs.
-Dispatch removes GitHub's scheduled-event delay, but runner queues and the shared `nfl-production` concurrency group can still delay execution.
+## Rules that must hold
 
-Apply `sql/004_live_forecasts.sql` before deploying the forecast archive publisher or the frontend live history/performance views.
-Each accepted pregame publication appends an immutable `nfl.forecast_snapshots` revision using database receipt time.
-The database blocks stale revisions, post-kickoff replacements, backdated late first publications, and deletions of published projections.
-Existing forecasts are seeded only for games that have not started when the migration runs.
-Postponing a game after its previously published kickoff does not reopen its frozen forecast.
+- Database writes are refused unless `GITHUB_ACTIONS=true` or `MOMENTUMNFL_DB_WRITES=1`; otherwise the session is also read-only on the server.
+- Each pregame publication appends an immutable forecast snapshot, and the first qualifying pick is frozen; the database rejects post-kickoff replacements, late insertions, and changes to settled results.
+- Every input to a forecast must have been observed before its cutoff, historical evaluation uses only information available at the time, and missing coverage fails or produces No Play instead of a guessed default.
+- Each forecast archives its exact inputs, stored by content hash in Supabase Storage, so `replay-forecast` can reproduce it offline.
 
-`grade --season 2026` upserts completed nflverse schedule results and closing spreads into `nfl.game_results`.
-The `nfl.live_predictions` view selects the last eligible pregame revision and recomputes errors when source results or closing lines are corrected.
-It includes games with missing forecasts or closes so coverage remains visible; pure-model, blended-model, and closing-line MAE use exactly the same complete cohort.
-Live tracking starts in 2026 and is kept separate from `nfl.backtest_predictions`.
+## Database
 
-Apply `sql/019_performance_grading.sql` before deploying the performance grader or the frontend performance page that reads it.
-`grade` then rebuilds `nfl.graded_games` (the last pregame revision, the nflverse closing spread and total, and the final score, one row per completed game) and `nfl.performance_metrics` (MAE, RMSE, bias, interval coverage, Brier score, and the gap to the closing line per prediction source and segment: overall, week, projected margin size, QB adjustment size, and divisional games).
-The site reads those precomputed rows directly and never aggregates games itself.
-The closing benchmark is the final nflverse schedule line, not an earlier Odds API snapshot relabeled as a close.
-
-Run the PostgreSQL lifecycle acceptance with `NFL_TEST_DATABASE_URL` pointing to a local disposable PostgreSQL admin database and `poetry run pytest -q tests/test_live_grading.py tests/test_publish_contract.py`.
-The local cluster needs the `anon` and `authenticated` roles used by the migrations.
-The test creates and removes its own database and refuses non-loopback hosts.
-
-Secrets: `DATABASE_URL`, `ODDS_API_KEY`.
-
-## Prospective source replay
-
-Apply `sql/007_forecast_replay.sql` before publishing with the replay-enabled backend.
-Each forecast captures its exact model source, dependency versions, historical feature bytes, schedule, depth charts, injury reports, preseason sportsbook files, and the presence or absence of QB overrides before assigning its cutoff.
-Publication stores compressed, content-addressed inputs and the forecast manifest in immutable database tables in the same transaction as the forecasts.
-The database archive does not expire; the 90-day Actions artifact is a supplementary copy.
-No historical source timestamps are invented, and existing forecast revisions remain unchanged.
-
-`poetry run python -m backend replay-forecast PATH_TO_MANIFEST` restores only those archived bytes in a temporary workspace and checks that all forecast values reproduce.
-The replay uses the archived Python source, requires matching numerical package versions, blocks network connections, and has no production credentials.
-Missing schedule/depth-chart receipts, inputs captured after cutoff, changed hashes, and missing timestamped expected-QB coverage fail explicitly rather than substituting historical lineup or schedule proxies.
-Use `download-forecast RUN_ID DESTINATION` to export a durable database bundle, then pass its returned manifest path to `replay-forecast`.
-The download reads the database without modifying it and writes only the requested local export.
-
-`poetry run python -m backend validate-prospective --season 2026` reads frozen database forecasts and confirmed results, reporting paired pure/blended/closing-line MAE plus home-win Brier score, log loss, and calibration bins by model version.
-The early-week cohort is each game's first eligible publication; the closing cohort is its last eligible pregame publication, with actual lead time reported rather than claiming an exact kickoff capture.
-Home-win probability evaluation excludes ties, and forecast/source-archive coverage remains explicit.
-Until games finish, errors and probability scores are unavailable rather than zero.
+This repository owns the `nfl` schema.
+The column lists in `backend/contracts.py` are the contract the website reads.
+To rebuild an empty project, install `momentumweb/sql/001_site_revalidate.sql` first, then apply `sql/` in order.
+Production schema changes require separate approval.
 
 ## Data sources
 
-- Play-by-play, schedules, teams, depth charts, injuries, PFR advanced stats,
-  and Next Gen Stats come from nflverse via nflreadpy. nflverse data is
-  released under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
-  The one-game fixtures under `tests/fixtures/` are nflverse excerpts.
-- Live spreads and totals come from [The Odds API](https://the-odds-api.com/).
-- `backend/data_static/win_totals.csv` holds preseason sportsbook win totals
-  by team and season, collected by hand.
-  The 2026 inputs are BetMGM's September 1, 2026 [regular-season win totals](https://sports.betmgm.com/en/blog/nfl/nfl-over-under-wins-2026-win-totals-all-32-teams-bm16/), retrieved September 7 before kickoff and frozen for the season.
-- `backend/data_static/preseason_qbs.csv` freezes the market input's assumed QB lineup using [nflverse depth charts](https://github.com/nflverse/nflverse-data/releases/tag/depth_charts).
-  The 2026 references use September 1 snapshots, and 2025 uses the last snapshot before the season opener.
-  The 2016-2024 references are week-one lineup proxies with no intraday timestamps; missing references, including the postponed Miami and Tampa Bay openers in 2017, retain the empirical baseline.
-  These references approximate the lineup priced into historical win totals; the historical evaluation uses dated or prior-week depth-chart proxies and does not establish intraday injury-news timing.
-  QB strengths are rolling EPA estimates, not identified causal player values or a forced 5-to-8-point scale; unobserved QBs receive a replacement prior, and `qbs` exposes recorded dropbacks since 2015 alongside each estimate.
-- Context diagnostics require local historical raw PBP and make no network requests or artifact writes.
-  Their separate observations include competitive scrambles and [nflfastR QB EPA](https://nflfastr.com/articles/beginners_guide.html), which avoids charging the passer for a receiver's lost fumble.
-  Hits and sacks are a consistently available protection proxy, not all charted pressures or an offensive-line grade.
-  The ridge separates supporting-cast and opponent effects while retaining estimated QB-specific pressure liability.
-  Its penalty sizes and residual-variance floors define conditional uncertainty; the context model is not used by the ratings engine or published projection distributions.
-- `backend/data/processed/calibration/margin_distribution_v2.csv` is generated from development seasons by `production-artifacts`.
-  The legacy static margin CSV is not used for pricing.
-
-## NFL awards
-
-The independent awards pipeline covers MVP, OPOY, OROY, DPOY, DROY, CPOY, and COY.
-Each modeled award uses a separate regularized winner-choice model trained only on earlier seasons at the same weekly horizon.
-The initial labels are official winners from 2010-2025, not vote shares.
-Production features have monotone coefficients; interception and position effects have separate sign constraints.
-Player totals use a four-game prior toward previous-season rates, with a positional fallback for newcomers.
-Team win projections use a beta(4,4) record prior; COY compares improvement with the prior season.
-These award-specific projections assume continued player availability and do not replace the game engine or its season-win forecasts.
-Historical snap counts are archived for subsequent workload validation but do not feed the initial model.
-
-Offensive performance uses competitive whole-drive EPA credit, splits passing credit between passer and receiver, subtracts a positional 25th-percentile baseline, and shrinks small samples with a 150-opportunity prior.
-It is descriptive credit rather than an identified causal player effect.
-Defensive performance is a separate standardized box-stat production index, not a coverage grade.
-Neither value metric feeds team ratings.
-
-CPOY currently serves a dated, sourced injury-return watchlist rather than a fitted forecast.
-The comparable training window begins with the 2024 criteria change and is too short for the four-season fitting minimum.
-The initial 2026 watchlist records documented injury returns from NFL.com; it is not an exhaustive AP eligibility list.
-Source dates without a stated timezone are conservatively available from the following UTC midnight.
-
-```bash
-poetry run python -m backend awards-ingest --seasons 2009 2010 2011 2012 2013 2014 2015 2016 2017 2018 2019 2020 2021 2022 2023 2024 2025 2026
-poetry run python -m backend awards --season 2026 --week 0
-poetry run python -m backend validate-awards --season 2026 --week 8
-```
-
-Use `--refresh` when ingesting revised current-season sources.
-`validate-awards` reads local inputs without database access or artifact writes.
-Evaluation is expanding-window, with 2010-2019 development history and 2020 onward labeled retrospective validation.
-An omitted winner counts as a miss and receives a full missing-outcome penalty.
-Historical schedules and statistics are reconstructed snapshots with a 24-hour result-availability assumption, not proof of intraday source availability.
-Parquet source versions, first-observed timestamps, fitted coefficients, candidate boards, and validation metrics are preserved under ignored data directories.
-Win percentages remain null until a model has eight validation seasons, complete winner coverage, lower log loss than a uniform baseline, and a leader-confidence gap no larger than ten percentage points.
-
-`sql/005_awards.sql` is the frontend contract for `/nfl/awards` in momentumweb.
-`sql/011_award_season_stats.sql` adds the `season_stats` column that carries each candidate's season-to-date totals for the board's stat line; apply it before the next `publish-awards` run.
-Publication atomically writes all seven status records and matching complete boards.
-`publish-awards --season 2026 --week 0` uses the existing production write guard.
-Apply the migration before publication.
-The Tuesday weekly workflow runs awards after publishing team forecasts when `NFL_AWARDS_ENABLED=true`, reusing that run's play-by-play.
-The standalone awards workflow remains available for manual retries and defaults to building without publication.
-Production selects the latest started regular-season week and requires every game through that week to have both scores, player statistics for both teams on offense and defense, and final play-by-play with matching scores and EPA coverage.
-This includes Monday Night Football as soon as the inputs are ready, without a fixed 24-hour delay.
-Missing inputs fail before rebuilding or publishing a board; the existing published board remains unchanged and the failed workflow identifies the missing games or teams.
-Retry the manual awards workflow with week `-1` and publication enabled once the missing sources arrive.
-Historical evaluations retain their documented 24-hour availability assumption.
-Both workflows share one awards action and retain reviewable artifacts.
-
-## Production artifact readiness
-
-`poetry run python -m backend production-artifacts` rebuilds the pricing distribution and corrected backtest using approved fixed settings, without a parameter search.
-A manifest binds the outputs to model source and historical feature bytes.
-Odds pricing verifies that manifest before making paid API requests.
-Both production workflows restore or rebuild these ignored artifacts, retain an Actions artifact, and warn explicitly when the odds refresh fails.
-Weekly publication includes the corrected backtest.
-Daily refresh recovers missing historical and active-season feature caches instead of failing solely because a cache was evicted.
-Push CI verifies lint and the focused forecast/publication acceptance checks without production credentials.
-These code paths do not themselves confirm a successful remote run, migration, or live publication.
+- Play-by-play, schedules, rosters, depth charts, injuries, contracts, PFR charting, and Next Gen Stats from nflverse via [nflreadpy](https://github.com/nflverse/nflreadpy), released under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+- Moneylines, spreads, and totals from [The Odds API](https://the-odds-api.com/), with ESPN's scoreboard as fallback and for live scores.
+- Current injury news from ESPN.
+- Preseason sportsbook win totals, collected by hand in `backend/data_static/`.
 
 ## License
 
 MIT. See `LICENSE`.
-
-
-Database bootstrap installs the shared `momentumweb/sql/001_site_revalidate.sql` before the ordered sport migrations.
-Its Supabase pg_net and Vault secret prerequisites are owned by the website repository.
-The `backend/data_static/margin_distribution.csv` file is deprecated historical research data and is excluded from new forecast bundles.
-Production calibration uses `margin_distribution_v2.csv` with a manifest bound to numerical dependencies, historical depth charts, injuries, and feature inputs.
-A cold runner restores those availability inputs through `bootstrap-history`; absent coverage fails explicitly rather than silently changing the fitted population.
