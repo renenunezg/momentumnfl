@@ -13,27 +13,28 @@ The website at [renenunez.dev](https://renenunez.dev), in the separate `momentum
 - Regulars ruled out at other positions cost their team the value the player ratings assign them, weighted by how much of the team's recent play they were part of.
 - For totals, league scoring rate and pace carry preseason priors that fade through the season, and a fixed calibration sets the total's location.
 - The published margin is shifted toward the market line at a capped weight.
-  The pure-model margin is published beside it, and the closing line is kept as a separate accuracy benchmark, never an input.
+  The pure-model margin is published beside it.
+  The closing line is used only to measure accuracy.
 - Opponent-adjusted unit ratings (rushing and passing on both sides, blocking, special teams) and a market-implied team rating are published for context; neither feeds the forecast.
-- During games, nflfastR's spread-aware win probability model is anchored on the published pregame margin instead of the closing spread.
+- During games, nflfastR's spread-aware win probability model takes the published pregame margin in place of the closing spread it was trained on.
 
 Parameters are selected on development seasons 2016 through 2021.
-Later seasons are retrospective validation, not a fresh holdout.
+Later seasons have been inspected repeatedly, so they count as retrospective validation.
 
 ## Picks
 
-Picks are prospective and priced from the decision-time market: the devigged market number, moved toward the model only as far as the model has earned against the closing line.
+Picks are prospective and priced from the decision-time market: the devigged median across books, moved toward the model by a weight fitted against closing lines (set in `backend/recommendations.py`).
 Offers with positive expected value are picks, and a small weekly slate is filled with the best-priced sides as ranked leans, recorded under their own reason so the two tiers grade apart.
 Stakes are a flat one unit.
 Estimated expected value does not establish a real betting advantage.
 
 An offer is eligible only from a configured bookmaker (`ODDS_API_BOOKMAKERS`), with a fresh two-sided quote matched to the exact game and kickoff.
-A game without fresh schedule, depth-chart, injury, and expected-quarterback coverage is a No Play, never treated as healthy.
+A game without fresh schedule, depth-chart, injury, and expected-quarterback coverage is a No Play.
 The rules live in `backend/recommendations.py`, `backend/source_inputs.py`, and `backend/availability.py`.
 
 Grading uses official nflverse final scores at the frozen line and price.
 The closing line is the one the live worker captures at kickoff, with the nflverse schedule line as the fallback.
-Six-point teaser legs on small underdogs are paper-tracked in a separate record and never enter the pick ledger.
+Six-point teaser legs on small underdogs are paper-tracked in a separate record outside the pick ledger.
 
 ## Other pipelines
 
@@ -133,7 +134,7 @@ Repository variables `NFL_PLAYOFFS_ENABLED`, `NFL_AWARDS_ENABLED`, and `NFL_PLAY
 
 - Database writes are refused unless `GITHUB_ACTIONS=true` or `MOMENTUMNFL_DB_WRITES=1`; otherwise the session is also read-only on the server.
 - Each pregame publication appends an immutable forecast snapshot, and the first qualifying pick is frozen; the database rejects post-kickoff replacements, late insertions, and changes to settled results.
-- Every input to a forecast must have been observed before its cutoff, historical evaluation uses only information available at the time, and missing coverage fails or produces No Play instead of a guessed default.
+- Every input to a forecast must have been observed before its cutoff, historical evaluation uses only information available at the time, and missing coverage fails or produces No Play.
 - Each forecast archives its exact inputs, stored by content hash in Supabase Storage, so `replay-forecast` can reproduce it offline.
 
 ## Database
