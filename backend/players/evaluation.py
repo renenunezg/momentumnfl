@@ -63,6 +63,9 @@ HOLDOUT_STATUS = {
     # v5 swaps games played last season for a prior-season flag, chosen on
     # development seasons; 2025 was scored once after.
     "nfl_qb_rating_v5": "screened",
+    # v6 drops success past the first read, whose fitted weight was zero; chosen
+    # on development seasons, 2025 scored once after.
+    "nfl_qb_rating_v6": "screened",
 }
 TRAIT_TARGET = "epa_credit_per_game_next_season"
 RATING_TARGETS = {

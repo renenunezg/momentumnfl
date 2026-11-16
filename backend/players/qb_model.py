@@ -1,10 +1,10 @@
-"""The quarterback rating, version 5, on the shared rating engine.
+"""The quarterback rating, version 6, on the shared rating engine.
 
 The headline is the expected EPA per dropback over the rest of the season.
 The measures that carry weight are the production core (EPA and success per
 dropback, sacks, late-down conversion) and the processing measures from FTN
-charting (success past the first read, sacks and success when blitzed), with
-the prior season blended in. Every input publishes during the season.
+charting (sacks and success when blitzed), with the prior season blended in.
+Every input publishes during the season.
 
 Version 3 drops completion over expected (current and prior season), pressure
 to sack, the rate of throws past the first read and the checkdown rate: on the
@@ -22,6 +22,12 @@ how many games he played in it. Games played stood in for an established
 starter but marked a passer down for missing time hurt; the flag ranks the
 rest of the season better leaving one season out of 2016 to 2024 (0.440
 against 0.422, paired standard error 0.007).
+
+Version 6 drops success past the first read. Its fitted coefficient was zero
+(-0.00003) while the card tagged it as a grade input; leaving it out lowered
+the leave-one-season-out error slightly and left the rank correlation where it
+was (0.4398 against 0.4397, paired standard error 0.0003). It stays on the
+card as a descriptive processing measure.
 
 The rating is judged against the public composites to date (EPA per dropback,
 Ben Baldwin's EPA + CPOE, nflfastR's DAKOTA, ESPN's Total QBR) and against
@@ -139,7 +145,7 @@ def qbr_raw(sums: pd.DataFrame) -> pd.Series:
 
 QB_SPEC = RatingSpec(
     position="QB",
-    model_version="nfl_qb_rating_v5",
+    model_version="nfl_qb_rating_v6",
     rates=PRODUCTION_RATES,
     kinds={
         "quality": [
@@ -190,7 +196,6 @@ QB_SPEC = RatingSpec(
         "success_db",
         "sack_rate",
         "late_down_conv",
-        "success_beyond_first",
         "blitz_sack_rate",
         "blitz_success",
     ],
