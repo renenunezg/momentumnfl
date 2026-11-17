@@ -10,7 +10,7 @@ from backend.etl import store
 from backend.features import qb as qb_features
 from backend.features.drives import kickoff_utc
 from backend.features.scoring import closing_home_spread
-from backend.model import absence_layer
+from backend.model import absence_layer, seed_lock
 from backend.model import qb_adjustment as qb_layer
 from backend.model.joint_scoring import (
     DEFAULT_CONFIG,
@@ -158,6 +158,15 @@ def week_slate(season: int, week: int) -> pd.DataFrame:
     return slate
 
 
+def regular_season(season: int) -> pd.DataFrame:
+    """The season's regular-season schedule, with points where played."""
+    schedules = store.read_raw("schedules.parquet")
+    games = schedules[
+        schedules["season"].eq(season) & schedules["game_type"].eq("REG")
+    ].rename(columns={"home_score": "home_points", "away_score": "away_points"})
+    return games.assign(start_date=kickoff_utc(games))
+
+
 def market_home_spreads(slate: pd.DataFrame) -> dict[str, float]:
     """game_id -> sportsbook home line from the nflverse schedule."""
     return {
@@ -230,6 +239,7 @@ def fit_and_project(
         layer_config,
         market_totals(slate),
         absence_points,
+        seed_lock.locked_teams(regular_season(season), as_of, store.current_teams()),
     )
     # Published ratings are the fitted ratings: nothing from the coming
     # week's lines enters them, which live on the projection rows instead.

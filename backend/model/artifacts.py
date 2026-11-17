@@ -31,6 +31,7 @@ def fingerprint() -> str:
         REPO_ROOT / "poetry.lock",
         REPO_ROOT / "backend/config.py",
         REPO_ROOT / "backend/players/war.py",
+        REPO_ROOT / "backend/playoffs/seeding.py",
     ]
     for directory in ("backend/model", "backend/features", "backend/etl"):
         paths.extend(sorted((REPO_ROOT / directory).glob("*.py")))

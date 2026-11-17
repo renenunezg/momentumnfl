@@ -54,13 +54,22 @@ QB_LAYER_VERSION = "qb_v8"
 # Version 2 reads defensive credit with fitted role weights.
 DEFAULT_ABSENCE_WEIGHT = 0.99
 ABSENCE_LAYER_VERSION = "absence_v2"
+# Home-margin points against a team whose playoff seed is locked entering the
+# final regular-season week (seed_lock). Selected on development seasons
+# 2016-2021 like the absence weight: the least-squares slope of the closing
+# line's move away from the pure margin on the lock indicator (7.9, standard
+# error 0.8, 14 games), with the outcome slope (8.9, standard error 3.5) as
+# the independent check (calibration.select_seed_lock_points). Fitted with the
+# usual starter expected at quarterback. The margin moves; the total does not.
+DEFAULT_SEED_LOCK_POINTS = 7.9
+SEED_LOCK_LAYER_VERSION = "lock_v1"
 
 
 def layered_version(engine_version: str) -> str:
     """A projection's version: the rating source plus the output layers."""
     return (
         f"{engine_version}_{QB_LAYER_VERSION}_{ABSENCE_LAYER_VERSION}"
-        f"_{TOTALS_LAYER_VERSION}"
+        f"_{SEED_LOCK_LAYER_VERSION}_{TOTALS_LAYER_VERSION}"
     )
 
 
@@ -79,6 +88,7 @@ class LayerConfig:
     qb_weight_proxy: float = DEFAULT_QB_WEIGHT_PROXY
     qb_weight_proxy_absence: float = DEFAULT_QB_WEIGHT_PROXY_ABSENCE
     absence_weight: float = DEFAULT_ABSENCE_WEIGHT
+    seed_lock_points: float = DEFAULT_SEED_LOCK_POINTS
 
     def __post_init__(self) -> None:
         if not isfinite(self.qb_span_dropbacks) or self.qb_span_dropbacks <= 0:
@@ -91,6 +101,8 @@ class LayerConfig:
         ):
             if not 0 <= getattr(self, name) <= 1.5:
                 raise ValueError(f"{name} must be between 0 and 1.5")
+        if not 0 <= self.seed_lock_points <= 21:
+            raise ValueError("seed_lock_points must be between 0 and 21")
 
     def qb_weight(self, basis: str, confirmed_absence: bool) -> float:
         """Weight on a QB delta given how its starter was identified."""
@@ -133,6 +145,7 @@ def assemble_projections(
     config: LayerConfig = LayerConfig(),
     market_totals: dict[str, float] | None = None,
     absence_points: dict[str, tuple[float, float]] | None = None,
+    seed_locked: frozenset[str] = frozenset(),
 ) -> list[GameProjection]:
     """schedule rows need: game_id, season, week, home_team, away_team,
     neutral_site, and optionally start_date, div_game, home_rest, away_rest.
@@ -140,7 +153,9 @@ def assemble_projections(
     market_home_spreads maps game_id -> sportsbook home line.
     market_totals maps game_id -> sportsbook total.
     absence_points maps game_id -> (home, away) unweighted points per game
-    lost to ruled-out players other than the quarterback."""
+    lost to ruled-out players other than the quarterback.
+    seed_locked names the teams with a locked playoff seed; their margin is
+    marked down and reported in the rest adjustment."""
     qb_adjustments = qb_adjustments or {}
     absence_points = absence_points or {}
     market_home_spreads = market_home_spreads or {}
@@ -157,6 +172,8 @@ def assemble_projections(
             getattr(game, "home_rest", None),
             getattr(game, "away_rest", None),
             config.rest_points_per_day,
+        ) + config.seed_lock_points * (
+            (str(game.away_team) in seed_locked) - (str(game.home_team) in seed_locked)
         )
         home_lost, away_lost = absence_points.get(game_id, (0.0, 0.0))
         home_absence = -config.absence_weight * home_lost

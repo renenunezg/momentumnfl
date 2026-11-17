@@ -187,6 +187,8 @@ def test_calibration_uses_one_sd_contract_and_keeps_pricing_holdout_free(
                     **{f"qb_absence_sum_{int(span)}": 0.0 for span in c.QB_SPANS},
                     "home_absence_points": 0.0,
                     "away_absence_points": 0.0,
+                    "home_seed_locked": False,
+                    "away_seed_locked": False,
                 }
                 for season in seasons
                 for i, actual in enumerate([-10, -3, 0, 3, 10])
@@ -203,6 +205,11 @@ def test_calibration_uses_one_sd_contract_and_keeps_pricing_holdout_free(
         c,
         "select_absence_weight",
         lambda predictions, layer: (layer.absence_weight, {}),
+    )
+    monkeypatch.setattr(
+        c,
+        "select_seed_lock_points",
+        lambda predictions, layer: (layer.seed_lock_points, {}),
     )
     monkeypatch.setattr(c, "ENGINE_GRID", [engine])
     monkeypatch.setattr(c, "LAYER_GRID", [LayerConfig()])

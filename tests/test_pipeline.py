@@ -386,6 +386,7 @@ def test_backtest_layers_reproduce_the_published_projection():
     deltas = {f"g{i}": (1.5 - i * 0.4, 0.3 * (i % 3)) for i in range(8)}
     absences = {f"g{i}": (0.2 * (i % 4), 0.35 * (i % 2)) for i in range(8)}
     spreads = {f"g{i}": -3.0 + i for i in range(8)}
+    seed_locked = frozenset({slate.home_team[2], slate.away_team[5]})
     rows = []
     for game in slate.itertuples():
         engine = fit.engine_projection(game)
@@ -399,6 +400,8 @@ def test_backtest_layers_reproduce_the_published_projection():
                 qb_input_basis=QB_BASIS_DATED if game.Index % 2 else QB_BASIS_PROXY,
                 home_absence_points=absences[game.game_id][0],
                 away_absence_points=absences[game.game_id][1],
+                home_seed_locked=game.home_team in seed_locked,
+                away_seed_locked=game.away_team in seed_locked,
                 **{
                     f"qb_adj_{int(layer.qb_span_dropbacks)}": home_delta - away_delta,
                     f"qb_sum_{int(layer.qb_span_dropbacks)}": home_delta + away_delta,
@@ -424,7 +427,10 @@ def test_backtest_layers_reproduce_the_published_projection():
         spreads,
         layer,
         absence_points=absences,
+        seed_locked=seed_locked,
     )
+    assert published[2].rest_adjustment == -layer.seed_lock_points
+    assert published[5].rest_adjustment == layer.seed_lock_points
     for row, projection in zip(backtest.itertuples(), published, strict=True):
         assert row.pure_model_margin == pytest.approx(projection.pure_home_margin)
         assert row.model_margin == pytest.approx(projection.home_margin)

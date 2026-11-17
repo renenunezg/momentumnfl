@@ -24,7 +24,7 @@ from backend.config import (
 from backend.etl import store
 from backend.features.qb import expected_starters, identification_basis, ruled_out
 from backend.features.scoring import closing_home_spread
-from backend.model import absence_layer
+from backend.model import absence_layer, seed_lock
 from backend.model import qb_adjustment as qb_layer
 from backend.model.distributions import student_t_scale
 from backend.model.fit_week import load_depth_charts, load_injuries
@@ -104,6 +104,8 @@ class WalkForwardData:
         self.forecast_inputs = {}
         self.contexts = {}
         self.pregame_availability = {}
+        self.teams = store.current_teams()
+        self.seed_locks = {}
 
     def availability_at(self, season, week, cutoff, eligible):
         """Pregame source reconstruction; team ratings retain their weekly cut."""
@@ -123,6 +125,15 @@ class WalkForwardData:
                 ruled_out(self.injuries[season], season, week, cutoff),
             )
         return self.pregame_availability[key]
+
+    def seed_locked_at(self, season, week, as_of):
+        key = season, week
+        if key not in self.seed_locks:
+            games = self.season_games[season]
+            self.seed_locks[key] = seed_lock.locked_teams(
+                games[games["season_type"].eq("REG")], as_of, self.teams
+            )
+        return self.seed_locks[key]
 
     def forecast_inputs_at(self, season, week, slate):
         key = season, week
@@ -230,6 +241,7 @@ def generate_walk_forward(
                 data.injuries[season],
                 engine_config.rating_half_life_weeks,
             )
+            seed_locked = data.seed_locked_at(season, week, as_of)
             for game in slate.itertuples():
                 game_id = str(game.game_id)
                 engine = fit.engine_projection(game)
@@ -275,6 +287,8 @@ def generate_walk_forward(
                     "away_points": game.away_points,
                     "home_absence_points": absence_points[game_id][0],
                     "away_absence_points": absence_points[game_id][1],
+                    "home_seed_locked": str(game.home_team) in seed_locked,
+                    "away_seed_locked": str(game.away_team) in seed_locked,
                 }
                 for span in qb_spans:
                     adj = 0.0
@@ -319,6 +333,8 @@ def apply_layers(predictions: pd.DataFrame, config: LayerConfig) -> pd.DataFrame
         raise ValueError("Regenerate forecasts with pregame QB absence inputs")
     if not {"home_absence_points", "away_absence_points"}.issubset(out.columns):
         raise ValueError("Regenerate forecasts with pregame absence inputs")
+    if not {"home_seed_locked", "away_seed_locked"}.issubset(out.columns):
+        raise ValueError("Regenerate forecasts with seed-lock inputs")
     if not out["qb_input_basis"].isin((QB_BASIS_DATED, QB_BASIS_PROXY)).all():
         raise ValueError("Regenerate forecasts with per-season QB identification bases")
     # Dated charts take one weight; undated proxies take the proxy weight plus
@@ -334,6 +350,7 @@ def apply_layers(predictions: pd.DataFrame, config: LayerConfig) -> pd.DataFrame
         + absence_weight * out[absence_column]
         + config.rest_points_per_day * out["rest_diff"]
         + config.absence_weight * absence_margin(out)
+        + config.seed_lock_points * seed_lock_margin(out)
     ).to_numpy()
     out["pure_model_margin"] = pure
     out["model_margin"] = blend_margin(pure, out["market_margin"], config.market_weight)
@@ -350,6 +367,39 @@ def apply_layers(predictions: pd.DataFrame, config: LayerConfig) -> pd.DataFrame
 def absence_margin(frame: pd.DataFrame) -> pd.Series:
     """Unweighted home-margin points from ruled-out players other than the QB."""
     return frame["away_absence_points"] - frame["home_absence_points"]
+
+
+def seed_lock_margin(frame: pd.DataFrame) -> pd.Series:
+    """Home-margin direction of a locked seed: against the locked side."""
+    return frame["away_seed_locked"].astype(float) - frame["home_seed_locked"].astype(
+        float
+    )
+
+
+def select_seed_lock_points(
+    predictions: pd.DataFrame, layer: LayerConfig
+) -> tuple[float, dict]:
+    """Development points against a locked seed, by the absence layer's rule:
+    the slope of the closing line's move away from the pure margin without the
+    layer, with the outcome slope as the independent check."""
+    development = predictions[
+        predictions["season"].isin(DEVELOPMENT_SEASONS)
+        & predictions["market_margin"].notna()
+    ]
+    delta = seed_lock_margin(development)
+    pure = apply_layers(development, replace(layer, seed_lock_points=0.0))[
+        "pure_model_margin"
+    ]
+    slope, error = _implied_slope(delta, development["market_margin"] - pure)
+    outcome = _implied_slope(delta, development["actual_margin"] - pure)
+    return float(np.clip(slope, 0.0, 21.0)), {
+        "points": slope,
+        "se": error,
+        "games": int(len(development)),
+        "games_with_lock": int(delta.ne(0).sum()),
+        "outcome_points": outcome[0],
+        "outcome_se": outcome[1],
+    }
 
 
 def select_absence_weight(
@@ -842,6 +892,10 @@ def run_calibration(
         dev_predictions, qb_layer_config
     )
     log(f"selected absence weight: {absence_report}")
+    seed_lock_points, seed_lock_report = select_seed_lock_points(
+        dev_predictions, replace(qb_layer_config, absence_weight=absence_weight)
+    )
+    log(f"selected seed-lock points: {seed_lock_report}")
     scored = []
     for layer in LAYER_GRID:
         layer = replace(
@@ -851,6 +905,7 @@ def run_calibration(
             qb_weight_proxy=qb_layer_config.qb_weight_proxy,
             qb_weight_proxy_absence=qb_layer_config.qb_weight_proxy_absence,
             absence_weight=absence_weight,
+            seed_lock_points=seed_lock_points,
         )
         layered = apply_layers(dev_predictions, layer)
         loss = margin_log_loss(layered, 1.0, SELECTION_DF)
