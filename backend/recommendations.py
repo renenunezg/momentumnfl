@@ -13,7 +13,7 @@ from backend.model.distributions import student_t_scale
 from backend.model.market_blend import cover_push_probabilities
 from backend.odds.markets import ODDS_SOURCES, _american_profit
 
-POLICY_VERSION = "nfl-picks-v7"
+POLICY_VERSION = "nfl-picks-v8"
 # Dispersion of actual results around the priced (blended) line, from the
 # chronological calibration replay of 2019 through 2025 (1,960 games with a
 # closing spread and total). The engine's predictive spread carries rating
@@ -40,6 +40,22 @@ PRICING_TOTAL_SD = 13.28
 # home underdogs, and a favourite-longshot devig correction).
 SIDE_MODEL_WEIGHT = 0.0
 TOTAL_MODEL_WEIGHT = 0.0
+# How a book splits its margin between the two sides of a quote is not
+# identified by NFL history. With the share of the margin taken off a side
+# proportional to its implied probability raised to g (g = 1 is the
+# proportional devig, g = 0 an equal split, which is Shin's model for a
+# two-way market), the g that best reproduces the spread market's win
+# probability is -0.36 on 2016 through 2021 and 0.38 on 2022 through 2025, and
+# the g that best fits results is 0.22 and -0.84; no devig beats the
+# proportional one's log loss by a tenth of a week-clustered standard error on
+# the development seasons. The two splits put a 10 percent underdog 1.2 points
+# apart, 13 percent of expected value at +950, where v7's proportional split
+# found its edges (0.3 to 0.6 points on underdogs that won 10.8 percent of
+# 2010 through 2025 closes priced 13.7). Every offer is therefore priced at
+# the fair probability least favourable to its own side across the two
+# (_fair_probability), so an edge is one that holds however the margin is
+# split; the splits agree where the two prices are close, as on spreads and
+# totals.
 # Picks per model week. Offers with positive expected value against the
 # devigged market are always picks (POSITIVE_EV); when fewer than SLATE_SIZE
 # games have a pick, the highest-EV spread or moneyline sides fill the slate
@@ -151,10 +167,25 @@ def _probabilities(projection, offer, distribution):
     return win, push, loss
 
 
-def _market_center(projection, market, candidates, distribution):
+def _fair_probability(mine, theirs, backed):
+    """No-push fair probability of the side quoted at implied probability
+    ``mine`` against ``theirs``: the lower of the proportional and equal-split
+    devigs when that side is the one backed, the higher when the other is.
+
+    The equal split is the lower for an underdog and the proportional for a
+    favourite, so each side is priced as if it carried the larger share of the
+    book's margin.
+    """
+    proportional = mine / (mine + theirs)
+    equal = mine - (mine + theirs - 1.0) / 2.0
+    return min(proportional, equal) if backed else max(proportional, equal)
+
+
+def _market_center(projection, market, candidates, distribution, side):
     """Median across books of the mean that reproduces each book's devigged
-    two-way price, so the vig and price differences inform the market number,
-    not only the posted points. NaN without a paired quote."""
+    two-way price for an offer on ``side``, so the vig and price differences
+    inform the market number, not only the posted points. NaN without a paired
+    quote."""
     first = "over" if market == "totals" else "home"
     field = "model_total" if market == "totals" else "home_margin"
     means = []
@@ -177,7 +208,7 @@ def _market_center(projection, market, candidates, distribution):
         if other is None:
             continue
         mine, theirs = (1 / (_american_profit(o["price"]) + 1) for o in (offer, other))
-        fair = mine / (mine + theirs)
+        fair = _fair_probability(mine, theirs, side == first)
         base = {"totals": offer["point"], "spreads": -(offer["point"] or 0.0)}.get(
             market, 0.0
         )
@@ -195,16 +226,17 @@ def _market_center(projection, market, candidates, distribution):
     return float(np.median(means)) if means else float("nan")
 
 
-def _anchored_projection(projection, market, candidates, distribution):
-    """The projection re-anchored on the decision-time market: the devigged
-    market number moved SIDE_MODEL_WEIGHT toward the pure margin (sides) or
-    TOTAL_MODEL_WEIGHT toward the model total (totals).
+def _anchored_projection(projection, market, candidates, distribution, side):
+    """The projection that prices an offer on ``side``, re-anchored on the
+    decision-time market: the devigged market number moved SIDE_MODEL_WEIGHT
+    toward the pure margin (sides) or TOTAL_MODEL_WEIGHT toward the model total
+    (totals).
 
     Returns the projection and the market number. The priced field is NaN
     without a paired quote or a model number, so a market is never priced
     from the published blend or the model alone.
     """
-    center = _market_center(projection, market, candidates, distribution)
+    center = _market_center(projection, market, candidates, distribution, side)
     if market == "totals":
         total = center + TOTAL_MODEL_WEIGHT * (projection.model_total - center)
         return projection._replace(model_total=total), center
@@ -347,7 +379,8 @@ def build_recommendations(
     Every market is priced from the devigged market number at decision time
     moved the evidence-fit model weight toward the model
     (_anchored_projection), not from the published blend, whose model share
-    the model has not earned against the market. Each row records the median
+    the model has not earned against the market. The devig is the one least
+    favourable to the offer's own side (_fair_probability). Each row records the median
     posted total. Everything is priced with the empirical dispersion around
     the priced line, not the engine's wider predictive spread. The best offer
     per market is the one with the highest expected value. Offers with
@@ -422,14 +455,18 @@ def build_recommendations(
         )
         for market in MARKETS:
             field = "model_total" if market == "totals" else "home_margin"
-            market_projection, center = _anchored_projection(
-                priced_projection,
-                market,
-                [c for c in candidates if c["market"] == market],
-                distribution,
-            )
-            if not np.isfinite(getattr(market_projection, field) - center):
-                market_projection = None
+            sides = ("over", "under") if market == "totals" else ("home", "away")
+            priced = [c for c in candidates if c["market"] == market]
+            # One projection per side: an offer is priced at the market number
+            # least favourable to it (_fair_probability).
+            anchored = {}
+            for side in sides:
+                side_projection, center = _anchored_projection(
+                    priced_projection, market, priced, distribution, side
+                )
+                if np.isfinite(getattr(side_projection, field) - center):
+                    anchored[side] = side_projection
+            market_projection = anchored[sides[0]] if len(anchored) == 2 else None
             row = {
                 key: getattr(projection, key, None)
                 for key in (
@@ -457,7 +494,8 @@ def build_recommendations(
                 reason=reason,
                 stake_units=0.0,
                 execution_eligibility_verified=False,
-                # The margin and total this market was actually priced from.
+                # The margin and total this market was actually priced from,
+                # replaced below by those of the best offer's side.
                 model_home_margin=(
                     projection.home_margin
                     if market_projection is None or market == "totals"
@@ -473,7 +511,6 @@ def build_recommendations(
                 total_sd=priced_projection.total_sd,
                 pricing_weights=list(map(float, distribution)),
             )
-            priced = [c for c in candidates if c["market"] == market]
             empty_reason = reason or "no_valid_price"
             if reason == "invalid_model_distribution":
                 priced = []
@@ -487,7 +524,7 @@ def build_recommendations(
                 ):
                     continue
                 win, push, loss = _probabilities(
-                    market_projection, candidate, distribution
+                    anchored[candidate["side"]], candidate, distribution
                 )
                 profit = _american_profit(candidate["price"])
                 implied = 1 / (profit + 1)
@@ -511,7 +548,9 @@ def build_recommendations(
                         str(item[2]["provider_key"]),
                     ),
                 )
-                points = _edge_points(market_projection, best, distribution, implied)
+                points = _edge_points(
+                    anchored[best["side"]], best, distribution, implied
+                )
                 if block is None and not np.isfinite(points):
                     block = "invalid_probability"
                 for key in (
@@ -530,6 +569,9 @@ def build_recommendations(
                     "execution_eligibility_verified",
                 ):
                     row[key] = best[key]
+                row["model_total" if market == "totals" else "model_home_margin"] = (
+                    getattr(anchored[best["side"]], field)
+                )
                 row.update(
                     win_probability=win,
                     push_probability=push,

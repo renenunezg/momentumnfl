@@ -954,7 +954,8 @@ def test_recommendation_publication_settlement_and_filtered_history(database):
 def test_slate_fills_with_best_priced_leans_after_frozen_picks():
     """Without positive value, the five-game slate counts frozen picks and fills
     with the highest-value sides at the market, whichever side the model
-    favours, never totals."""
+    favours, never totals. A long underdog is value only when its price beats
+    the market however the books' margin is split between the two sides."""
     import json
 
     import numpy as np
@@ -1004,8 +1005,23 @@ def test_slate_fills_with_best_priced_leans_after_frozen_picks():
             source_timestamps=json.dumps(source),
             data_flags=json.dumps(flags),
         )
-        for i in range(1, 9)
+        for i in range(1, 11)
     )
+    # The 2026 week 11 moneylines on a 16-point home favourite at four books.
+    # Removing each book's margin in proportion prices the underdog at 9.5
+    # percent, above its best price of +980; splitting it equally prices it
+    # near 8.3 percent, so g9 holds no value. In g10 one book hangs +1300.
+    moneylines = [
+        (game, book, "h2h", side, None, price)
+        for game, longest in (("g9", 980), ("g10", 1300))
+        for book, home, away in (
+            ("a", -1431, 886),
+            ("b", -1800, longest),
+            ("c", -1400, 950),
+            ("d", -1200, 750),
+        )
+        for side, price in (("home", home), ("away", away))
+    ]
     offers = pd.DataFrame(
         dict(
             game_id=game,
@@ -1023,28 +1039,38 @@ def test_slate_fills_with_best_priced_leans_after_frozen_picks():
             match_score=1.0,
             execution_eligibility_verified=True,
         )
-        for i, game in enumerate(forecasts.game_id, start=1)
-        for book, market, side, point, price in (
-            ("a", "spreads", "home", -3.0, -110),
-            ("a", "spreads", "away", 3.0, -110),
-            ("b", "spreads", "home", -3.0, -110),
-            ("b", "spreads", "away", 3.0, -110 + i),
-            ("a", "totals", "over", 44.0, -110),
-            ("a", "totals", "under", 44.0, -110),
-        )
+        for game, book, market, side, point, price in [
+            (f"g{i}", *quote)
+            for i in range(1, 9)
+            for quote in (
+                ("a", "spreads", "home", -3.0, -110),
+                ("a", "spreads", "away", 3.0, -110),
+                ("b", "spreads", "home", -3.0, -110),
+                ("b", "spreads", "away", 3.0, -110 + i),
+                ("a", "totals", "over", 44.0, -110),
+                ("a", "totals", "under", 44.0, -110),
+            )
+        ]
+        + moneylines
     )
     decisions = build_recommendations(
         forecasts,
         offers,
         np.ones(len(MARGINS)),
         decision_at=now,
-        picked_games={"g1", "other-game"},
+        picked_games={"g1", "other-game", "g9"},
     )
-    picks = decisions[decisions.status.eq("recommended")]
+    picks = decisions[decisions.status.eq("recommended")].set_index("game_id")
+    value = picks.loc["g10"]
+    assert (value.reason, value.market, value.price) == ("positive_ev", "h2h", 1300)
+    assert value.win_probability == pytest.approx(0.083, abs=0.003)
+    longshot = decisions[decisions.game_id.eq("g9") & decisions.market.eq("h2h")]
+    assert longshot.expected_value_per_unit.lt(0).all()
+    picks = picks.drop("g10")
     assert picks.reason.eq("ranked_lean").all() and picks.market.eq("spreads").all()
     assert picks.side.eq("away").all() and picks.provider_key.eq("b").all()
     assert picks.expected_value_per_unit.lt(0).all()
-    assert sorted(picks.game_id) == ["g6", "g7", "g8"] and SLATE_SIZE == 5
+    assert list(picks.index) == ["g8"] and SLATE_SIZE == 5
 
 
 def test_teaser_legs_use_the_consensus_line_freeze_and_grade(database):

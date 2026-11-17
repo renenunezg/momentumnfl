@@ -279,7 +279,11 @@ def test_early_totals_stabilization_preserves_published_spread_and_moneyline(
             offer = dict(market=market, side="home", point=-3.5)
             old_priced, new_priced = (
                 _anchored_projection(
-                    row._replace(margin_sd=12.0), "spreads", posted, distribution
+                    row._replace(margin_sd=12.0),
+                    "spreads",
+                    posted,
+                    distribution,
+                    "home",
                 )[0]
                 for row in (old_row, new_row)
             )
