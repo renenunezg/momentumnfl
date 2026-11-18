@@ -48,6 +48,20 @@ jobs:
             season=$year
           fi
           echo "season=$season" >> "$GITHUB_OUTPUT"
+      # Restored before the pull: restoring after it put Tuesday's depth chart
+      # and injuries back over the fresh ones, whose receipts then failed.
+      - name: Restore Tuesday core data cache
+        id: core-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            backend/data/processed/team_games
+            backend/data/processed/qb_games
+            backend/data/raw/depth_charts
+            backend/data/raw/injuries
+          key: nfl-core-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'backend/nflverse/data.py', 'backend/features/drives.py', 'backend/features/qb.py', 'backend/features/scoring.py') }}-refresh-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            nfl-core-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'backend/nflverse/data.py', 'backend/features/drives.py', 'backend/features/qb.py', 'backend/features/scoring.py') }}-
       - name: Refresh projection inputs
         run: >-
           poetry run python -m backend refresh-inputs
@@ -75,19 +89,6 @@ jobs:
             fi
             echo "run=false" >> "$GITHUB_OUTPUT"
           fi
-      - name: Restore Tuesday core data cache
-        id: core-cache
-        if: steps.upcoming.outputs.run == 'true'
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            backend/data/processed/team_games
-            backend/data/processed/qb_games
-            backend/data/raw/depth_charts
-            backend/data/raw/injuries
-          key: nfl-core-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'backend/nflverse/data.py', 'backend/features/drives.py', 'backend/features/qb.py', 'backend/features/scoring.py') }}-refresh-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: |
-            nfl-core-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'backend/nflverse/data.py', 'backend/features/drives.py', 'backend/features/qb.py', 'backend/features/scoring.py') }}-
       - name: Bootstrap missing core history
         if: steps.upcoming.outputs.run == 'true'
         run: >-
