@@ -39,12 +39,23 @@ QB_BASIS_PROXY = "prior_week_proxy"
 # correct), used by the historical backtest only. Proxy absence: proxy games
 # with the incumbent confirmed Out or Doubtful. The earlier grid-selected
 # 0.25 measured the proxy era's misidentification, not the value of a QB.
-DEFAULT_QB_WEIGHT_DATED = 0.90
-DEFAULT_QB_WEIGHT_PROXY = 0.45
-DEFAULT_QB_WEIGHT_PROXY_ABSENCE = 0.89
+# Reselected for qb_v9's strengths (0.90, 0.45 and 0.89 before).
+DEFAULT_QB_WEIGHT_DATED = 0.83
+DEFAULT_QB_WEIGHT_PROXY = 0.41
+DEFAULT_QB_WEIGHT_PROXY_ABSENCE = 0.82
 # The QB layer version names the starter-identification rule and its weight;
-# the preseason producer appends the same suffix to its own version.
-QB_LAYER_VERSION = "qb_v8"
+# the preseason producer appends the same suffix to its own version. Version 9
+# credits each game's EPA to the passer net of the opponent defense's pass EPA
+# allowed (pregame, shrunk) and lowers the replacement level, which is also the
+# mean every QB's record shrinks toward, from -0.08 to -0.1193 EPA per dropback
+# (qb_adjustment), so a backup's few good dropbacks rate him less far above a
+# poor starter. Holdout 2022-2025 against qb_v8: pure MAE 9.8120 to 9.8080,
+# blended 9.6077 to 9.6069, blended NLL 3.94987 to 3.94972. Rejected on the
+# same test: a supporting-cast term (the team's pass EPA beyond its passers'
+# expectation, which a long-tenured starter's own rating absorbs), excluding
+# low-leverage dropbacks (win probability outside 5-95, 10-90 or 20-80, or
+# 10-90 in the fourth quarter) and a larger development-selected prior.
+QB_LAYER_VERSION = "qb_v9"
 # Ruled-out regulars other than the quarterback (absence_layer), in points per
 # game lost. Selected on development seasons 2016-2021 like the QB weights: the
 # least-squares slope of the closing line's move away from the QB-adjusted pure

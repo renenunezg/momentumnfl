@@ -141,6 +141,30 @@ def ruled_out(
     return set(reports["gsis_id"].dropna())
 
 
+def with_ruled_out(
+    injuries: pd.DataFrame, season: int, week: int, players: dict[str, str]
+) -> pd.DataFrame:
+    """``injuries`` plus an Out report for each team -> gsis_id in ``players``
+    that ``ruled_out`` reads as pregame at any cutoff.
+
+    In a timestamped feed the added rows carry no date and are marked as an
+    untimestamped weekly report; an untimestamped feed gains no date column,
+    which would otherwise drop its own rows at the cutoff.
+    """
+    added = pd.DataFrame(
+        {
+            "season": season,
+            "week": week,
+            "team": list(players),
+            "gsis_id": list(players.values()),
+            "report_status": "Out",
+        }
+    )
+    if "date_modified" in injuries.columns:
+        added = added.assign(date_modified=pd.NaT, untimestamped_weekly_report=True)
+    return pd.concat([injuries, added], ignore_index=True)
+
+
 def depth_chart_starters(
     depth_charts: pd.DataFrame,
     season: int,

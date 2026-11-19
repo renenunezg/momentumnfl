@@ -351,3 +351,53 @@ def test_backtest_and_production_qb_context_ignore_target_week_outcomes():
     )
     assert early["A"] == "starter" and not early_out
     assert late["A"] == "backup" and late_out == {"starter"}
+
+
+def test_hypothetical_absence_reads_as_pregame_without_changing_real_reports():
+    cutoff = datetime(2026, 9, 1, tzinfo=UTC)
+    timestamped = pd.DataFrame(
+        [
+            dict(season=2026, week=1, gsis_id="early", report_status="Out"),
+            dict(season=2026, week=1, gsis_id="late", report_status="Out"),
+        ]
+    ).assign(date_modified=["2026-08-31T18:00Z", "2026-09-02T18:00Z"])
+    untimestamped = timestamped.drop(columns="date_modified")
+    for injuries, real in (
+        (timestamped, {"early"}),
+        (untimestamped, {"early", "late"}),
+    ):
+        added = qb_features.with_ruled_out(injuries, 2026, 1, {"A": "starter"})
+        assert qb_features.ruled_out(added, 2026, 1, cutoff) == real | {"starter"}
+
+
+def test_qb_credit_is_net_of_the_opponent_defense_from_earlier_weeks():
+    index = pd.DataFrame(
+        {
+            "game_id": ["w1", "w2"],
+            "season": 2025,
+            "model_week": [1, 2],
+            "start_date": [
+                datetime(2025, 9, 7, tzinfo=UTC),
+                datetime(2025, 9, 14, tzinfo=UTC),
+            ],
+        }
+    )
+    logs = pd.DataFrame(
+        [
+            ("w1", "A", "a", 20.0),
+            ("w1", "B", "b", -20.0),
+            ("w2", "C", "c", 0.0),
+            ("w2", "B", "b", 0.0),
+        ],
+        columns=["game_id", "team", "passer_player_id", "epa"],
+    ).assign(dropbacks=40, started=True)
+    history = qb.strength_history(logs, index, defense_prior=40).set_index(
+        ["game_id", "passer_player_id"]
+    )
+    # Week one has no defensive record yet, so credit is the raw EPA.
+    assert history.loc[("w1", "a"), "weighted_epa"] == pytest.approx(20.0)
+    # B allowed 0.5 EPA per dropback in week one against a league mean of 0,
+    # so c's even game against B is a loss once shrunk and aged a week.
+    aged = 0.5 ** (1 / qb.CALENDAR_HALF_LIFE_WEEKS)
+    allowed = 20.0 * aged / (40.0 * aged + 40.0)
+    assert history.loc[("w2", "c"), "weighted_epa"] == pytest.approx(-40 * allowed)

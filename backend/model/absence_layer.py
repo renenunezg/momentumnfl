@@ -28,6 +28,11 @@ from backend.players import EPA_TRAIT, war
 TRAIT_DIR = PROCESSED_DIR / "players" / "position_traits"
 FIRST_TRAIT_SEASON = 2016
 GROUPS = ("DB", "DL", "LB", "WR", "TE", "RB")
+# Kickers and punters, priced from their wins-above-replacement credit at the
+# 12-game shrinkage of development seasons 2016-2021, were left out
+# (2026-11-19): 43 development games price one, the closing line's move on
+# their absence margin is 2.1 points per point (standard error 2.4), and at
+# the production weight holdout 2022-2025 blended MAE goes 9.6077 to 9.6084.
 # Position traits cover the regular season only; playoff forecasts read its
 # final week.
 REGULAR_SEASON_WEEKS = 18

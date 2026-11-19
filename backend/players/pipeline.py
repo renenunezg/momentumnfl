@@ -143,29 +143,42 @@ def war_rows(
     )
 
 
-def spread_rows(snapshot: pd.DataFrame) -> pd.DataFrame:
+def spread_rows(snapshot: pd.DataFrame, as_of: datetime) -> pd.DataFrame:
     """One ``spread_value`` row per priced player-week: the points the team
-    model's line gives up if he is ruled out of the next game, as the
-    absence layer prices it. Quarterbacks have their own layer and the line
-    is rated as a unit, so neither carries one."""
+    model's line gives up if he is ruled out of the next game. The absence
+    layer prices its groups; for each team the QB layer prices the expected
+    starter's absence as the substitution it would make. The line is rated as
+    a unit and kickers and punters are not priced, so none carries one."""
     from backend.model import absence_layer
+    from backend.model.fit_week import qb_spread_values
     from backend.model.joint_scoring import DEFAULT_CONFIG
     from backend.model.projections import LayerConfig
 
     season = int(snapshot["season"].iloc[0])
     seasons = [s for s in (season - 1, season) if s >= absence_layer.FIRST_TRAIT_SEASON]
     identity = _identity(snapshot)
-    identity = identity[identity["position_group"].isin(absence_layer.GROUPS)]
+    priced = identity[identity["position_group"].isin(absence_layer.GROUPS)]
     values = absence_layer.spread_values(
         absence_layer.load_inputs(seasons),
         season,
-        identity[["week", "athlete_id", "team"]],
+        priced[["week", "athlete_id", "team"]],
         DEFAULT_CONFIG.rating_half_life_weeks,
         LayerConfig().absence_weight,
     )
-    if values.empty:
+    # The QB layer names the team whose margin moves; the snapshot's team can
+    # lag a trade.
+    quarterbacks = identity[identity["position_group"].eq("QB")].drop(columns="team")
+    out = pd.concat(
+        [
+            values.merge(priced, on=["week", "athlete_id"]),
+            qb_spread_values(season, sorted(identity["week"].unique()), as_of).merge(
+                quarterbacks, on=["week", "athlete_id"]
+            ),
+        ],
+        ignore_index=True,
+    )
+    if out.empty:
         return pd.DataFrame()
-    out = values.merge(identity, on=["week", "athlete_id"])
     out["percentile"] = _percentile(out["value"], [out["week"], out["position_group"]])
     return out.assign(
         trait=SPREAD_ROW,
@@ -236,7 +249,7 @@ def score_snapshot(
         traits,
         grade_rows(snapshot, model),
         war_scored,
-        spread_rows(snapshot),
+        spread_rows(snapshot, as_of),
         value_rows(snapshot, model, war_scored),
     ]
     out = pd.concat([part for part in parts if not part.empty], ignore_index=True)

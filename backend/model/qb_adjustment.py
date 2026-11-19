@@ -3,13 +3,23 @@
 from dataclasses import dataclass, field
 from math import isfinite
 
+import numpy as np
 import pandas as pd
 
-REPLACEMENT_EPA_PER_DROPBACK = -0.08
+# The level an unseen QB plays at, and the mean every QB's record shrinks
+# toward: what QBs with under 150 effective dropbacks produced in their starts,
+# net of the opponent, fitted on development seasons 2016-2021 at the
+# 200-dropback prior (407 starts; standard error 0.021). It was -0.08, above
+# those starts' raw -0.101.
+REPLACEMENT_EPA_PER_DROPBACK = -0.1193
 LEAGUE_DROPBACKS_PER_GAME = 34.0
 SHRINK_DROPBACKS = 200.0
 DEFAULT_SPAN_DROPBACKS = 1000.0
 CALENDAR_HALF_LIFE_WEEKS = 52.0
+# Shrinkage of the opponent-defense term, in dropbacks: fitted on development
+# seasons 2016-2021 to predict each QB-game's EPA per dropback from pregame
+# records (dropback-weighted squared error 0.11489 without it, 0.11218 with).
+DEFENSE_PRIOR_DROPBACKS = 320.0
 
 
 def strength_history(
@@ -18,37 +28,72 @@ def strength_history(
     span_dropbacks: float = DEFAULT_SPAN_DROPBACKS,
     calendar_half_life: float = CALENDAR_HALF_LIFE_WEEKS,
     prior_dropbacks: float = SHRINK_DROPBACKS,
+    defense_prior: float = DEFENSE_PRIOR_DROPBACKS,
 ) -> pd.DataFrame:
     """QB strength after each game, in raw points above a fixed replacement.
 
-    The fixed origin avoids using future league averages. A forecast must
-    select only prior weeks through context_before_week before using it.
+    Each game's EPA is credited to the passer net of the opponent: its
+    defense's pass EPA allowed per dropback above the league's, from games
+    before that week, shrunk toward zero by ``defense_prior`` dropbacks.
+    Defense and league records decay like a passer's. The fixed origin avoids
+    using future league averages. A forecast must select only prior weeks
+    through context_before_week before using it.
     """
     ordered = qb_games.merge(
         game_index[["game_id", "season", "model_week", "start_date"]], on="game_id"
-    ).sort_values(["passer_player_id", "start_date"])
-    if not all(
-        isfinite(x) and x > 0
-        for x in (span_dropbacks, calendar_half_life, prior_dropbacks)
-    ):
+    ).sort_values(["season", "model_week", "start_date", "game_id"])
+    sizes = (span_dropbacks, calendar_half_life, prior_dropbacks, defense_prior)
+    if not all(isfinite(x) and x > 0 for x in sizes):
         raise ValueError("QB memory and prior sizes must be finite and positive")
-    epa_states, weight_states = [], []
-    for _, group in ordered.groupby("passer_player_id", sort=False):
-        epa = weight = 0.0
-        previous_clock = None
-        for row in group.itertuples():
-            clock = row.season * 52 + row.model_week
-            elapsed = 0 if previous_clock is None else clock - previous_clock
-            decay = 0.5 ** (
-                row.dropbacks / span_dropbacks + elapsed / calendar_half_life
-            )
-            epa = decay * epa + row.epa
-            weight = decay * weight + row.dropbacks
-            epa_states.append(epa)
-            weight_states.append(weight)
-            previous_clock = clock
-    ordered["weighted_epa"] = epa_states
-    ordered["effective_dropbacks"] = weight_states
+    clock = (ordered["season"] * 52 + ordered["model_week"]).to_numpy()
+    passers = ordered["passer_player_id"].to_numpy()
+    dropbacks = ordered["dropbacks"].to_numpy(dtype=float)
+    epa = ordered["epa"].to_numpy(dtype=float)
+    opponents = _opponents(ordered)
+    # name -> [decayed EPA, decayed dropbacks, clock of the last update]
+    qbs: dict[str, list] = {}
+    defenses: dict[str, list] = {}
+    league = [0.0, 0.0, None]
+
+    def aged(state, now):
+        """A record's EPA and dropbacks at ``now`` under calendar decay."""
+        if state is None or state[2] is None:
+            return 0.0, 0.0
+        factor = 0.5 ** ((now - state[2]) / calendar_half_life)
+        return state[0] * factor, state[1] * factor
+
+    def add(records, key, gained, plays, now):
+        state = records.setdefault(key, [0.0, 0.0, None])
+        elapsed = 0 if state[2] is None else now - state[2]
+        decay = 0.5 ** (plays / span_dropbacks + elapsed / calendar_half_life)
+        state[:] = [decay * state[0] + gained, decay * state[1] + plays, now]
+
+    opponent = np.zeros(len(ordered))
+    weighted, effective = np.zeros(len(ordered)), np.zeros(len(ordered))
+    week_starts = np.flatnonzero(np.r_[True, clock[1:] != clock[:-1]])
+    for first, stop in zip(week_starts, np.r_[week_starts[1:], len(ordered)]):
+        now = clock[first]
+        league_epa, league_dropbacks = aged(league, now)
+        mean = league_epa / league_dropbacks if league_dropbacks > 0 else 0.0
+        for i in range(first, stop):
+            allowed, faced = aged(defenses.get(opponents[i]), now)
+            opponent[i] = (allowed + mean * defense_prior) / (
+                faced + defense_prior
+            ) - mean
+        faced_by: dict[str, list[float]] = {}
+        for i in range(first, stop):
+            add(qbs, passers[i], epa[i] - dropbacks[i] * opponent[i], dropbacks[i], now)
+            weighted[i], effective[i] = qbs[passers[i]][:2]
+            totals = faced_by.setdefault(opponents[i], [0.0, 0.0])
+            totals[0] += epa[i]
+            totals[1] += dropbacks[i]
+        for defense, (gained, plays) in faced_by.items():
+            add(defenses, defense, gained, plays, now)
+            league_epa, league_dropbacks = aged(league, now)
+            league[:] = [league_epa + gained, league_dropbacks + plays, now]
+    ordered["opponent_epa_per_dropback"] = opponent
+    ordered["weighted_epa"] = weighted
+    ordered["effective_dropbacks"] = effective
     ordered["calendar_half_life"] = calendar_half_life
     ordered["prior_dropbacks"] = prior_dropbacks
     ordered["strength_points"] = (
@@ -59,7 +104,20 @@ def strength_history(
         / (ordered["effective_dropbacks"] + prior_dropbacks)
         * LEAGUE_DROPBACKS_PER_GAME
     )
-    return ordered.sort_values("start_date")
+    return ordered.sort_values("start_date", kind="stable")
+
+
+def _opponents(games: pd.DataFrame) -> np.ndarray:
+    """Each row's opponent: the other team with dropbacks in its game."""
+    sides = games.groupby("game_id")["team"].unique()
+    if not sides.map(len).le(2).all():
+        raise ValueError("A QB game lists more than two teams")
+    lookup = {
+        (game, team): next((t for t in pair if t != team), None)
+        for game, pair in sides.items()
+        for team in pair
+    }
+    return np.array([lookup[key] for key in zip(games["game_id"], games["team"])])
 
 
 @dataclass(frozen=True)

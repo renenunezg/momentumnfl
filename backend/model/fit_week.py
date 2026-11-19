@@ -126,6 +126,102 @@ def compute_qb_adjustments(
     return adjustments
 
 
+def qb_absence_values(
+    season: int,
+    week: int,
+    qb_games: pd.DataFrame,
+    depth_charts: pd.DataFrame,
+    injuries: pd.DataFrame,
+    config: JointScoringConfig,
+    layer_config: LayerConfig,
+    as_of: datetime,
+) -> pd.DataFrame:
+    """``team, athlete_id, value``: the points each team's projected margin
+    gives up if its expected starter at ``as_of`` is ruled out, as the QB layer
+    prices it: his adjustment less that of the starter it names with him listed
+    Out, each at the weight it applies. A team without a QB baseline prices no
+    substitution, and one whose starter is a verified override would refuse
+    the absence, so neither has a row."""
+    context, expected, weights = forecast_qb_context(
+        season, week, qb_games, depth_charts, config, layer_config, as_of, injuries
+    )
+    overrides = qb_features.load_qb_overrides()
+    overridden = set(
+        overrides.loc[
+            overrides["season"].eq(season) & overrides["week"].eq(week), "team_abbr"
+        ]
+    )
+    starters = {
+        team: passer
+        for team, passer in expected.items()
+        if team in context.baselines and team not in overridden
+    }
+    columns = ["team", "athlete_id", "value"]
+    if not starters:
+        return pd.DataFrame(columns=columns)
+    _, replaced, replaced_weights = forecast_qb_context(
+        season,
+        week,
+        qb_games,
+        depth_charts,
+        config,
+        layer_config,
+        as_of,
+        qb_features.with_ruled_out(injuries, season, week, starters),
+    )
+    return pd.DataFrame(
+        [
+            (
+                team,
+                passer,
+                context.adjustment(team, passer, weights[team])
+                - context.adjustment(
+                    team, replaced.get(team), replaced_weights.get(team, 0.0)
+                ),
+            )
+            for team, passer in starters.items()
+        ],
+        columns=columns,
+    )
+
+
+def qb_spread_values(
+    season: int,
+    weeks,
+    as_of: datetime,
+    config: JointScoringConfig = DEFAULT_CONFIG,
+    layer_config: LayerConfig = LayerConfig(),
+) -> pd.DataFrame:
+    """``week, team, athlete_id, value``: after week ``w``, ``qb_absence_values``
+    for week ``w + 1`` at its forecast cutoff, the second before its first
+    kickoff or ``as_of`` if earlier, with the injuries a forecast then reads."""
+    qb_games = store.qb_games(list(range(HISTORY_START_SEASON, season + 1)))
+    depth_charts = load_depth_charts(season)
+    parts = []
+    for week in weeks:
+        target = int(week) + 1
+        kickoffs = pd.to_datetime(week_slate(season, target)["start_date"], utc=True)
+        cutoff = as_of
+        if kickoffs.notna().any():
+            cutoff = min(
+                as_of, (kickoffs.min() - pd.Timedelta(seconds=1)).to_pydatetime()
+            )
+        values = qb_absence_values(
+            season,
+            target,
+            qb_games,
+            depth_charts,
+            load_injuries(season, target, cutoff),
+            config,
+            layer_config,
+            cutoff,
+        )
+        parts.append(values.assign(week=int(week)))
+    if not parts:
+        return pd.DataFrame(columns=["week", "team", "athlete_id", "value"])
+    return pd.concat(parts, ignore_index=True)[["week", "team", "athlete_id", "value"]]
+
+
 def load_depth_charts(season: int) -> pd.DataFrame:
     try:
         return store.read_raw("depth_charts", f"{season}.parquet")
